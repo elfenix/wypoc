@@ -60,8 +60,8 @@ wypoc/
   wyrm_io.py           POSIX-ish low-level I/O primitives exposed to wyrm
   cli.py               the `wyrm` command
   lsp.py               the `wyrm-lsp` language server (diagnostics only)
-  samples/             *.wy fixtures used by the test_*.py scripts
-  test_*.py            the test suite — standalone scripts, no framework
+  samples/             *.wy fixtures used by test/
+test/                  pytest suite (see "Commands")
 ```
 
 See `wypoc/README.md` for the full pipeline walkthrough (tokenizer → pegen parser → AST →
@@ -73,10 +73,10 @@ uses a simplified linearization, LSP is diagnostics-only).
 ## Commands
 
 ```bash
-python -m venv .venv && .venv/bin/python -m pip install -e ".[lsp]"   # setup
+python -m venv .venv && .venv/bin/python -m pip install -e ".[lsp,dev]"   # setup
 
-PYTHONPATH=. .venv/bin/python wypoc/test_grammar.py   # run one test script
-for t in wypoc/test_*.py; do PYTHONPATH=. .venv/bin/python "$t" || echo "FAILED: $t"; done
+.venv/bin/pytest                                       # run the whole test suite
+.venv/bin/pytest test/test_grammar.py                  # run one test file
 
 .venv/bin/wyrm path/to/script.wy                       # run a .wy script
 .venv/bin/python -m pegen wypoc/wyrm.gram -o wypoc/parser.py -q   # regenerate parser.py
@@ -84,8 +84,13 @@ for t in wypoc/test_*.py; do PYTHONPATH=. .venv/bin/python "$t" || echo "FAILED:
 ```
 
 `parser.py` is generated output — edit `wypoc/wyrm.gram`, then regenerate; never
-hand-edit `parser.py` directly. After any grammar change, run `test_grammar.py` first
-(it parses every `samples/*.wy` fixture and fails loudly on syntax errors).
+hand-edit `parser.py` directly. After any grammar change, run `test/test_grammar.py`
+first (it parses every `samples/*.wy` fixture and fails loudly on syntax errors).
+
+**`pytest` must run clean (zero failures) at all times.** Any change that breaks a test
+is not done until the test suite passes again — either fix the code, or update the test
+if the behavior change was intentional. Don't leave a known-broken test in place, and
+don't skip/xfail a test to work around a real regression instead of fixing it.
 
 ## Coding Standards
 
@@ -93,9 +98,9 @@ hand-edit `parser.py` directly. After any grammar change, run `test_grammar.py` 
   value/type system faithfully, that's the point of a PoC.
 - One dataclass per grammar construct in `ast_nodes.py`; `Node.__str__` is generic via
   `dataclasses.fields`, don't write per-node pretty-printers.
-- Tests are standalone `test_*.py` scripts with a `main()` printing `OK`/`FAIL` and a
-  process exit code — no pytest/unittest framework in use here; keep new tests in that
-  style for consistency.
+- Tests live under `test/` and use pytest (plain `assert`, fixtures, `pytest.mark.parametrize`);
+  keep new tests in that style. Shared helpers (`eval_sample`, `SAMPLES_DIR`, ...) live in
+  `test/conftest.py`.
 - Keep `corelib/`'s wyrm-language stdlib written in wyrm itself (`.wy` files), not Python.
 
 ## Issue and PR Guidelines

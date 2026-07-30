@@ -31,8 +31,8 @@ wypoc/
   wyrm_io.py              POSIX-ish low-level I/O primitives (__open/__read/...)
   cli.py                  the `wyrm` command (installed via pyproject.toml)
   lsp.py                  the `wyrm-lsp` language server (diagnostics only)
-  samples/                *.wy fixtures used by the test_*.py scripts below
-  test_*.py               the test suite (see "Running the tests")
+  samples/                *.wy fixtures used by the test suite below
+test/                     pytest suite (see "Running the tests")
 ```
 
 ## Pipeline
@@ -212,7 +212,7 @@ package uses, and publishes any `SyntaxError` as an LSP diagnostic. That's
 it - no hover, go-to-definition, or completion (see "Known gaps"). The
 document-to-diagnostics logic is factored out as a plain function,
 `diagnostics_for_source(text) -> list[Diagnostic]`, specifically so it's
-unit-testable (`test_lsp.py`) without spinning up a real JSON-RPC/stdio
+unit-testable (`test/test_lsp.py`) without spinning up a real JSON-RPC/stdio
 server.
 
 ```bash
@@ -228,17 +228,25 @@ locally.
 
 ## Running the tests
 
-There's no test runner/framework here - each `test_*.py` is a standalone
-script with a `main()` that prints `OK`/`FAIL` per check and returns a
-process exit code, run directly:
+The suite lives under `test/` and uses [pytest](https://docs.pytest.org/); shared
+helpers (`eval_sample`, `SAMPLES_DIR`, ...) live in `test/conftest.py`. Run the whole
+suite from the repo root:
 
 ```bash
-PYTHONPATH=. .venv/bin/python wypoc/test_grammar.py
+.venv/bin/pytest
 ```
 
-| Script | Covers |
+Or a single file:
+
+```bash
+.venv/bin/pytest test/test_grammar.py
+```
+
+`pytest` is expected to run clean (zero failures) at all times - see `AGENTS.md`.
+
+| File | Covers |
 | --- | --- |
-| `test_grammar.py` | Regenerates nothing itself, but parses every `samples/*.wy` fixture and fails loudly on any syntax error - the grammar's own regression suite. Run this after any `wyrm.gram` change (post-regeneration). |
+| `test_grammar.py` | Parses every `samples/*.wy` fixture and fails loudly on any syntax error - the grammar's own regression suite. Run this after any `wyrm.gram` change (post-regeneration). |
 | `test_eval.py` | Basic single/multi-target assignment, literals, string escaping/raw/multiline decoding, arithmetic. |
 | `test_eval_functions.py` | Calls, default args, `*args`, lambdas, `if`/`elif`/`else` as return-bearing control flow. |
 | `test_eval_control_flow.py` | `while` + `break`/`continue`, `for`/`else` (Python-style: `else` runs only if the loop wasn't broken out of), early `return` from inside a loop. |
@@ -247,15 +255,8 @@ PYTHONPATH=. .venv/bin/python wypoc/test_grammar.py
 | `test_eval_builtins.py` | `expose`/`expose_all`/`builtin` - handing Python callables/values to wyrm code. |
 | `test_eval_modules.py` | `WYRM_PATH` resolution (default + override), package `__init__.wy` loading, `::` module/submodule access, `from ... import`, `using` (bulk and aliased-single-name forms). |
 | `test_eval_io.py` | `wyrm_io.py`'s primitives: write/read round-trip, `lseek`, `dup2` handle aliasing (shared file position), `close`/`flush`, and that a closed handle raises. |
-| `test_cli.py` | The *installed* `wyrm` console script via `subprocess` - arg packing (including args that look like flags), all four exit-code/error paths. Requires `pip install -e .` first. |
-| `test_lsp.py` | `diagnostics_for_source()` directly (no JSON-RPC/server involved): clean source -> no diagnostics, a syntax error -> exactly one diagnostic on the right (0-indexed) line, and every bundled sample fixture is confirmed diagnostic-free. Requires `pip install -e ".[lsp]"` first. |
-
-Run the whole suite:
-
-```bash
-cd /path/to/repo
-for t in wypoc/test_*.py; do PYTHONPATH=. .venv/bin/python "$t" || echo "FAILED: $t"; done
-```
+| `test_cli.py` | The *installed* `wyrm` console script via `subprocess` - arg packing (including args that look like flags), all four exit-code/error paths. Skipped if the `wyrm` console script isn't installed. |
+| `test_lsp.py` | `diagnostics_for_source()` directly (no JSON-RPC/server involved): clean source -> no diagnostics, a syntax error -> exactly one diagnostic on the right (0-indexed) line, and every bundled sample fixture is confirmed diagnostic-free. |
 
 ## Known gaps
 
