@@ -46,9 +46,10 @@ semantics validation, not memory layout or dispatch performance.
 
 ```
 doc/                 language spec / grammar / design docs (see above)
-corelib/              small wyrm-language standard library (shapes.wy, std/, wyrm/)
 editors/vscode/       syntax highlighting + LSP client extension
 wypoc/
+  corelib/             small wyrm-language standard library (shapes.wy, std/, wyrm/),
+                        installed as package data
   wyrm_tokenizer.py    hand-rolled lexer -> tokenize.TokenInfo stream
   wyrm.gram            pegen grammar source
   parser.py            GENERATED from wyrm.gram — do not hand-edit (see Commands)
@@ -101,7 +102,7 @@ don't skip/xfail a test to work around a real regression instead of fixing it.
 - Tests live under `test/` and use pytest (plain `assert`, fixtures, `pytest.mark.parametrize`);
   keep new tests in that style. Shared helpers (`eval_sample`, `SAMPLES_DIR`, ...) live in
   `test/conftest.py`.
-- Keep `corelib/`'s wyrm-language stdlib written in wyrm itself (`.wy` files), not Python.
+- Keep `wypoc/corelib/`'s wyrm-language stdlib written in wyrm itself (`.wy` files), not Python.
 
 ## Issue and PR Guidelines
 

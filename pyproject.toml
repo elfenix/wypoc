@@ -23,7 +23,7 @@ wyrm-lsp = "wypoc.lsp:main"
 packages = ["wypoc"]
 
 [tool.setuptools.package-data]
-wypoc = ["*.gram"]
+wypoc = ["*.gram", "corelib/**/*.wy"]
 
 [tool.pytest.ini_options]
 testpaths = ["test"]

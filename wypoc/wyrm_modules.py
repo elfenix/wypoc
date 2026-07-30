@@ -2,7 +2,8 @@
 
 Mirrors Python's own import machinery closely enough to be familiar:
   - WYRM_PATH (colon-separated, like PYTHONPATH) lists directories to search,
-    checked in order, with the repo's corelib/ directory as a final fallback.
+    checked in order, with wypoc's own corelib/ directory (installed as
+    package data) as a final fallback.
   - `import std::io` looks for <root>/std/io.wy under each search root.
   - `import std` (a directory) looks for <root>/std/__init__.wy, matching
     Python's package convention (a bare directory with no __init__.wy isn't
@@ -17,8 +18,7 @@ around, to avoid a parse/eval <-> path-resolution import cycle).
 import os
 
 _WYPOC_DIR = os.path.dirname(os.path.abspath(__file__))
-_REPO_ROOT = os.path.dirname(_WYPOC_DIR)
-DEFAULT_COREPATH = os.path.join(_REPO_ROOT, "corelib")
+DEFAULT_COREPATH = os.path.join(_WYPOC_DIR, "corelib")
 
 
 def search_paths(env: dict = None) -> list:

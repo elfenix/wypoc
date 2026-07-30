@@ -18,8 +18,9 @@ of not modeling wyrm's real value/type system at all.
 ```
 doc/grammar.ebnf         reference EBNF grammar (source of truth for syntax)
 doc/language-spec.md     prose spec with worked examples
-corelib/                 a tiny wyrm-language standard library (see below)
 wypoc/
+  corelib/                a tiny wyrm-language standard library (see below),
+                           installed as package data
   wyrm_tokenizer.py       hand-rolled lexer -> tokenize.TokenInfo stream
   wyrm.gram               the PEG grammar (pegen source), derived from grammar.ebnf
   parser.py               generated from wyrm.gram - do not hand-edit, see below
@@ -155,8 +156,9 @@ in scope (not just via `this.slot`) - see `call_overload`'s docstring.
 
 **Modules** (`wyrm_modules.py` + the `Module`/`import_module` machinery in
 `wyrm_eval_parse_tree.py`): `WYRM_PATH` (colon-separated, like `PYTHONPATH`)
-is searched in order, with `corelib/` (derived at runtime from `wypoc`'s own
-location, not hardcoded) as the final fallback. `import std::io` looks for
+is searched in order, with `wypoc/corelib/` (derived at runtime from
+`wypoc`'s own installed location, not hardcoded) as the final fallback.
+`import std::io` looks for
 `<root>/std/io.wy`; `import std` (a directory) looks for
 `<root>/std/__init__.wy`, mirroring Python's package convention exactly
 (including loading parent packages before children, and registering
@@ -177,10 +179,13 @@ tiny example).
 
 ### `corelib/` and the `wyrm` command
 
-`corelib/` is a small standard library written in wyrm, demonstrating the
-module system: `shapes.wy` (single-file module), `std/__init__.wy` (package
-marker), `std/io.wy` (a submodule, using the `!`-less plain-`fn` form -
-`println`). The `wyrm` command (installed via this repo's top-level
+`wypoc/corelib/` is a small standard library written in wyrm, demonstrating
+the module system: `shapes.wy` (single-file module), `std/__init__.wy`
+(package marker), `std/io.wy` (a submodule, using the `!`-less plain-`fn`
+form - `println`). It's declared as package data
+(`[tool.setuptools.package-data] wypoc = ["corelib/**/*.wy"]` in
+`pyproject.toml`), so it's included in both editable installs and built
+wheels. The `wyrm` command (installed via this repo's top-level
 `pyproject.toml`, `[project.scripts] wyrm = "wypoc.cli:main"`) is wyrm's
 equivalent of the `python` binary:
 
@@ -197,11 +202,11 @@ real file/line/caret (exit 1); a missing script file or missing script
 argument exits 2; a runtime error is reported as `wyrm: ErrorType: message`
 (exit 1) rather than a raw Python traceback.
 
-Note: `corelib/`'s default discovery is computed from `wypoc`'s own
-location at runtime, so it only resolves correctly for an editable install
-(`pip install -e .`, which keeps the source tree in place) - a built wheel
-wouldn't carry `corelib/` along unless it were declared as real package
-data.
+Note: `DEFAULT_COREPATH`'s discovery is computed from `wypoc`'s own
+installed location at runtime (`wypoc/corelib`, a sibling of
+`wyrm_modules.py`), so it resolves correctly for both an editable install
+and a built wheel, since `corelib/` now lives inside the `wypoc` package
+and ships as real package data.
 
 ### `wyrm-lsp` and the VS Code extension
 
