@@ -1,0 +1,414 @@
+# Make-shift lexxer for the wyrm language - a wyrm port of wypoc's own
+# hand-rolled Python tokenizer (wypoc/wyrm_tokenizer.py). Token *types* are
+# symbols ('NAME, 'NUMBER, 'STRING, 'OP, 'NEWLINE, 'INDENT, 'DEDENT,
+# 'ENDMARKER, 'CHAR, 'ERROR) rather than an imported constant table, the way
+# 'EOF below is already used as this file's own end-of-input sentinel.
+import std::io;
+using std::io;
+
+
+SINGLE_OPS = (\(, \), \[, \], \{, \}, \., \,, \:, \+, \-, \*, \/, \%, \&, \|, \^, \<, \>, \=, \!, \$, \')
+
+OPEN_BRACKETS = "(["
+CLOSE_BRACKETS = ")]"
+
+# Longest-first doesn't matter here (every entry is 2 chars), but kept in
+# the same order as wypoc/wyrm_tokenizer.py's MULTI_OPS for easy comparison.
+MULTI_OPS = ["**", "->", "<-", "<=", ">=", "==", "!=", "::", "?="]
+
+
+# Each of these must check for 'EOF itself, up front: wyrm's `and`/`or`
+# don't short-circuit (every operand is always evaluated), so a range
+# comparison later in the expression would otherwise run on 'EOF
+# regardless of an earlier operand already having ruled it out.
+
+fn _is_digit(c):
+    if c == 'EOF:
+        return false
+    return c >= \0 and c <= \9
+
+fn _is_alpha(c):
+    if c == 'EOF:
+        return false
+    return (c >= \a and c <= \z) or (c >= \A and c <= \Z) or c == \_
+
+fn _is_ident_start(c):
+    return _is_alpha(c)
+
+fn _is_ident_cont(c):
+    return _is_alpha(c) or _is_digit(c)
+
+fn _is_hex_digit(c):
+    if c == 'EOF:
+        return false
+    return _is_digit(c) or (c >= \a and c <= \f) or (c >= \A and c <= \F)
+
+fn _is_space(c):
+    return c == \space or c == \tab
+
+
+class Token:
+    slot type = 'ENDMARKER
+    slot text: str = ""
+    slot line: int = 0
+    slot col: int = 0
+
+
+class Tokenizer:
+    slot buffer: str = ""
+    slot line: int = 0
+    slot col: int = 0
+    slot current: int = 0
+    slot block_stack: pair = '()   # stack of 'bracket/'brace, one per open ( [ {
+    slot indent_stack: pair = '()  # stack of int indent widths; empty means top is 0
+    slot pending_dedents: int = 0
+    slot pending_indent: bool = false
+    slot at_line_start: bool = true
+
+    # -- low-level character access -----------------------------------
+
+    fn _getchar() -> int:
+        if current >= len(buffer):
+            return 'EOF
+        return buffer[current]
+
+    fn _peekchar(offset: int) -> int:
+        idx = current + offset
+        if idx >= len(buffer) or idx < 0:
+            return 'EOF
+        return buffer[idx]
+
+    fn _advance_line():
+        col = 0
+
+    #: Grab current character and advance to next, tracking line/col.
+    fn _consume_char() {
+        if current >= len(buffer) {
+            return 'EOF
+        }
+        val = this!_getchar()
+        current = current + 1
+        if val == \newline {
+            line = line + 1
+            this!_advance_line()
+        } else {
+            col = col + 1
+        }
+        return val
+    }
+
+    fn _make_token(kind, text: str, tline: int, tcol: int) -> Token:
+        t = new Token()
+        t.type = kind
+        t.text = text
+        t.line = tline
+        t.col = tcol
+        return t
+
+    # -- block/indent stack helpers -------------------------------------
+
+    fn _in_brackets() -> bool:
+        return 'bracket in block_stack
+
+    fn _in_any_block() -> bool:
+        return block_stack != nil
+
+    fn _indent_top() -> int:
+        if indent_stack == nil:
+            return 0
+        return car(indent_stack)
+
+    # -- comments / blank-line / indentation handling --------------------
+
+    fn _skip_line_comment():
+        while this!_getchar() != \newline and this!_getchar() != 'EOF:
+            this!_consume_char()
+
+    fn _measure_indent() -> int:
+        n = 0
+        while this!_getchar() == \space or this!_getchar() == \tab:
+            this!_consume_char()
+            n = n + 1
+        return n
+
+    # Consumes blank/comment-only lines, leaving `current` at the first
+    # non-blank line's first non-indent character. Returns that line's
+    # indent width, or 'EOF at end of input.
+    fn _consume_blank_lines():
+        while true:
+            indent = this!_measure_indent()
+            c = this!_getchar()
+            if c == 'EOF:
+                return 'EOF
+            if c == \newline:
+                this!_consume_char()
+            elif c == \#:
+                this!_skip_line_comment()
+            else:
+                return indent
+
+    fn _handle_indentation():
+        if at_line_start and not this!_in_any_block():
+            indent = this!_consume_blank_lines()
+            if indent == 'EOF:
+                at_line_start = false
+            else:
+                top = this!_indent_top()
+                if indent > top:
+                    indent_stack = cons(indent, indent_stack)
+                    pending_indent = true
+                else:
+                    while indent < this!_indent_top():
+                        indent_stack = cdr(indent_stack)
+                        pending_dedents = pending_dedents + 1
+                at_line_start = false
+
+    # -- token scanners ---------------------------------------------------
+
+    fn _scan_name() -> Token:
+        startpos = current
+        tline = line
+        tcol = col
+        while _is_ident_cont(this!_getchar()):
+            this!_consume_char()
+        text = buffer ! substr(startpos, current - startpos)
+        return this!_make_token('NAME, text, tline, tcol)
+
+    fn _scan_number() -> Token:
+        startpos = current
+        tline = line
+        tcol = col
+        if this!_getchar() == \0 and (this!_peekchar(1) == \x or this!_peekchar(1) == \X):
+            this!_consume_char()
+            this!_consume_char()
+            while _is_hex_digit(this!_getchar()) or this!_getchar() == \_:
+                this!_consume_char()
+            text = buffer ! substr(startpos, current - startpos)
+            return this!_make_token('NUMBER, text, tline, tcol)
+
+        while _is_digit(this!_getchar()) or this!_getchar() == \_:
+            this!_consume_char()
+
+        if this!_getchar() == \. and _is_digit(this!_peekchar(1)):
+            this!_consume_char()
+            while _is_digit(this!_getchar()) or this!_getchar() == \_:
+                this!_consume_char()
+
+        if this!_getchar() == \e or this!_getchar() == \E:
+            save_current = current
+            save_line = line
+            save_col = col
+            this!_consume_char()
+            if this!_getchar() == \+ or this!_getchar() == \-:
+                this!_consume_char()
+            if _is_digit(this!_getchar()):
+                while _is_digit(this!_getchar()):
+                    this!_consume_char()
+            else:
+                current = save_current
+                line = save_line
+                col = save_col
+
+        text = buffer ! substr(startpos, current - startpos)
+        return this!_make_token('NUMBER, text, tline, tcol)
+
+    fn _scan_string() -> Token:
+        tline = line
+        tcol = col
+        startpos = current
+        if this!_getchar() == \" and this!_peekchar(1) == \" and this!_peekchar(2) == \":
+            this!_consume_char()
+            this!_consume_char()
+            this!_consume_char()
+            while not (this!_getchar() == \" and this!_peekchar(1) == \"):
+                if this!_getchar() == 'EOF:
+                    return this!_make_token('ERROR, "unterminated multiline string", tline, tcol)
+                this!_consume_char()
+            this!_consume_char()
+            this!_consume_char()
+            text = buffer ! substr(startpos, current - startpos)
+            return this!_make_token('STRING, text, tline, tcol)
+
+        this!_consume_char()
+        while this!_getchar() != \":
+            c = this!_getchar()
+            if c == 'EOF or c == \newline:
+                return this!_make_token('ERROR, "unterminated string", tline, tcol)
+            if c == \\:
+                this!_consume_char()
+            this!_consume_char()
+        this!_consume_char()
+        text = buffer ! substr(startpos, current - startpos)
+        return this!_make_token('STRING, text, tline, tcol)
+
+    fn _scan_raw_string() -> Token:
+        tline = line
+        tcol = col
+        startpos = current
+        this!_consume_char()
+        this!_consume_char()
+        tagstart = current
+        while _is_ident_cont(this!_getchar()):
+            this!_consume_char()
+        tag = buffer ! substr(tagstart, current - tagstart)
+        this!_consume_char()
+        closer = ")" + tag + "\""
+        closelen = len(closer)
+        while true:
+            if this!_getchar() == 'EOF:
+                return this!_make_token('ERROR, "unterminated raw string", tline, tcol)
+            if buffer!substr(current, closelen) == closer:
+                i = 0
+                while i < closelen:
+                    this!_consume_char()
+                    i = i + 1
+                break
+            this!_consume_char()
+        text = buffer ! substr(startpos, current - startpos)
+        return this!_make_token('STRING, text, tline, tcol)
+
+    fn _scan_char_literal() -> Token:
+        tline = line
+        tcol = col
+        startpos = current
+        this!_consume_char()
+        first = this!_getchar()
+        this!_consume_char()
+        if _is_ident_start(first):
+            while _is_ident_cont(this!_getchar()):
+                this!_consume_char()
+        text = buffer ! substr(startpos, current - startpos)
+        return this!_make_token('CHAR, text, tline, tcol)
+
+    fn _match_multi_op() -> str:
+        two = buffer ! substr(current, 2)
+        for op in MULTI_OPS:
+            if two == op:
+                return op
+        return ""
+
+    # -- main entry: pull one token per call, like a generator's next() --
+
+    fn scan() -> Token:
+        # _handle_indentation runs first (it's a no-op once at_line_start is
+        # already false), so a dedent/indent it detects THIS call is seen by
+        # the checks below immediately - not one token late, on the next
+        # call, which would emit it after the following token instead of
+        # before.
+        this!_handle_indentation()
+
+        if pending_dedents > 0:
+            pending_dedents = pending_dedents - 1
+            return this!_make_token('DEDENT, "", line, col)
+
+        if pending_indent:
+            pending_indent = false
+            return this!_make_token('INDENT, "", line, col)
+
+        while true:
+            c = this!_getchar()
+            tline = line
+            tcol = col
+
+            if c == 'EOF:
+                while this!_indent_top() > 0:
+                    indent_stack = cdr(indent_stack)
+                    pending_dedents = pending_dedents + 1
+                if pending_dedents > 0:
+                    pending_dedents = pending_dedents - 1
+                    return this!_make_token('DEDENT, "", tline, tcol)
+                return this!_make_token('ENDMARKER, "", tline, tcol)
+
+            if c == \newline:
+                if this!_in_brackets():
+                    this!_consume_char()
+                else:
+                    this!_consume_char()
+                    at_line_start = true
+                    return this!_make_token('NEWLINE, "\n", tline, tcol)
+                continue
+
+            if _is_space(c):
+                this!_consume_char()
+                continue
+
+            if c == \#:
+                this!_skip_line_comment()
+                continue
+
+            if c == \;:
+                this!_consume_char()
+                return this!_make_token('NEWLINE, ";", tline, tcol)
+
+            if c == \\ and (this!_peekchar(1) == \newline or this!_peekchar(1) == 'EOF):
+                this!_consume_char()
+                continue
+
+            if c == \":
+                return this!_scan_string()
+
+            if (c == \R or c == \r) and this!_peekchar(1) == \":
+                return this!_scan_raw_string()
+
+            if c == \\:
+                return this!_scan_char_literal()
+
+            if _is_digit(c):
+                return this!_scan_number()
+
+            if _is_ident_start(c):
+                return this!_scan_name()
+
+            if c in OPEN_BRACKETS:
+                block_stack = cons('bracket, block_stack)
+                this!_consume_char()
+                return this!_make_token('OP, buffer!substr(current - 1, 1), tline, tcol)
+
+            if c in CLOSE_BRACKETS:
+                if block_stack != nil:
+                    block_stack = cdr(block_stack)
+                this!_consume_char()
+                return this!_make_token('OP, buffer!substr(current - 1, 1), tline, tcol)
+
+            if c == \{:
+                block_stack = cons('brace, block_stack)
+                this!_consume_char()
+                return this!_make_token('OP, "{", tline, tcol)
+
+            if c == \}:
+                if block_stack != nil:
+                    block_stack = cdr(block_stack)
+                this!_consume_char()
+                return this!_make_token('OP, "}", tline, tcol)
+
+            multi = this!_match_multi_op()
+            if multi != "":
+                this!_consume_char()
+                this!_consume_char()
+                return this!_make_token('OP, multi, tline, tcol)
+
+            if c in SINGLE_OPS:
+                this!_consume_char()
+                return this!_make_token('OP, buffer!substr(current - 1, 1), tline, tcol)
+
+            text = buffer ! substr(current, 1)
+            this!_consume_char()
+            return this!_make_token('ERROR, text, tline, tcol)
+
+
+fn main():
+    _filename = __ARGS[0]
+
+    _dfile = std::io::open(_filename, "r")
+    tok = new Tokenizer()
+    tok.buffer = _dfile!readall()
+    _dfile!close()
+
+    while true:
+        t = tok!scan()
+        println(t.type, t.line, t.col, t.text)
+        if t.type == 'ENDMARKER:
+            break
+
+
+main()

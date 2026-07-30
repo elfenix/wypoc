@@ -1,0 +1,26 @@
+# IDE / Editor files
+.vs
+.vscode
+.idea
+.cache
+__pycache__
+
+*~
+*.swp
+*.bak
+CMakeSettings.json
+cmake-build-*
+buildDir
+
+# Builds
+out
+build
+build.*
+build-*
+*.egg-info
+node_modules
+*.vsix
+
+# Temporary / working files
+doc.tmp
+gen

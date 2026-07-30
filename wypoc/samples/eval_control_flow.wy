@@ -1,0 +1,31 @@
+i: int = 0
+seen: int = 0
+while i < 5:
+    i = i + 1
+    if i == 3:
+        continue
+    if i == 5:
+        break
+    seen = seen + i
+
+total: int = 0
+for x in [1, 2, 3, 4, 5]:
+    if x == 4:
+        break
+    total = total + x
+else:
+    total = -1
+
+summed: int = 0
+for x in [1, 2, 3]:
+    summed = summed + x
+else:
+    summed = summed + 100
+
+fn first_even(items):
+    for x in items:
+        if x % 2 == 0:
+            return x
+    return -1
+
+found_even = first_even([1, 3, 4, 5])

@@ -1,0 +1,11 @@
+class Shape:
+    slot name: str = "shape"
+
+    fn area() -> float:
+        return 0.0
+
+class Circle(Shape):
+    slot radius: float = 1.0
+
+    fn area() -> float:
+        return 3.14159 * radius * radius

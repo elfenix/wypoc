@@ -1,0 +1,117 @@
+import mod
+import mod::baz::bar
+
+from mod import function
+
+using math
+using math::sin
+using sin = math::sin
+
+foo: int = 5
+foo, bar = 5, 4
+foo: int
+foo ?= 5
+foo_with_type: int ?= 5
+
+with speed_of_light: float = 299_792_458.0
+
+with:
+    speed_of_light: float = 299_792_458.0
+    gravitational_constant = 6.6743e-11
+
+if foo:
+    action()
+another_action()
+
+if foo { action(); } another_action();
+
+if defined('foo):
+    foo = foo + 1
+else:
+    foo = 1
+
+fn hello():
+    pass
+
+fn message() -> str:
+    return "Hello World"
+
+fn message(name) -> str:
+    return "Hello " + name
+
+fn message(*arguments) -> str:
+    greeting, name = arguments
+    return greeting + name
+
+fn message(name: str, greeting: str = "Hello") -> str:
+    return greeting + name
+
+fn message(name: str, /, greeting: str = "Hello") -> str:
+    return greeting + name
+
+fn message(**kwargs) -> str:
+    return kwargs["greeting"] + kwargs["name"]
+
+fn call_count():
+    $foo: int ?= 0
+    $foo = $foo + 1
+    return $foo
+
+arr_len = array_object!length()
+
+x = [1, 2, 3, 4]
+
+y = '(1, 2, 3, 4, 5)
+z = '(1, 2, 3, 4, '. 6)
+
+t1 = 1, 2, 3, 4
+t2 = (1,)
+t3 = ()
+
+d = '{ "Name": 15 }
+d2 = '{}
+
+a = a ** 2
+b = a + b + c
+c = a * b * c
+e = a - b - c
+f = a % b % c
+g = a / b / c
+
+h = a & b
+i = a | b
+j = a ^ b
+
+k = a or b
+l = a and b
+m = not a
+
+n1 = a <= b
+n2 = a >= b
+n3 = a <=> b
+n4 = a < b
+n5 = b > b
+n6 = a == b
+n7 = a != b
+
+co simple():
+    yield 1
+
+co count_to_5() -> int:
+    yield 1
+    yield 2
+    yield 3
+    yield 4
+    yield 5
+
+co mirror_5x() -> float:
+    a = yield 0
+    a = yield a
+    a = yield a
+    a = yield a
+    a = yield a
+    yield a
+
+co div2_1x() <- int -> float:
+    a = yield 0
+    yield a / 2.0

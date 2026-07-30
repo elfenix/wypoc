@@ -1,0 +1,397 @@
+(* ==========================================================================
+   Wyrm Language Grammar (EBNF)
+   Derived from doc/language-spec.md.
+
+   Notation: ISO-ish EBNF.
+     ::=   defines
+     |     alternation
+     [ x ]     optional
+     { x }     zero or more
+     ( x )     grouping
+     "x"       literal terminal
+     A - B     A excluding B
+
+   Several spec sections are marked FIXME/TODO/ugly in language-spec.md
+   (constructor syntax, several block forms). Rules for those areas are
+   marked (INFERRED) below where the grammar fills a gap not made fully
+   explicit by the prose, and should be revisited as the spec firms up.
+
+   Layout: Wyrm follows Haskell's layout rule (like Python's off-side
+   rule) for indentation-delimited blocks, but also allows explicit
+   braces as an alternative block delimiter. As is conventional for such
+   grammars, the lexer is assumed to inject synthetic INDENT / DEDENT
+   tokens and to treat NEWLINE as a statement separator; grammar rules
+   below consume these virtual tokens directly rather than re-deriving
+   indentation from raw whitespace.
+   ========================================================================= *)
+
+
+(* ---------------------------------------------------------------------
+   0. Lexical tokens
+   --------------------------------------------------------------------- *)
+
+digit           ::= "0" | "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9" ;
+hex_digit       ::= digit | "a" | "b" | "c" | "d" | "e" | "f"
+                          | "A" | "B" | "C" | "D" | "E" | "F" ;
+letter          ::= "a" | "..." | "z" | "A" | "..." | "Z" | "_" ;
+
+comment         ::= "#" , { any_char - newline } , newline ;
+
+int_literal     ::= [ "-" ] , digit , { digit | "_" }
+                   | "0x" , hex_digit , { hex_digit | "_" } ;
+
+float_literal   ::= [ "-" ] , digit , { digit | "_" } , "." , digit , { digit | "_" } ,
+                     [ ( "e" | "E" ) , [ "+" | "-" ] , digit , { digit } ]
+                   | [ "-" ] , digit , { digit | "_" } ,
+                     ( "e" | "E" ) , [ "+" | "-" ] , digit , { digit } ;
+
+bool_literal    ::= "true" | "false" ;
+
+identifier      ::= letter , { letter | digit } ;
+
+symbol_literal  ::= "'" , identifier ;
+                  (* Implementations must recognize at least 31 significant
+                     characters of the identifier; excess may be ignored. *)
+
+(* Strings: normal, multiline (triple-quoted), and raw (C++-style delimited). *)
+string_literal  ::= normal_string | multiline_string | raw_string ;
+
+normal_string   ::= '"' , { string_char } , '"' ;
+string_char     ::= any_char - ( '"' | "\" | newline ) | escape_sequence ;
+escape_sequence ::= "\" , any_char ;
+
+multiline_string
+                ::= '"""' , { any_char } , '""' ;
+                  (* Opens with three double quotes, closes with two;
+                     per spec example the string body may itself embed a
+                     bare double quote. *)
+
+raw_string      ::= 'R"(' , { any_char } , ')"'
+                   | 'R"' , delim_tag , "(" , { any_char } , ")" , delim_tag , '"' ;
+delim_tag       ::= { letter | digit } ;
+
+newline         ::= "\n" ;
+NEWLINE         ::= (* virtual statement-separator token, emitted by lexer *) ;
+INDENT          ::= (* virtual token: rise in layout column *) ;
+DEDENT          ::= (* virtual token: fall in layout column *) ;
+
+
+(* ---------------------------------------------------------------------
+   1. Program structure
+   --------------------------------------------------------------------- *)
+
+program         ::= { top_level_stmt } ;
+
+top_level_stmt  ::= import_stmt
+                   | using_stmt
+                   | statement ;
+
+
+(* ---------------------------------------------------------------------
+   2. Blocks and statements
+   --------------------------------------------------------------------- *)
+
+(* A block is either an indentation-delimited suite, a brace-delimited
+   suite, or (for one-line forms) a single simple statement. Statements
+   within a block are separated by NEWLINE or ";", consistent with:
+       "Statements may be terminated by newline, semicolon, or a brace
+        matching the block." *)
+
+block           ::= ":" , NEWLINE , INDENT , stmt_list , DEDENT
+                   | ":" , simple_stmt                       (* one-liner, e.g. `pass` *)
+                   | "{" , stmt_list , "}" ;
+
+stmt_list       ::= statement , { stmt_sep , statement } , [ stmt_sep ] ;
+stmt_sep        ::= NEWLINE | ";" ;
+
+statement       ::= simple_stmt | compound_stmt ;
+
+simple_stmt     ::= expr_stmt
+                   | assignment_stmt
+                   | type_hint_stmt
+                   | with_stmt_simple
+                   | import_stmt
+                   | using_stmt
+                   | return_stmt
+                   | yield_stmt
+                   | pass_stmt
+                   | continue_stmt
+                   | break_stmt ;
+
+compound_stmt   ::= if_stmt
+                   | while_stmt
+                   | for_stmt
+                   | fn_def
+                   | co_def
+                   | class_def
+                   | with_block ;
+
+pass_stmt       ::= "pass" ;
+
+expr_stmt       ::= expression ;
+
+return_stmt     ::= "return" , [ expression ] ;
+
+yield_stmt      ::= "yield" , [ expression ] ;
+
+continue_stmt   ::= "continue" ;
+
+break_stmt      ::= "break" ;
+
+
+(* ---- if statement ----------------------------------------------------- *)
+
+if_stmt         ::= "if" , expression , block ,
+                     { "elif" , expression , block } ,
+                     [ "else" , block ] ;
+
+
+(* ---- while / for statements --------------------------------------------
+   while: `continue`/`break` inside the body, per spec example.
+   for: Python-style for/else - the `else` block runs only if the loop
+   completes without hitting `break`. *)
+
+while_stmt      ::= "while" , expression , block ;
+
+for_stmt        ::= "for" , identifier , "in" , expression , block ,
+                     [ "else" , block ] ;
+
+
+(* ---- variable definitions ---------------------------------------------
+   foo: int = 5
+   foo, bar = 5, 4
+   foo: int              (* type hint only, does not define *)
+   foo ?= 5
+   foo_with_type: int ?= 5
+*)
+
+assignment_stmt ::= target_list , [ ":" , type_expr ] , assign_op , expr_list ;
+
+target_list     ::= target , { "," , target } ;
+target          ::= identifier | attr_ref | static_ref ;
+
+assign_op       ::= "=" | "?=" ;
+
+type_hint_stmt  ::= identifier , ":" , type_expr ;
+
+static_ref      ::= "$" , identifier ;
+
+type_expr       ::= identifier , { "::" , identifier } ;   (* e.g. mod::Type *)
+
+
+(* ---- immutable bindings ------------------------------------------------
+   with speed_of_light: float = 299_792_458.0;
+   with:
+       speed_of_light: float = 299_792_458.0;
+       gravitational_constant = 6.6743e-11;
+*)
+
+with_stmt_simple
+                ::= "with" , identifier , [ ":" , type_expr ] , "=" , expression ;
+
+with_block      ::= "with" , ":" , NEWLINE , INDENT ,
+                     { with_binding , stmt_sep } ,
+                     DEDENT ;
+with_binding    ::= identifier , [ ":" , type_expr ] , "=" , expression ;
+
+
+(* ---------------------------------------------------------------------
+   3. Modules and imports
+   --------------------------------------------------------------------- *)
+
+import_stmt     ::= "import" , module_path ;
+
+module_path     ::= identifier , { "::" , identifier } ;
+
+from_import_stmt
+                ::= "from" , module_path , "import" , name_list ;
+
+name_list       ::= identifier , { "," , identifier } ;
+
+using_stmt      ::= "using" , module_path
+                   | "using" , module_path , "::" , identifier
+                   | "using" , identifier , "=" , module_path , "::" , identifier ;
+
+
+(* ---------------------------------------------------------------------
+   4. Functions
+   --------------------------------------------------------------------- *)
+
+fn_def          ::= "fn" , [ class_target ] , identifier , "(" , [ param_list ] , ")" ,
+                     [ "->" , type_expr ] , block ;
+
+(* `fn [type1, type2, ...] name(...)`: defines a message/method external to
+   a class body, dispatched on a tuple of that many receivers - see the
+   Messages section of language-spec.md for multi-dispatch semantics. *)
+class_target    ::= "[" , identifier , { "," , identifier } , "]" ;
+
+param_list      ::= param , { "," , param } ;
+
+param           ::= pos_only_marker
+                   | var_positional
+                   | var_keyword
+                   | plain_param ;
+
+plain_param     ::= identifier , [ ":" , type_expr ] , [ "=" , expression ] ;
+
+pos_only_marker ::= "/" ;                       (* marks preceding params positional-only *)
+var_positional  ::= "*" , identifier ;          (* collects extra positional args *)
+var_keyword     ::= "**" , identifier ;         (* collects extra keyword args into dict *)
+
+
+(* ---------------------------------------------------------------------
+   5. Coroutines
+   --------------------------------------------------------------------- *)
+
+co_def          ::= "co" , [ class_target ] , identifier , "(" , [ param_list ] , ")" ,
+                     [ "<-" , type_expr ] , [ "->" , type_expr ] , block ;
+
+
+(* ---------------------------------------------------------------------
+   6. Classes
+   --------------------------------------------------------------------- *)
+
+class_def       ::= "class" , identifier , [ "(" , [ arg_list ] , ")" ] , class_block ;
+
+class_block     ::= ":" , NEWLINE , INDENT , { class_member } , DEDENT
+                   | "{" , { class_member , [ ";" ] } , "}" ;
+
+class_member    ::= slot_def
+                   | init_def
+                   | fn_def
+                   | co_def ;
+
+slot_def        ::= "slot" , identifier , [ ":" , type_expr ] ,
+                     [ "=" , expression ] , [ "with" , slot_options ] ;
+
+slot_options    ::= ":" , NEWLINE , INDENT , { slot_option , stmt_sep } , DEDENT
+                   | "{" , { slot_option , [ ";" ] } , "}" ;
+
+slot_option     ::= ( "setter" | "getter" ) , "=" , ( expression | "undefined" ) ;
+
+(* Constructor syntax is explicitly unfinished in the spec
+   ("TODO TODO TODO: constructor syntax still ugly / needs improvement").
+   The rule below (INFERRED) captures the one worked example given. *)
+init_def        ::= "init" , "(" , [ param_list ] , ")" , "with" , block ;   (* INFERRED, unstable *)
+
+
+(* ---------------------------------------------------------------------
+   7. Expressions
+   --------------------------------------------------------------------- *)
+
+(* Precedence, loosest to tightest (per "Numerical operators follow same
+   rules as C/C++/Python" plus the documented tuple/boolean/comparison
+   layering): *)
+
+expression      ::= tuple_expr ;
+
+expr_list       ::= expression , { "," , expression } ;
+
+tuple_expr      ::= assign_expr , { "," , assign_expr } ;   (* comma = tuple, lowest precedence *)
+
+assign_expr     ::= set_if_unset_expr ;                     (* "?=" also usable in expr position *)
+
+set_if_unset_expr
+                ::= or_expr , [ "?=" , or_expr ] ;
+
+or_expr         ::= and_expr , { "or" , and_expr } ;
+and_expr        ::= not_expr , { "and" , not_expr } ;
+not_expr        ::= "not" , not_expr
+                   | comparison ;
+
+comparison      ::= bitwise_or_expr ,
+                     [ comp_op , bitwise_or_expr ] ;
+comp_op         ::= "<=" | ">=" | "<=>" | "<" | ">" | "==" | "!=" ;
+
+bitwise_or_expr  ::= bitwise_xor_expr , { "|" , bitwise_xor_expr } ;
+bitwise_xor_expr ::= bitwise_and_expr , { "^" , bitwise_and_expr } ;
+bitwise_and_expr ::= additive_expr , { "&" , additive_expr } ;
+
+additive_expr   ::= mult_expr , { ( "+" | "-" ) , mult_expr } ;
+mult_expr       ::= unary_expr , { ( "*" | "/" | "%" ) , unary_expr } ;
+
+unary_expr      ::= ( "-" | "not" ) , unary_expr
+                   | power_expr ;
+
+power_expr      ::= postfix_expr , [ "**" , unary_expr ] ;  (* right-assoc, per C convention *)
+
+postfix_expr    ::= primary , { postfix_op } ;
+
+postfix_op      ::= call_op
+                   | index_op
+                   | attr_op
+                   | message_op
+                   | scope_op ;
+
+call_op         ::= "(" , [ arg_list ] , ")" ;
+index_op        ::= "[" , expression , "]" ;
+attr_op         ::= "." , identifier ;
+message_op      ::= "!" , identifier , [ "(" , [ arg_list ] , ")" ] ;
+scope_op        ::= "::" , identifier ;
+
+attr_ref        ::= postfix_expr , "." , identifier ;
+
+arg_list        ::= argument , { "," , argument } ;
+argument        ::= expression
+                   | identifier , "=" , expression          (* keyword argument *)
+                   | "*" , expression                       (* spread positional *)
+                   | "**" , expression ;                    (* spread keyword *)
+
+primary         ::= literal
+                   | identifier
+                   | static_ref
+                   | "(" , expression , ")"
+                   | tuple_literal
+                   | array_literal
+                   | pair_literal
+                   | dict_literal
+                   | new_expr
+                   | message_tuple_expr
+                   | "this"
+                   | "super" , "(" , [ arg_list ] , ")"
+                   | "defined" , "(" , symbol_literal , ")"
+                   | lambda_expr ;
+
+literal         ::= int_literal
+                   | float_literal
+                   | bool_literal
+                   | string_literal
+                   | symbol_literal ;
+
+
+(* ---- collection literals ----------------------------------------------- *)
+
+array_literal   ::= "[" , [ expr_list ] , "]" ;
+
+(* Pair / list: '(a) single pair, '(1, 2, 3) list of pairs,
+   '(1, 2, '. 6) improper list. *)
+pair_literal    ::= "'(" , [ pair_body ] , ")" ;
+pair_body       ::= pair_element , { "," , pair_element } , [ "," , "'." , expression ]
+                   | "'." , expression ;
+pair_element    ::= expression ;
+
+tuple_literal   ::= "(" , ")"                                (* empty tuple *)
+                   | "(" , expression , "," , ")"             (* single-element tuple *)
+                   | "(" , expr_list , ")" ;                  (* n>=2 handled by tuple_expr already;
+                                                                   parens here only force grouping *)
+
+dict_literal    ::= "'{" , [ dict_body ] , "}" ;
+dict_body       ::= dict_pair , { "," , dict_pair } ;
+dict_pair       ::= expression , ":" , expression ;
+
+(* (canvas, shape) ! draw();  -- message dispatch against a tuple *)
+message_tuple_expr
+                ::= "(" , expr_list , ")" , "!" , identifier , [ "(" , [ arg_list ] , ")" ] ;
+
+new_expr        ::= "new" , type_expr , "(" , [ arg_list ] , ")" ;
+
+lambda_expr     ::= "fn" , "(" , [ param_list ] , ")" , block ;   (* anonymous fn, e.g. slot setter *)
+
+
+(* ---------------------------------------------------------------------
+   8. Keyword summary (reserved words)
+   --------------------------------------------------------------------- *)
+
+(* and, break, class, co, continue, defined, elif, else, false, fn, for,
+   from, getter, if, import, in, init, new, not, or, pass, return, setter,
+   slot, super, this, true, undefined, using, while, with, yield *)

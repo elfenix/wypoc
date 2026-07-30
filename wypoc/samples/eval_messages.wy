@@ -1,0 +1,50 @@
+class Shape:
+    slot name: str = "shape"
+
+    fn area() -> float:
+        return 0.0
+
+class Circle(Shape):
+    slot radius: float = 2.0
+
+    fn area() -> float:
+        return 3.14159 * radius * radius
+
+class Square(Shape):
+    slot side: float = 3.0
+
+    fn area() -> float:
+        return side * side
+
+c = new Circle()
+s = new Square()
+plain = new Shape()
+
+circle_area = c!area()
+square_area = s!area()
+shape_area = plain!area()
+
+bound = c!area
+bound_area = bound()
+
+fn describe():
+    return "generic thing"
+
+fn [Circle] describe():
+    return "a circle"
+
+circle_desc = c!describe()
+square_desc = s!describe()
+
+fn collide():
+    return "generic collision"
+
+fn [Circle, Circle] collide():
+    return "circle-circle collision"
+
+fn [Circle, Square] collide():
+    return "circle-square collision"
+
+cc = (c, new Circle()) ! collide()
+cs = (c, s) ! collide()
+gen = (s, s) ! collide()

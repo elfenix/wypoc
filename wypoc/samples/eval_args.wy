@@ -1,0 +1,6 @@
+count: int = 0
+for a in __ARGS:
+    count = count + 1
+    __write(__STDOUT, a + "\n")
+first = __ARGS
+

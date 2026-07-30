@@ -1,0 +1,33 @@
+newline = "\n"
+
+fn println(*content):
+    first = true
+    for arg in content:
+        if not first:
+            __write(__STDOUT, " ")
+        first = false
+        __write(__STDOUT, str(arg))
+    __write(__STDOUT, "\n")
+
+class File:
+    slot handle: int = -1
+
+    fn read(size=-1) -> str:
+        return __read(handle, size)
+
+    fn readall() -> str:
+        return __read(handle, -1)
+
+    fn write(data) -> int:
+        return __write(handle, data)
+
+    fn seek(offset, whence=0) -> int:
+        return __lseek(handle, offset, whence)
+
+    fn close() -> int:
+        return __close(handle)
+
+fn open(path, mode="r") -> File:
+    f = new File()
+    f.handle = __open(path, mode)
+    return f

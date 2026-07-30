@@ -1,0 +1,8 @@
+x = 5
+y = 10
+z = x + y
+name = "Wyrm"
+greeting = "Hello, " + name
+pi_ish = 3.14
+negated = -x
+a, b = 1, 2

@@ -1,0 +1,466 @@
+@subheader """
+from wypoc.actions import fold_left, make_tuple, fold_postfix
+from wypoc.ast_nodes import (
+    Program, Pass, ExprStmt, Return, Yield, ElifClause, If, While, For,
+    Continue, Break, NameTarget,
+    AttrTarget, Assign, TypeHint, StaticRef, TypeExpr, WithSimple,
+    WithBinding, WithBlock, Import, FromImport, Using, Param, PosOnlyMarker,
+    VarPositional, VarKeyword, FnDef, CoDef, ClassDef, SlotOption, SlotDef,
+    InitDef, Num, Str, Char, Bool, Symbol, Name, ThisRef, SuperCall, Defined,
+    Lambda, NewExpr, Array, Pair, Tuple, DictEntry, Dict, MessageTupleExpr,
+    Kwarg, SpreadPos, SpreadKw, UnaryOp, BinOp, SetIfUnset, Call, Index,
+    Attr, Message, Scope,
+)
+"""
+
+# ===========================================================================
+# Wyrm grammar, PEG form (pegen), derived from doc/grammar.ebnf.
+#
+# Notes on deviations from the EBNF (see doc/grammar.ebnf's own header for
+# the "INFERRED" convention this follows):
+#
+#  * `expression` (tuple_expr) is only used at true statement-level spots
+#    (expr_stmt, return/yield operand, if/elif condition). Everywhere the
+#    EBNF nests expression inside an explicit comma-delimited construct
+#    (call args, array/dict elements, parens, assignment RHS) this grammar
+#    uses `assign_expr` / `expr_list` directly, so that e.g. `f(1, 2)` is
+#    two arguments rather than one 2-tuple argument. The literal EBNF is
+#    ambiguous on this point (expr_list is itself built from `expression`,
+#    which can already swallow commas via tuple_expr).
+#  * `target` (assignment LHS) restricts attr_ref to a plain
+#    `NAME ("." NAME)+` chain rather than a full postfix_expr, to avoid the
+#    postfix chain and the separate attr_ref rule fighting over the same
+#    "." tokens.
+#  * elif/else on `if`, like the EBNF itself, are INFERRED (not shown
+#    verbatim in the spec prose).
+# ===========================================================================
+
+start[object]: p=program ENDMARKER { p }
+
+program[object]: stmts=stmt_item* NEWLINE* { Program([s for group in stmts for s in group]) }
+
+# ---------------------------------------------------------------------
+# Blocks and statements
+#
+# Mirrors CPython's own grammar idiom: a compound_stmt's block already ends
+# in its own DEDENT/"}"  with no trailing separator token to consume, while
+# one or more simple_stmts sharing a physical line are ";"-separated and the
+# line itself is terminated by a NEWLINE (which our tokenizer also uses for
+# a literal ";" acting as a bare separator, per doc/grammar.ebnf's stmt_sep).
+# ---------------------------------------------------------------------
+
+block[object]:
+    | ":" NEWLINE INDENT stmts=stmt_item* DEDENT { [s for group in stmts for s in group] }
+    | ":" stmts=simple_stmt_line { stmts }
+    | "{" NEWLINE* stmts=brace_stmt_item* "}" { [s for group in stmts for s in group] }
+
+stmt_item[object]:
+    | s=compound_stmt NEWLINE? { [s] }
+    | simple_stmt_line
+
+# Inside a brace-delimited block the layout rule is suppressed (see
+# wyrm_tokenizer's brace_depth handling), so real newlines and ";" both
+# surface as plain NEWLINE-type separators; tolerate runs of them between
+# members rather than requiring exactly one.
+brace_stmt_item[object]:
+    | s=compound_stmt NEWLINE* { [s] }
+    | first=simple_stmt NEWLINE+ { [first] }
+    | first=simple_stmt { [first] }
+
+simple_stmt_line[object]:
+    | first=simple_stmt ";" rest=simple_stmt_line { [first] + rest }
+    | first=simple_stmt ";" NEWLINE { [first] }
+    | first=simple_stmt ";" { [first] }
+    | first=simple_stmt NEWLINE { [first] }
+    | first=simple_stmt { [first] }
+
+simple_stmt[object]:
+    | with_stmt_simple
+    | assignment_stmt
+    | type_hint_stmt
+    | from_import_stmt
+    | import_stmt
+    | using_stmt
+    | return_stmt
+    | yield_stmt
+    | pass_stmt
+    | continue_stmt
+    | break_stmt
+    | expr_stmt
+
+compound_stmt[object]:
+    | if_stmt
+    | while_stmt
+    | for_stmt
+    | fn_def
+    | co_def
+    | class_def
+    | with_block
+
+pass_stmt[object]: 'pass' { Pass() }
+continue_stmt[object]: 'continue' { Continue() }
+break_stmt[object]: 'break' { Break() }
+
+expr_stmt[object]: e=expression { ExprStmt(e) }
+
+return_stmt[object]:
+    | 'return' e=expression { Return(e) }
+    | 'return' { Return(None) }
+
+yield_stmt[object]:
+    | 'yield' e=expression { Yield(e) }
+    | 'yield' { Yield(None) }
+
+# ---- if statement ------------------------------------------------------
+
+if_stmt[object]:
+    | 'if' cond=expression body=block elifs=elif_clause* orelse=else_clause? {
+          If(cond, body, elifs, orelse) }
+
+elif_clause[object]:
+    | 'elif' cond=expression body=block { ElifClause(cond, body) }
+
+else_clause[object]:
+    | 'else' body=block { body }
+
+# ---- while / for statements ---------------------------------------------
+# `for`'s `else` runs only if the loop completes without `break`, matching
+# Python's for/else (see doc/language-spec.md's Control Flow section).
+
+while_stmt[object]:
+    | 'while' cond=expression body=block { While(cond, body) }
+
+for_stmt[object]:
+    | 'for' n=NAME 'in' it=expression body=block orelse=else_clause? { For(n.string, it, body, orelse) }
+
+# ---- assignment / bindings ---------------------------------------------
+
+assignment_stmt[object]:
+    | targets=target_list ty=(":" type_expr)? op=assign_op vals=expr_list {
+          Assign(targets, ty[1] if ty else None, op, vals) }
+
+target_list[object]:
+    | first=target rest=("," target)* { [first] + [t for _, t in rest] }
+
+target[object]:
+    | static_ref
+    | 'this' rest=("." NAME)+ { AttrTarget(ThisRef(), [a.string for _, a in rest]) }
+    | n=NAME rest=("." NAME)+ { AttrTarget(n.string, [a.string for _, a in rest]) }
+    | NAME { NameTarget(name.string) }
+
+assign_op[object]:
+    | "?=" { '?=' }
+    | "=" { '=' }
+
+type_hint_stmt[object]:
+    | n=NAME ":" t=type_expr { TypeHint(n.string, t) }
+
+static_ref[object]:
+    | "$" n=NAME { StaticRef(n.string) }
+
+type_expr[object]:
+    | first=NAME rest=("::" NAME)* { TypeExpr([first.string] + [n.string for _, n in rest]) }
+
+# ---- immutable bindings --------------------------------------------------
+
+with_stmt_simple[object]:
+    | 'with' n=NAME ty=(":" type_expr)? "=" e=assign_expr {
+          WithSimple(n.string, ty[1] if ty else None, e) }
+
+with_block[object]:
+    | 'with' ":" NEWLINE INDENT bindings=with_binding_list DEDENT { WithBlock(bindings) }
+
+with_binding_list[object]:
+    | first=with_binding NEWLINE rest=with_binding_list { [first] + rest }
+    | first=with_binding NEWLINE { [first] }
+    | first=with_binding { [first] }
+
+with_binding[object]:
+    | n=NAME ty=(":" type_expr)? "=" e=assign_expr { WithBinding(n.string, ty[1] if ty else None, e) }
+
+# ---------------------------------------------------------------------
+# Modules and imports
+# ---------------------------------------------------------------------
+
+import_stmt[object]:
+    | 'import' m=module_path { Import(m) }
+
+module_path[object]:
+    | first=NAME rest=("::" NAME)* { [first.string] + [n.string for _, n in rest] }
+
+from_import_stmt[object]:
+    | 'from' m=module_path 'import' names=name_list { FromImport(m, names) }
+
+name_list[object]:
+    | first=NAME rest=("," NAME)* { [first.string] + [n.string for _, n in rest] }
+
+# `module_path` is greedily "::"-segmented, so it can't be split back into a
+# "module path" + trailing "::ident" by sequencing alone (the EBNF's
+# `using module_path "::" identifier` form is ambiguous against plain
+# `using module_path` for that reason). Both collapse to one path here;
+# whether the last segment names a module or a single symbol is a binding
+# question for a later pass, not something syntax can decide. (INFERRED)
+using_stmt[object]:
+    | 'using' alias=NAME "=" m=module_path { Using(m, alias.string) }
+    | 'using' m=module_path { Using(m) }
+
+# ---------------------------------------------------------------------
+# Functions
+# ---------------------------------------------------------------------
+
+fn_def[object]:
+    | 'fn' cls=class_target n=NAME "(" params=param_list? ")" ret=("->" type_expr)? body=block {
+          FnDef(cls, n.string, params or [], ret[1] if ret else None, body) }
+    | 'fn' n=NAME "(" params=param_list? ")" ret=("->" type_expr)? body=block {
+          FnDef(None, n.string, params or [], ret[1] if ret else None, body) }
+
+class_target[object]:
+    | "[" first=NAME rest=("," NAME)* "]" { [first.string] + [n.string for _, n in rest] }
+
+param_list[object]:
+    | first=param rest=("," param)* { [first] + [p for _, p in rest] }
+
+param[object]:
+    | pos_only_marker
+    | var_positional
+    | var_keyword
+    | plain_param
+
+plain_param[object]:
+    | n=NAME ty=(":" type_expr)? dflt=("=" assign_expr)? {
+          Param(n.string, ty[1] if ty else None, dflt[1] if dflt else None) }
+
+pos_only_marker[object]: "/" { PosOnlyMarker() }
+var_positional[object]: "*" n=NAME { VarPositional(n.string) }
+var_keyword[object]: "**" n=NAME { VarKeyword(n.string) }
+
+# ---------------------------------------------------------------------
+# Coroutines
+# ---------------------------------------------------------------------
+
+co_def[object]:
+    | 'co' cls=class_target n=NAME "(" params=param_list? ")" intype=("<-" type_expr)? ret=("->" type_expr)? body=block {
+          CoDef(cls, n.string, params or [], intype[1] if intype else None, ret[1] if ret else None, body) }
+    | 'co' n=NAME "(" params=param_list? ")" intype=("<-" type_expr)? ret=("->" type_expr)? body=block {
+          CoDef(None, n.string, params or [], intype[1] if intype else None, ret[1] if ret else None, body) }
+
+# ---------------------------------------------------------------------
+# Classes
+# ---------------------------------------------------------------------
+
+class_def[object]:
+    | 'class' n=NAME "(" bases=arg_list? ")" body=class_block { ClassDef(n.string, bases or [], body) }
+    | 'class' n=NAME body=class_block { ClassDef(n.string, [], body) }
+
+class_block[object]:
+    | ":" NEWLINE INDENT members=class_member_item* DEDENT { members }
+    | "{" NEWLINE* members=class_member_brace* "}" { members }
+
+class_member_brace[object]:
+    | m=fn_def NEWLINE* { m }
+    | m=co_def NEWLINE* { m }
+    | m=slot_def NEWLINE* { m }
+    | m=init_def NEWLINE* { m }
+
+class_member_item[object]:
+    | m=fn_def NEWLINE? { m }
+    | m=co_def NEWLINE? { m }
+    | m=slot_def NEWLINE { m }
+    | m=slot_def { m }
+    | m=init_def NEWLINE? { m }
+
+slot_def[object]:
+    | 'slot' n=NAME ty=(":" type_expr)? dflt=("=" assign_expr)? opts=('with' slot_options)? {
+          SlotDef(n.string, ty[1] if ty else None, dflt[1] if dflt else None, opts[1] if opts else None) }
+
+slot_options[object]:
+    | ":" NEWLINE INDENT opts=slot_option_list DEDENT { opts }
+    | "{" opts=slot_option_brace* "}" { opts }
+
+slot_option_brace[object]:
+    | o=slot_option ";"? { o }
+
+slot_option_list[object]:
+    | first=slot_option NEWLINE rest=slot_option_list { [first] + rest }
+    | first=slot_option NEWLINE { [first] }
+    | first=slot_option { [first] }
+
+slot_option[object]:
+    | kind=('setter' | 'getter') "=" 'undefined' { SlotOption(kind.string, 'undefined') }
+    | kind=('setter' | 'getter') "=" e=assign_expr { SlotOption(kind.string, e) }
+
+# Constructor syntax is explicitly unfinished/ugly in the spec; this mirrors
+# the one worked example (`init (params) with: stmt...`) as an INFERRED form.
+init_def[object]:
+    | 'init' "(" params=param_list? ")" 'with' body=block { InitDef(params or [], body) }
+
+# ---------------------------------------------------------------------
+# Expressions
+# ---------------------------------------------------------------------
+
+expression[object]:
+    | items=expr_list { items[0] if len(items) == 1 else Tuple(items) }
+
+expr_list[object]:
+    | first=assign_expr rest=("," assign_expr)* { [first] + [e for _, e in rest] }
+
+assign_expr[object]:
+    | 'yield' e=expression { Yield(e) }
+    | 'yield' { Yield(None) }
+    | a=or_expr "?=" b=or_expr { SetIfUnset(a, b) }
+    | or_expr
+
+or_expr[object]:
+    | first=and_expr rest=('or' and_expr)* { fold_left(first, [('or', e) for _, e in rest]) }
+
+and_expr[object]:
+    | first=not_expr rest=('and' not_expr)* { fold_left(first, [('and', e) for _, e in rest]) }
+
+not_expr[object]:
+    | 'not' e=not_expr { UnaryOp('not', e) }
+    | comparison
+
+comparison[object]:
+    | a=bitwise_or_expr op=comp_op b=bitwise_or_expr { BinOp(op, a, b) }
+    | bitwise_or_expr
+
+comp_op[object]:
+    | "<=" ">" { '<=>' }
+    | "<=" { '<=' }
+    | ">=" { '>=' }
+    | "==" { '==' }
+    | "!=" { '!=' }
+    | "<" { '<' }
+    | ">" { '>' }
+    | 'in' { 'in' }
+
+bitwise_or_expr[object]:
+    | first=bitwise_xor_expr rest=("|" bitwise_xor_expr)* { fold_left(first, [('|', e) for _, e in rest]) }
+
+bitwise_xor_expr[object]:
+    | first=bitwise_and_expr rest=("^" bitwise_and_expr)* { fold_left(first, [('^', e) for _, e in rest]) }
+
+bitwise_and_expr[object]:
+    | first=additive_expr rest=("&" additive_expr)* { fold_left(first, [('&', e) for _, e in rest]) }
+
+additive_expr[object]:
+    | first=mult_expr rest=(("+" | "-") mult_expr)* { fold_left(first, [(op.string, e) for op, e in rest]) }
+
+mult_expr[object]:
+    | first=unary_expr rest=(("*" | "/" | "%") unary_expr)* { fold_left(first, [(op.string, e) for op, e in rest]) }
+
+unary_expr[object]:
+    | "-" e=unary_expr { UnaryOp('neg', e) }
+    | 'not' e=unary_expr { UnaryOp('not', e) }
+    | power_expr
+
+power_expr[object]:
+    | base=postfix_expr "**" exp=unary_expr { BinOp('**', base, exp) }
+    | postfix_expr
+
+postfix_expr[object]:
+    | first=primary ops=postfix_op* { fold_postfix(first, ops) }
+
+postfix_op[object]:
+    | call_op
+    | index_op
+    | attr_op
+    | message_op
+    | scope_op
+
+call_op[object]:
+    | "(" args=arg_list? ")" { (lambda node, a=(args or []): Call(node, a)) }
+
+index_op[object]:
+    | "[" e=expression "]" { (lambda node, e=e: Index(node, e)) }
+
+attr_op[object]:
+    | "." n=NAME { (lambda node, name=n.string: Attr(node, name)) }
+
+message_op[object]:
+    | "!" n=NAME "(" args=arg_list? ")" { (lambda node, name=n.string, a=(args or []): Message(node, name, a)) }
+    | "!" n=NAME { (lambda node, name=n.string: Message(node, name, None)) }
+
+scope_op[object]:
+    | "::" n=NAME { (lambda node, name=n.string: Scope(node, name)) }
+
+arg_list[object]:
+    | first=argument rest=("," argument)* { [first] + [a for _, a in rest] }
+
+argument[object]:
+    | n=NAME "=" e=assign_expr { Kwarg(n.string, e) }
+    | "**" e=assign_expr { SpreadKw(e) }
+    | "*" e=assign_expr { SpreadPos(e) }
+    | e=assign_expr { e }
+
+primary[object]:
+    | literal
+    | new_expr
+    | message_tuple_expr
+    | paren_or_tuple
+    | array_literal
+    | pair_literal
+    | dict_literal
+    | 'this' { ThisRef() }
+    | 'super' "(" args=arg_list? ")" { SuperCall(args or []) }
+    | 'defined' "(" s=symbol_literal ")" { Defined(s) }
+    | lambda_expr
+    | static_ref
+    | NAME { Name(name.string) }
+
+literal[object]:
+    | NUMBER { Num(number.string) }
+    # A char literal (\a, \newline, ...) and a plain string share the STRING
+    # wire type (see wyrm_tokenizer.py's _scan_char) and are told apart here
+    # by their leading character.
+    | STRING { Char(string.string) if string.string[0] == '\\' else Str(string.string) }
+    | 'true' { Bool(True) }
+    | 'false' { Bool(False) }
+    | symbol_literal
+
+symbol_literal[object]:
+    | "'" n=NAME { Symbol(n.string) }
+
+# ---- collection literals ------------------------------------------------
+
+array_literal[object]:
+    | "[" items=expr_list? "]" { Array(items or []) }
+
+# Pair / list: '(a) single pair, '(1, 2, 3) list of pairs,
+# '(1, 2, '. 6) improper list.
+pair_literal[object]:
+    | "'" "(" body=pair_body? ")" { Pair(body[0], body[1]) if body else Pair([], None) }
+
+pair_body[object]:
+    | first=assign_expr rest=("," assign_expr)* tail=("," "'" "." assign_expr)? {
+          ([first] + [e for _, e in rest], tail[3] if tail else None) }
+    | "'" "." e=assign_expr { ([], e) }
+
+paren_or_tuple[object]:
+    | "(" ")" { Tuple([]) }
+    | "(" first=assign_expr "," ")" { make_tuple(first, [], ",") }
+    | "(" first=assign_expr rest=("," assign_expr)+ trailing=","? ")" {
+          make_tuple(first, [e for _, e in rest], trailing) }
+    | "(" e=assign_expr ")" { e }
+
+dict_literal[object]:
+    | "'" "{" body=dict_body? "}" { Dict(body or []) }
+
+dict_body[object]:
+    | first=dict_pair rest=("," dict_pair)* { [first] + [p for _, p in rest] }
+
+dict_pair[object]:
+    | k=assign_expr ":" v=assign_expr { DictEntry(k, v) }
+
+# (canvas, shape) ! draw();  -- message dispatch against a tuple
+message_tuple_expr[object]:
+    | "(" items=expr_list ")" "!" n=NAME "(" args=arg_list? ")" {
+          MessageTupleExpr(items, n.string, args or []) }
+    | "(" items=expr_list ")" "!" n=NAME {
+          MessageTupleExpr(items, n.string, None) }
+
+new_expr[object]:
+    | 'new' t=type_expr "(" args=arg_list? ")" { NewExpr(t, args or []) }
+
+lambda_expr[object]:
+    | 'fn' "(" params=param_list? ")" body=block { Lambda(params or [], body) }

@@ -1,0 +1,60 @@
+{
+  "name": "wyrm-lang",
+  "displayName": "Wyrm",
+  "description": "Syntax highlighting and diagnostics (via wyrm-lsp) for the Wyrm scripting language",
+  "version": "0.1.0",
+  "publisher": "amarach",
+  "engines": {
+    "vscode": "^1.75.0"
+  },
+  "categories": ["Programming Languages"],
+  "activationEvents": [
+    "onLanguage:wyrm"
+  ],
+  "main": "./out/extension.js",
+  "contributes": {
+    "languages": [
+      {
+        "id": "wyrm",
+        "aliases": ["Wyrm", "wyrm"],
+        "extensions": [".wy", ".wyrm"],
+        "configuration": "./language-configuration.json"
+      }
+    ],
+    "grammars": [
+      {
+        "language": "wyrm",
+        "scopeName": "source.wyrm",
+        "path": "./syntaxes/wyrm.tmLanguage.json"
+      }
+    ],
+    "configuration": {
+      "title": "Wyrm",
+      "properties": {
+        "wyrm.lsp.serverPath": {
+          "type": "string",
+          "default": "",
+          "markdownDescription": "Path to the `wyrm-lsp` executable. Leave empty to auto-detect: tries `${workspaceFolder}/.venv/bin/wyrm-lsp` (this repo's own dev layout), then `wyrm-lsp` on `PATH`."
+        },
+        "wyrm.lsp.enable": {
+          "type": "boolean",
+          "default": true,
+          "description": "Enable the wyrm-lsp language server (syntax diagnostics)."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run compile",
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./"
+  },
+  "dependencies": {
+    "vscode-languageclient": "^10.1.0"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "@types/vscode": "^1.75.0",
+    "typescript": "^7.0.0"
+  }
+}

@@ -1,0 +1,83 @@
+# Wyrm highlighting smoke test
+
+import mod::baz::bar
+from math import sin
+using math
+using sin = math::sin;
+
+with speed_of_light: float = 299_792_458.0;
+
+with:
+    gravitational_constant = 6.6743e-11;
+    plancks_constant: float = 6.62607015e-34
+
+foo: int = 5
+foo, bar = 5, 4
+foo: int
+foo ?= 5
+foo_with_type: int ?= 5
+
+arr = [1, 2, 3, 4]
+lst = '(1, 2, 3, 4, 5)
+improper = '(1, 2, 3, 4, '. 6)
+tup = 1, 2, 3, 4
+single = (1,)
+empty = ()
+dict = '{ "Name": 15 }
+empty_dict = '{}
+
+sym = 'name
+hex_val = 0xdead
+raw = R"(Arbitrary Text)"
+raw_tagged = R"extra(WE can noow have (" )extra"
+multi = """This is a string
+this is still part of the string.""
+
+a = b <= c
+a2 = b >= c
+a3 = b <=> c
+ok = a and b or not c
+
+fn message(name: str, greeting: str = "Hello") -> str:
+    return greeting + name
+
+fn [coordinate2d] length_squared() {
+    return (x**2 + y**2)
+}
+
+co count_to_5() -> int:
+    yield 1
+    yield 2
+
+class person:
+    slot name: str = "John Doe" with:
+        setter = fn (value) { this.name = value; }
+        getter = undefined;
+
+    fn get_full_name() -> str:
+        return last_name + " " + first_name
+
+class coordinate3d(coordinate2d) {
+    slot z: float;
+}
+
+fn [coordinate3d] length_squared:
+    return super() + (z**2)
+
+person_instance = new person()
+arr_len = array_object!length();
+(canvas, shape) ! draw();
+
+call_count():
+    $foo: int ?= 0
+    $foo = $foo + 1
+    return $foo
+
+if foo:
+    action()
+another_action()
+
+if defined('foo):
+    foo = foo + 1
+else:
+    foo = 1

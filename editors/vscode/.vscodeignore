@@ -1,0 +1,3 @@
+.vscodeignore
+rebuild.sh
+*.vsix

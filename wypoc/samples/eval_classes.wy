@@ -1,0 +1,27 @@
+class Shape:
+    slot name: str = "shape"
+
+    fn area() -> float:
+        return 0.0
+
+class Circle(Shape):
+    slot radius: float = 2.0
+
+    fn area() -> float:
+        return 3.14159 * radius * radius
+
+class Rectangle(Shape):
+    slot width: float = 3.0
+    slot height: float = 4.0
+
+    fn area() -> float:
+        return width * height
+
+class Square(Rectangle):
+    slot width: float = 5.0
+    slot height: float = 5.0
+
+c = new Circle()
+r = new Rectangle()
+s = new Square()
+plain = new Shape()

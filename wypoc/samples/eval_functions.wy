@@ -1,0 +1,28 @@
+fn add(a, b):
+    return a + b
+
+fn greet(name, greeting = "Hello"):
+    return greeting + ", " + name
+
+fn classify(n):
+    if n < 0:
+        return "negative"
+    elif n == 0:
+        return "zero"
+    else:
+        return "positive"
+
+fn pack(*nums):
+    return nums
+
+sum_direct = add(2, 3)
+greeting_default = greet("Wyrm")
+greeting_custom = greet("Wyrm", "Hey")
+classify_neg = classify(-5)
+classify_zero = classify(0)
+classify_pos = classify(7)
+packed = pack(1, 2, 3)
+
+adder = fn (a, b):
+    return a + b
+lambda_result = adder(4, 5)

@@ -1,0 +1,63 @@
+class person:
+    slot name: str
+
+class family_member(person):
+    slot relation: str
+
+class coordinate2d {
+    slot x: float;
+    slot y: float;
+}
+
+class person:
+    slot first_name: str = "John"
+    slot last_name: str = "Doe"
+
+    fn get_full_name() -> str:
+        return last_name + " " + first_name
+
+fn [person] get_full_name() -> str:
+    return this.last_name + " " + this.first_name
+
+person.first_name = "Sam"
+
+person.get_full_name()
+
+person!get_full_name()
+
+name_func = person!get_full_name
+name_func()
+
+fn [person] get_name():
+    return this.name
+
+fn [coordinate2d] length_squared() {
+    return (x ** 2 + y ** 2)
+}
+
+class coordinate3d(coordinate2d) {
+    slot z: float;
+}
+
+fn [coordinate3d] length_squared():
+    return super() + (z ** 2)
+
+person_instance = new person()
+
+class coordinate2d:
+    slot x: float
+    slot y: float
+
+    init (x: float, y: float) with:
+        x = x
+        y = y
+
+class person:
+    slot name: str = "John Doe"
+
+class person:
+    slot name: str = "John Doe" with:
+        setter = fn (value) { this.name = value; }
+        getter = undefined
+
+(canvas, shape) ! draw()

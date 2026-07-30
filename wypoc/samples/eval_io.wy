@@ -1,0 +1,17 @@
+fd = __open(path, "w")
+written = __write(fd, "hello wyrm io")
+
+fd2 = __open(path, "r")
+content = __read(fd2)
+
+pos = __lseek(fd2, 2, 0)
+partial = __read(fd2)
+
+new_handle = __dup2(fd2, 42)
+remaining_via_dup = __read(new_handle)
+
+to_stdout = __write(__STDOUT, "printed via __STDOUT\n")
+flushed = __flush(fd)
+
+closed = __close(fd2)
+close_again = __close(new_handle)
