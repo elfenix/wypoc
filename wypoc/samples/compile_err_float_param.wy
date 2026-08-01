@@ -1,0 +1,4 @@
+import native
+
+fn f(a: float) -> int:
+    return 5

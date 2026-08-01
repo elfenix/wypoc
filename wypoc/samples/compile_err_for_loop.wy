@@ -1,0 +1,6 @@
+import native
+
+fn f() -> int:
+    for i in [1, 2, 3]:
+        pass
+    return 1

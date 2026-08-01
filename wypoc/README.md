@@ -28,6 +28,7 @@ wypoc/
   ast_nodes.py            typed AST node classes built by the parser actions
   parse.py                glues the tokenizer + generated parser together
   wyrm_eval_parse_tree.py the tree-walking evaluator (the interpreter proper)
+  compiler_c.py           wyrm --compile: translates a module to C (see below)
   wyrm_modules.py         WYRM_PATH search-path resolution (no eval/parse dependency)
   wyrm_io.py              POSIX-ish low-level I/O primitives (__open/__read/...)
   cli.py                  the `wyrm` command (installed via pyproject.toml)
@@ -46,9 +47,14 @@ tokenize.TokenInfo stream
    |  pegen.tokenizer.Tokenizer + parser.GeneratedParser (via parse.parse())
    v
 ast_nodes.Program (a tree of dataclasses)
-   |  wyrm_eval_parse_tree.eval_program(tree, ctx)
-   v
-side effects on ctx (a dict[str, Variable]) + real I/O via wyrm_io
+   |
+   +-- wyrm_eval_parse_tree.eval_program(tree, ctx)          [default: run it]
+   |      v
+   |   side effects on ctx (a dict[str, Variable]) + real I/O via wyrm_io
+   |
+   +-- compiler_c.compile_module(tree, module_name)          [--compile: translate it]
+          v
+       C source text targeting the real wyrm VM calling convention
 ```
 
 Every stage is independently invokable:
@@ -63,6 +69,9 @@ PYTHONPATH=. .venv/bin/python wypoc/parse.py wypoc/samples/basics.wy
 
 # parse + run a script (after `pip install -e .`, see below)
 .venv/bin/wyrm wypoc/samples/eval_functions.wy
+
+# parse + compile a module to C instead of running it
+.venv/bin/wyrm --compile wypoc/samples/compile_tail_call.wy
 ```
 
 ### Why a custom tokenizer
@@ -177,6 +186,62 @@ this - a POSIX-flavored integer-handle-to-Python-file-object table meant to
 back an `io` module written in wyrm itself (`corelib/std/io.wy` is a first,
 tiny example).
 
+### The compiler (`wyrm --compile`)
+
+`compiler_c.py` is a second, alternative backend over the same
+`ast_nodes.py` tree the evaluator walks: instead of running a module, it
+translates it to C targeting the real wyrm VM's calling convention
+(`wyrm_exec_fn` / `wyrm_state*`, per `src/wyrm/main.c` in the sibling
+`wyrm` repo) - a real step toward wyrm's stated goal of self-hosting with
+C as its "assembly language" (see `doc/language-spec.md`'s "Native Code"
+section).
+
+This is a deliberately narrow v1 slice, not a general compiler:
+
+- A module must `import native` to be compile-eligible at all (this is
+  also what the spec says marks a module as compile-only, not for runtime
+  interpretation) and must be single-file (no `import`/`from`/`using`).
+- Only `fn` bodies with `int`/`bool` params and locals, arithmetic/
+  comparison/boolean expressions, `if`/`elif`/`else`, `while`,
+  `break`/`continue`, and `return` are compiled. `float` is deliberately
+  unsupported: the real `wyrm_type_tag` enum has no dedicated float tag
+  yet, so there's no encoding to target honestly.
+- A call to another compiled function is only supported as `return f(...)`
+  (a genuine tail position - `return` always exits, so this covers every
+  real tail call regardless of where it's textually written). It compiles
+  to `wyrm_state_call_continue` plus a small shared forwarding
+  continuation (`__wyrm_forward_result`) that relays the callee's result
+  back up unchanged. This is *not* the zero-overhead
+  `WYRM_EXEC_TAIL_CALL` + `wyrm_stack_replace_frame_f` path `fiber.c`'s
+  trampoline supports - that path has no working example anywhere in the
+  `wyrm` repo to verify frame/stack mechanics against yet, so v1 stays on
+  the one calling pattern that *is* demonstrated (`main.c`'s
+  `w_do_a_mul`). Any other call position (`y = f(x) + 1`, a bare call
+  statement, a call as an argument, ...) raises `CompileError`.
+- `native::block('PORTION, '(inputs...), '(outputs...), R"tag(...)tag")`
+  (see the language spec) is supported both at module top level (spliced
+  into the matching `HEADER`/`TYPES`/`CONSTANTS`/`PROTOS`/`FUNCTIONS`
+  output section) and as a function-body statement (spliced inline,
+  wrapped in a private nested C scope that copies inputs in and outputs
+  out by value - avoiding the same-name self-init hazard a literal
+  reading of the spec's own worked example would hit, since `{ int a =
+  a; }` is undefined behavior in C when an outer `a` already exists).
+- `for`, classes/`!`/methods, coroutines, collections, `new`, lambdas,
+  and multi-module compilation are all unimplemented - each raises
+  `CompileError` with a specific message, the same "fail loud, not
+  silently wrong" convention as the interpreter's own known gaps below.
+
+```bash
+.venv/bin/wyrm --compile module.wy            # C source to stdout
+.venv/bin/wyrm --compile -o module.c module.wy  # ...or to a file
+```
+
+`test/test_compiler_c.py` covers the supported fixtures
+(`wypoc/samples/compile_*.wy`) and one `CompileError` case per documented
+scope cut; when the sibling `wyrm` repo and `gcc` are both available, it
+also shells out to `gcc -fsyntax-only` against the real headers to catch
+type/signature mismatches plain string assertions would miss.
+
 ### `corelib/` and the `wyrm` command
 
 `wypoc/corelib/` is a small standard library written in wyrm, demonstrating
@@ -262,6 +327,7 @@ Or a single file:
 | `test_eval_io.py` | `wyrm_io.py`'s primitives: write/read round-trip, `lseek`, `dup2` handle aliasing (shared file position), `close`/`flush`, and that a closed handle raises. |
 | `test_cli.py` | The *installed* `wyrm` console script via `subprocess` - arg packing (including args that look like flags), all four exit-code/error paths. Skipped if the `wyrm` console script isn't installed. |
 | `test_lsp.py` | `diagnostics_for_source()` directly (no JSON-RPC/server involved): clean source -> no diagnostics, a syntax error -> exactly one diagnostic on the right (0-indexed) line, and every bundled sample fixture is confirmed diagnostic-free. |
+| `test_compiler_c.py` | `wyrm --compile` (`compiler_c.py`): structural checks on generated C for leaf functions, tail calls, and `native::block` splices; one `CompileError` per documented v1 scope cut; an optional `gcc -fsyntax-only` check against the sibling `wyrm` repo's real headers when both are available. |
 
 ## Known gaps
 
@@ -291,3 +357,9 @@ it'd be needed):
 Anything not listed above that you'd expect to work and doesn't is a real
 gap worth filing, not an intentional omission - `eval_expr`/`eval_stmt`'s
 final fallback (`cannot evaluate <NodeType>`) is the tell.
+
+`wyrm --compile` (`compiler_c.py`) has its own, much narrower, set of
+deliberate v1 scope cuts (non-tail calls, `float`, `for`, classes,
+coroutines, collections, multi-module compilation) - see "The compiler"
+above rather than this list, since they're compile-time-only and don't
+affect the interpreter.

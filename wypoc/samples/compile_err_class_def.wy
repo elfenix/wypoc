@@ -1,0 +1,4 @@
+import native
+
+class Foo:
+    slot x: int

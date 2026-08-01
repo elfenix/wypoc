@@ -1,0 +1,11 @@
+import native
+
+fn add(a: int, b: int) -> int:
+    return a + b
+
+fn dispatch(x: int, y: int) -> int:
+    z: int = x * 2
+    if z > y:
+        return add(z, y)
+    else:
+        return add(y, z)
