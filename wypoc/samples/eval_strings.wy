@@ -1,0 +1,6 @@
+plain = "hello"
+raw_single_line = R"(one line)"
+raw_multiline = R"C(
+#include <stdio.h>
+int main() { return 0; }
+)C"

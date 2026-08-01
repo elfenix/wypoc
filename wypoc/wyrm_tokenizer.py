@@ -356,14 +356,21 @@ class _Lexer:
             raise self.error("malformed raw string literal (expected '(')")
         j += 1
         closer = ")" + tag + '"'
-        end = line.find(closer, j)
-        # Raw strings only need to span a single line for wypoc's purposes.
-        if end == -1:
-            raise self.error("unterminated raw string literal")
-        text = line[i:end + len(closer)]
-        j = end + len(closer)
+        # Raw strings may span multiple physical lines: scan line-by-line for
+        # the closer, same approach as _scan_multiline_string.
+        chars = [line[i:j]]
         self.col = j
-        return TokenInfo(token.STRING, text, start, (self.lineno + 1, j), line)
+        while True:
+            idx = self.line.find(closer, self.col)
+            if idx != -1:
+                chars.append(self.line[self.col:idx + len(closer)])
+                self.col = idx + len(closer)
+                break
+            chars.append(self.line[self.col:])
+            if not self._advance_line():
+                raise self.error("unterminated raw string literal")
+        text = "".join(chars)
+        return TokenInfo(token.STRING, text, start, (self.lineno + 1, self.col), self.line)
 
 
 def generate_tokens(src: str) -> Iterator[TokenInfo]:
