@@ -1,21 +1,42 @@
 
 ## Semantic Explanation of Syntax
 
-### Atoms
+### Literals
 
-#### Integers
+    literal_expr:
+      | signed_number
+      | strings
+      | character
+      | 'true'
+      | 'false'
+      | 'nil'
+
+#### Signed Numbers
 
 Integers leverage standard C semantics: -?\d+ or 0x\[a-fA-F0-9]+
 
     0xdead
     12345
+    -10
+
+Floating point numbers follow standard C semantics:
+
+    3e1
+    3.14159
+    -18.24
 
 #### Booleans
 
-Simple
+Specify true of false
 
     true # True
     false # False
+
+#### Nil
+
+`nil` is a keyword for a unset variable.
+
+    nil
 
 #### Symbol
 
@@ -543,7 +564,9 @@ The input type may be specified:
 
 ### Primitive Types
 
-Primitive types are immutable types storing data directly on the stack.
+A wyrm variable reserves place for a primitive. A primitive tags the variable
+type and holds a primitive value. The 'is' boolean operator checks that the
+variable type matches and the primitive value is identical.
 
 Primitive types:
   - boolean
@@ -551,10 +574,101 @@ Primitive types:
   - int
   - object pointer
 
+## Core Features
 
 ### Classes
 
 Classes are permitted to perform basic operator overloading. The following
 operators may be overloaded: 
 
-    __bool__
+    __bool__ - change truthiness of a variable
+    __add__ - add two variables
+    __sub__ - subtract two variables
+    __mul__ - multiply two variables
+    __div__ - divide two variables
+    __mod__ - modulo two variables
+    __pow__ - exponentiation two variables
+    __eq__ - equality comparison
+    __ne__ - inequality comparison
+    __lt__ - less than comparison
+
+### Native Code
+
+**This is an internal feature.**
+
+Wyrm is intended to be a 'self-hosted' language using 'C' as it's internal
+assembly language. The special built-in module 'native' specifies the module
+is intended for compilation:
+
+import native
+
+Importing native allows a module to create and use C functions. The import module
+notifies the interpreter that the module is intended as a compiled wyrm extension.
+Attempting to import a module at runtime will result in an error.
+
+The block function defines a native block. It accepts a symbol specifying the
+generation portion, a list of input symbols, a list of output symbols, and a
+string parameter of content:
+
+    native::block('HEADER, '(), '(), R"C(
+
+    #include <stdio.h>
+    #include <stdlib.h>
+
+    )C")
+
+Block parameters *MUST* be literals. The block function call is detected by the
+compiler and used to feed directly into the generated code.
+
+The following portions of a file are available:
+
+    HEADER - includes, headers, definitions
+    TYPES - type definitions
+    CONSTANTS - constant definitions
+    PROTOS - function prototypes
+    FUNCTIONS - function definitions
+
+Within a generated function, the block operator may be used to define a chunk of
+C code. This chunk of C code will be inserted directly in the generated function.
+The code chunk is placed within it's own dedicated scope. The list of input variables
+is read, the chunk is placed, and the output variables are written.
+
+    fn quadratic_formula(a, b, c) -> float, float:
+        x: float
+        y: float
+        native::block('HEADER, '('a, 'b, 'c), '('x, 'y), R"C(
+            x = (-b + sqrt(b*b - 4*a*c)) / (2*a)
+            y = (-b - sqrt(b*b - 4*a*c)) / (2*a)
+        )C"
+        return x, y
+
+Generated C block:
+
+    wyrm_error func__quadratic_formula(wyrm_state* state)
+    {
+        /* magic start */
+        /* magic block start */
+        {
+           float x;
+           float y;
+   
+           float a = /* magic */;
+           float b = /* magic */;
+           float c = /* magic */;
+   
+           x = (-b + sqrt(b*b - 4*a*c)) / (2*a)
+           y = (-b - sqrt(b*b - 4*a*c)) / (2*a)
+   
+           /* magic */ = x;
+           /* magic */ = y;
+         }
+        /* magic block end */
+    }
+
+Type Mapping:
+
+ - int -> wyrm_word
+ - float -> float
+ - bool -> bool
+ - str (input only) -> wyrm_string*
+ - object -> wyrm_value
