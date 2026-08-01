@@ -30,20 +30,46 @@ if ! command -v npx >/dev/null 2>&1; then
     exit 1
 fi
 
+if [[ ! -d node_modules ]]; then
+    echo "==> node_modules missing, running npm ci"
+    npm ci
+fi
+
+# vsce looks for a LICENSE file next to package.json; pull the repo's
+# root license in rather than duplicating it (this copy is gitignored).
+cp ../../LICENSE ./LICENSE
+
 echo "==> packaging (npm run compile + vsce package)"
-npx --yes @vscode/vsce package --no-dependencies
+npx --yes @vscode/vsce package --no-dependencies --allow-missing-repository
 
 vsix=$(ls -t wyrm-lang-*.vsix | head -1)
 echo "==> built $vsix"
 
 if [[ "$do_install" -eq 1 ]]; then
-    if ! command -v code >/dev/null 2>&1; then
-        echo "rebuild.sh: 'code' CLI not found, skipping install (pass --no-install to silence this)" >&2
+    installed_any=0
+
+    if command -v code >/dev/null 2>&1; then
+        echo "==> installing $vsix (code)"
+        code --install-extension "$vsix"
+        installed_any=1
+    else
+        echo "rebuild.sh: 'code' CLI not found, skipping VS Code install" >&2
+    fi
+
+    if command -v codium >/dev/null 2>&1; then
+        echo "==> installing $vsix (codium)"
+        codium --install-extension "$vsix"
+        installed_any=1
+    else
+        echo "rebuild.sh: 'codium' CLI not found, skipping VSCodium install" >&2
+    fi
+
+    if [[ "$installed_any" -eq 0 ]]; then
+        echo "rebuild.sh: neither 'code' nor 'codium' CLI found, skipping install (pass --no-install to silence this)" >&2
         exit 1
     fi
-    echo "==> installing $vsix"
-    code --install-extension "$vsix"
-    echo "==> done - reload any already-open VS Code window to pick it up"
+
+    echo "==> done - reload any already-open VS Code/VSCodium window to pick it up"
 else
     echo "==> --no-install passed, skipping install"
 fi

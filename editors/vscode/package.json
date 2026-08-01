@@ -4,6 +4,11 @@
   "description": "Syntax highlighting and diagnostics (via wyrm-lsp) for the Wyrm scripting language",
   "version": "0.1.0",
   "publisher": "amarach",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/elfenix/wypoc.git",
+    "directory": "editors/vscode"
+  },
   "engines": {
     "vscode": "^1.75.0"
   },

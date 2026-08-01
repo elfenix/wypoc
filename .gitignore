@@ -21,6 +21,7 @@ build-*
 *.egg-info
 node_modules
 *.vsix
+editors/vscode/LICENSE
 
 # Temporary / working files
 doc.tmp
