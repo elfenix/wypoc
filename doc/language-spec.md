@@ -1,6 +1,14 @@
 
 ## Semantic Explanation of Syntax
 
+### Top-Level
+
+A wyrm module is a list of statements. Every statement produces
+a result. Any standalone expression is the value of the expression.
+
+The statement rule is valid for all special statements: `fn`,
+`class`, `do`, `with`, `import`, `using`.
+
 ### Literals
 
     literal_expr:
@@ -10,6 +18,8 @@
       | 'true'
       | 'false'
       | 'nil'
+
+The value of any literal as a statement is the literal.
 
 #### Signed Numbers
 
@@ -60,9 +70,9 @@ Normal strings are simple double-quoted values:
 Multiline strings may be specified using triple double quote:
 
     """This is a string
-    this is still part of the string.""
+    this is still part of the string."""
 
-Raw strings may be defined using C++ style literal:
+Raw strings may be defined using the R prefix with specific token:
 
     R"(Arbitrary Text)"
     R"extra(WE can noow have (" )extra"
@@ -85,33 +95,7 @@ already produces, e.g. `\a == "asdf"[0]`.
 
 ### Built-in Collections
 
-#### Arrays
-
-Arrays are defined as a set of variables of a single primitive type,
-but that primitive type may be an 'object'.
-
-Use brackets:
-
-    [1, 2, 3, 4]
-
-#### Pair / List
-
-A pair is a mutable type that holds 2 objects. It may be defined by
-quoted parens:
-
-    '('a)
-
-Quoted parens also allow specification of a list of pairs:
-
-    '(1, 2, 3, 4, 5)
-
-Note: the use of ',' operator to define elements. Define an improper
-list utilize `'.` for the last element:
-
-    '(1, 2, 3, 4, '. 6)
-
-Pairs are internally provided to aid in the general representation
-of SCHEME style primitives internally. 
+The value of any collection as a statement is the collection.
 
 #### Tuples
 
@@ -125,15 +109,54 @@ Single element tuple use parens to force the group:
 
 Empty tuple may be specified by open-close parens '()'
 
+#### Pair / List
+
+A list is a sequence of pairs. Wyrm provides the same general
+shorthand syntax as Scheme for defining lists, but substitutes
+brackets for parens. An improper list may be define using the
+'$.' operator and empty list is also allowed:
+
+    []                # empty list, as in scheme '()
+    ['a]              # single element, as in scheme cons('a, '())
+    [1, 2, 3]         # normal list
+    [1, 2, $. 4]      # improper list
+
+#### Arrays
+
+Arrays are defined as a set of variables of a single primitive type,
+but that primitive type may be an 'object'. The type of an array
+literal is determined by the least generic non-union type qualifying
+all items. The '$[' sigil defines the type.
+
+    $[1, 2, 3, 4]
+
+
 #### Tables or Dictionaries
 
-Dictionary definitions use a `'{` sigil rather than bare braces.
+Dictionary definitions use a `${` sigil rather than bare braces.
 
-    '{ "Name": 15 }
+    ${ "Name": 15 }
 
 Empty dictionary:
 
-    '{}
+    ${}
+
+### Type Constraints
+
+A type constraint is a specific syntax for requiring types in function
+definitions, generics, or type checks.
+
+A type identifier alone may be used as a constraint:
+
+    int
+    MyClass
+
+Type identifiers are allowed to have parameters (generic support); the
+parameter is a comma separate list of type identifiers. Additionally,
+may be a list of parameters:
+
+    list[int]
+    callable[[int, float], int]
 
 ### Operators
 
@@ -158,6 +181,11 @@ Boolean operators / set operators:
     a and b
     not a
     a in b
+
+Type checking, (expression) is (type constraint) -
+
+    a is int            # Simple Type check
+    b is int | float    # Check against sum type
 
 Comparisons:
 
@@ -204,7 +232,7 @@ A variable may be constrained to a type with a type hint statement:
     foo: int
 
 A type hint constraint statement does _not_ define the variable - access
-afterword is equivalent to an unset/undefined variables. Undefined
+afterward is equivalent to an unset/undefined variable. Undefined
 variables will generate an error if attempted to be evaluated:
 
     if foo:
@@ -219,7 +247,8 @@ symbol name must be used:
         foo = 1
 
 Wyrm offers a 'set if unset' operator. Evaluation is short circuited
-if the variable is already defined, otherwise the evaluation is processed:
+if the variable is already defined and not of error type, otherwise
+the evaluation is processed:
 
     foo ?= 5
     foo_with_type: int ?= 5
@@ -231,17 +260,6 @@ A variable may have a type specified prior to assignment:
         foo = 5
     else:
         foo = 10
-
-Immutable variables may be created with the 'with' keyword. Setting a
-variable defined using with is considered an error.
-
-    with speed_of_light: float = 299_792_458.0;
-
-Multiple constants can be defined using a with block:
-
-    with:
-        speed_of_light: float = 299_792_458.0;
-        gravitational_constant = 6.6743e-11;
 
 Static variables start with the '$' operator. A static variable is tied
 to the symbol definition rather than the execution context. A static
@@ -258,33 +276,72 @@ Import is simple:
 
     import mod
 
-Imports in subdirectories:
+Imports with nested submodules:
 
     import mod::baz::bar
 
-Once a module is imported, the name scope operator can pull in:
+Once a module is imported, the name scope operator can pull in elements:
 
     import mod
     mod::function()
 
-From may be utilized to import names:
+The import statement creates the namespace for each module part. It is
+valid to alias the import if desired:
 
-    from mod import function
-    function()
+    import mod::baz::bar as bar
 
-The using keyword allows manipulation of names. Using on a bare module
-will import all names defined by the module into the current namespace.
+The alias results in only 'bar' being added to the module namespace.
+
+The 'using' statement allows further manipulation and aliasing of names.
+
+Using an imported module name results in a wild card import of all exported names
+within the module:
 
     import math
     using math
 
+This works with aliased modules as well:
+
+    import math as bar
+    using bar
+
 Using may also import individual symbols:
 
-    using math::sin;
+    using sin from math;
 
-Or to create aliases:
+Or to create aliases with as keyword:
 
-    using sin = math::sin;
+    using long_math_name_lots_of_typing as corefn from math;
+
+And a list is valid:
+
+    using sin, cos, long_math_name as lfn from math;
+
+Parens are allowed:
+
+    using (sin, cos) from math
+
+### Special Blocks
+
+The with keywords allows binding a series of immutable variables to expression
+values. Setting a variable defined using with is considered an error.
+
+    with:
+        speed_of_light: float = 299_792_458.0;
+        gravitational_constant = 6.6743e-11;
+
+The do keyword allows creation of a scope, the equivalent to defining a lambda
+function and immediately calling it. Used in an expression, the value of the
+do statement is the last executed line:
+
+    complex_answer = do:
+        step_1()
+        step_2()
+        ...
+        step_n()
+        10
+
+    # complex_answer == 10
 
 ### Basic Functions
 
@@ -293,7 +350,7 @@ Basic functions should look exceedingly familiar to Python users. Most all
 
 The basic syntax for a function is:
 
-    fn [type...] name(parameters...) -> [result] block...
+    fn [type...] name(parameters...) -> [result type constraint] block...
 
 Most elements are optional, a minimal function definition with no parameters:
 
@@ -305,22 +362,27 @@ Functions return a value with the return keyword statement:
     fn message():
         return "Hello World"
 
-A function may routine multiple values:
-
-    fn message() -> int, str, str:
-        return 1984, "Text Here", "Text Here 2"
-
 Return type may be specified:
 
     fn message() -> str:
         return "Hello World"
+
+If no explicit 'return' is used, the value of the last statement is used:
+
+    fn message() -> str:
+        "Hello World"
+
+A function may return multiple values:
+
+    fn message() -> int, str, str:
+        return 1984, "Text Here", "Text Here 2"
 
 Parameters may be specified:
 
     fn message(name) -> str:
         return "Hello " + name
 
-    fn message(greeting: str, name; str) -> str:
+    fn message(greeting: str, name: str) -> str:
         return greeting + name
     
 Variable length arguments may be collected by the '*' operator:
@@ -352,8 +414,6 @@ Basic control flow statements - if, while, and for.
         statements
     elif condition_2:
         statements
-    elif condition_3:
-        statements
     elif condition_n:
         statements
     else:
@@ -376,6 +436,68 @@ For statement:
             break
     else:
         statement_if_no_break
+
+Like other statements, `if`/`while`/`for` produce the value of the
+last statement executed in whichever branch or iteration actually
+ran. If a branch is skipped entirely - an `if` with no matching
+`elif`/`else`, or a `while`/`for` whose body never executes - the
+value is `nil`.
+
+    fn t1(choice: bool) -> int:
+        if choice:
+            5
+        else:
+            10
+
+    # t1(true) -> 5
+    # t1(false) -> 10
+
+    fn t2(choice: bool) -> int:
+        if choice:
+            5
+
+    # t2(true) -> 5
+    # t2(false) -> nil          (no else; condition was false)
+
+`break` may carry a value, which becomes the loop's value in place
+of whatever statement last executed:
+
+    fn first_even(items) -> int:
+        for x in items:
+            if x % 2 == 0:
+                break x
+        else:
+            nil
+
+    # returns the first even item, or nil if the loop completes
+    # (or is empty) without finding one
+
+Try statement. If the type of the expression is an error, return immediately:
+
+    file = try open('badfile.txt')
+
+The catch statement may be used instead of try to set a value in case of error:
+
+    file = open('badfile.txt') catch open('goodfile.txt')
+
+The try statement may specify the resultant return value using return.
+
+    value = lookup_table['value'] catch return 0
+
+Defer block. The contents of the block are executed when the dynamic
+scope of the containing block is complete.
+
+    v = new resource()
+    defer:
+        v ! release()
+
+Defer with return condition. The block is armed during the dynamic scope
+of the calling block and will trigger if any block within the calling block's
+dynamic scope forces a return with either 'return' or 'try' statements.
+
+    v = new resource()
+    defer on error:       # equivalent to defer { if ( defined_return_value is error ) ... }
+        v ! release()
 
 ### Messages
 
@@ -482,25 +604,55 @@ parameters to the constructor:
 
     person_instance = new person()
 
+The value of the new type is either the object type constructed or error.
+Essentially:
+
+    fn person_init() -> person | error { return /* constructed person */; }
+
 A class constructor may be specified within the class. The constructor defines
 the default initialized variables for the object and then a block of code
 that executes immediately after. All variables must have defined default
 
-Basic syntax (within class) [FIXME/TODO]:
+Basic syntax:
 
-    init (arguments) with 'defaults block...' 'initialization block'
+    init (arguments) [with 'defaults block...'] [do: 'initialization block']
 
-Example with init:
+Example with both with and do:
 
-    class coordinate2d:
+    class vector:
         slot x: float
         slot y: float
+        slot len: float
     
-        init (x: float, y: float) with:
-            x = x
-            y = y
+        init (a_x: float, a_y: float) with:
+            x = a_x
+            y = a_y
+        do:
+            # this.len == 0 (system forced default value)
+            this.len = (x ** 2 + y ** 2) ** 0.5
 
-TODO TODO TODO: constructor syntax still ugly / needs improvement ????
+Example with only do:
+
+    class options:
+        slot opt_1: int = 0
+        slot opt_2: int = 0
+
+        init (set: int, first: bool) do:
+            if first:
+                this.opt_1 = set
+            else:
+                this.opt_2 = set
+
+Errors / RAII - returning an error in init overides the 'new' result:
+
+    class demo:
+        slot result: int
+
+        init (num: int, den: int) do:
+            this.result = try num / den
+
+    x: demo | str = new demo(5, 0) catch 'div0'
+
 
 #### Slots
 
@@ -555,9 +707,19 @@ Coroutines may also accept values:
 
 The input type may be specified:
 
-    co div2_1x() <- int -> float:
+    co div2_1x(<- int) -> float:
         a = yield 0
         yield a / 2.0
+
+An example with other parameters:
+
+    co add_5x(<- float, addend: float) -> float:
+         a = yield 0
+         a = yield a + addend
+         a = yield a + addend
+         a = yield a + addend
+         a = yield a + addend
+         yield a + addend
 
 
 ## Types and Type System
@@ -569,10 +731,17 @@ type and holds a primitive value. The 'is' boolean operator checks that the
 variable type matches and the primitive value is identical.
 
 Primitive types:
-  - boolean
-  - float
-  - int
-  - object pointer
+  - **nil**: a nil value
+  - **error**: an error value
+  - **bool**: a boolean True/False value
+  - **float**: floating point
+  - **int**: a machine word
+  - **sym**: Symbol table entry (growing dynamic entries)
+  - **dict** GC ref: dictionary
+  - **pair** GC ref: a pair (or list)
+  - **array** GC ref: an array
+  - **object** GC ref: object information, any general purpose class or user defined class
+  - **str** GC ref: a string value
 
 ## Core Features
 
@@ -610,7 +779,7 @@ The block function defines a native block. It accepts a symbol specifying the
 generation portion, a list of input symbols, a list of output symbols, and a
 string parameter of content:
 
-    native::block('HEADER, '(), '(), R"C(
+    native::block('HEADER, [], [], R"C(
 
     #include <stdio.h>
     #include <stdlib.h>
@@ -636,7 +805,7 @@ is read, the chunk is placed, and the output variables are written.
     fn quadratic_formula(a, b, c) -> float, float:
         x: float
         y: float
-        native::block('HEADER, '('a, 'b, 'c), '('x, 'y), R"C(
+        native::block('HEADER, ['a, 'b, 'c], ['x, 'y], R"C(
             x = (-b + sqrt(b*b - 4*a*c)) / (2*a)
             y = (-b - sqrt(b*b - 4*a*c)) / (2*a)
         )C"
@@ -672,3 +841,42 @@ Type Mapping:
  - bool -> bool
  - str (input only) -> wyrm_string*
  - object -> wyrm_value
+
+## Idiomatic Recommendations
+
+### Error Handling
+
+Annotate functions that may return error using union error:
+
+    fn may_fail() -> int | error:
+        ...
+
+Leverage defer on error to handle cleanup:
+
+    resource = new resource()
+    defer on error:
+        resource ! cleanup()
+
+    try setup(resource)
+    return resource
+
+Consider cleaning up and terminating the error if it makes sense:
+
+    resource = new resource()
+    defer on error | nil:
+        resource ! cleanup()
+
+    try setup(resource)
+    check_if_should_return(resource) catch return nil
+    return resource
+
+Use the ?= operator to catch and default values. This can be leveraged
+and eventually used with a try statement for a series of attempts:
+
+    f = open('try_location_1.txt')
+    f ?= open('try_location_2.txt')
+    f ?= try open('try_final_location.txt')
+
+Leverage catch to detect actual errors if truthy false is a valid result:
+
+    f = lookup['value'] catch 0
