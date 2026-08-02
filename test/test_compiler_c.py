@@ -1,4 +1,4 @@
-"""Tests for wyrm --compile (wypoc/compiler_c.py): structural checks on the
+"""Tests for wyrm --compile (wypoc/compiler_c/, see its DESIGN.md): structural checks on the
 generated C for the supported fixtures under wypoc/samples/, plus one
 CompileError case per documented v1 scope cut.
 
