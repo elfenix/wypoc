@@ -23,7 +23,7 @@ ERROR_SAMPLES = {
     "compile_err_float_param.wy": "unsupported type 'float'",
     "compile_err_non_tail_call.wy": "calls nested inside larger expressions",
     "compile_err_for_loop.wy": "statement not supported by --compile",
-    "compile_err_class_def.wy": "top-level statement not supported by --compile",
+    "compile_err_class_def.wy": "'init' not supported by --compile",
 }
 
 
@@ -80,6 +80,16 @@ def test_call_inside_loop_and_if_structure():
     assert "static wyrm_exec_state compile_call_in_loop_abs_via_call_chunk_b1_1(wyrm_state* state)" in c_src
 
 
+def test_class_def_structure():
+    c_src = compile_sample("compile_class_def.wy")
+    assert "wyrm_error w_compile_class_def_Point(wyrm_context* context, wyrm_class** out)" in c_src
+    assert "wyrm_error w_compile_class_def_Flag(wyrm_context* context, wyrm_class** out)" in c_src
+    assert 'wyrm_machine_insert_symbol(machine, "Point", &sym_name)' in c_src
+    assert 'wyrm_machine_insert_symbol(machine, "x", &sym_slot_x)' in c_src
+    assert "wyrm_class_add_slot_f(cls, sym_slot_x, WYRM_TYPE_TAG_WORD)" in c_src
+    assert "wyrm_class_add_slot_f(cls, sym_slot_on, WYRM_TYPE_TAG_WORD)" in c_src
+
+
 def test_native_block_splice():
     c_src = compile_sample("compile_native_block.wy")
     assert "#include <stdio.h>" in c_src
@@ -107,7 +117,7 @@ WYRM_INCLUDE_DIR = os.path.normpath(
 @pytest.mark.parametrize(
     "name", [
         "compile_leaf.wy", "compile_tail_call.wy", "compile_native_block.wy",
-        "compile_non_tail_call.wy", "compile_call_in_loop.wy",
+        "compile_non_tail_call.wy", "compile_call_in_loop.wy", "compile_class_def.wy",
     ],
 )
 def test_generated_c_passes_gcc_syntax_check(name, tmp_path):

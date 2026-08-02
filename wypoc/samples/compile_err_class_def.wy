@@ -2,3 +2,6 @@ import native
 
 class Foo:
     slot x: int
+
+    init (x: int) with:
+        x = x

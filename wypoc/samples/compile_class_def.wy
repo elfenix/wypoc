@@ -1,0 +1,8 @@
+import native
+
+class Point:
+    slot x: int
+    slot y: int
+
+class Flag:
+    slot on: bool

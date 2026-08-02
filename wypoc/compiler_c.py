@@ -6,11 +6,13 @@ worked example (`w_do_a_mul` / `w_multipart`).
 This is a narrow v1 slice, not a general compiler: only `fn` defs with
 `int`/`bool` params & locals, straight-line arithmetic, `if`/`while`,
 calls (tail and non-tail, anywhere a statement may appear) to other
-compiled functions in the same module, and the `native::block(...)`
-escape hatch from doc/language-spec.md's "Native Code" section. Anything
-else raises CompileError with a specific message - the same "fail loud,
-not silently wrong" convention wyrm_eval_parse_tree.py uses for its own
-known gaps (see wypoc/README.md's "Known gaps").
+compiled functions in the same module, the `native::block(...)` escape
+hatch from doc/language-spec.md's "Native Code" section, and bare `class`
+defs (typed slots only - no bases, defaults, slot options, or `init`)
+compiled to a `w_{module}_{class}` builder returning a `wyrm_class*`.
+Anything else raises CompileError with a specific message - the same
+"fail loud, not silently wrong" convention wyrm_eval_parse_tree.py uses
+for its own known gaps (see wypoc/README.md's "Known gaps").
 
 Every `fn` body is compiled as a graph of small `wyrm_exec_fn` "chunks"
 rather than one C function - one non-static entry point, `w_{module}_
@@ -631,6 +633,73 @@ class _FnCompiler:
         _err("expression not supported by --compile", node)
 
 
+def _compile_class(classdef: ast.ClassDef, module_ident: str) -> str:
+    """Compile a single `class` into a plain (non-`wyrm_exec_fn`) C function,
+    `w_{module}_{class}`, that builds and returns the `wyrm_class*` describing
+    it - one `wyrm_class_new` + a `wyrm_class_add_slot_f` per slot, named
+    after the same `w_{module}_{name}` scheme `fn` entries use. Only bare
+    slots (typed, no default, no options) are supported; bases, `init`, and
+    methods declared inside the class body all raise CompileError, since
+    --compile v1 doesn't support constructors or inheritance."""
+    if classdef.bases:
+        _err(f"class '{classdef.name}': inheritance not supported by --compile", classdef)
+
+    slots = []  # [(name, wyrm type name)]
+    seen_slots = set()
+    for member in classdef.body:
+        if isinstance(member, ast.SlotDef):
+            if member.name in seen_slots:
+                _err(f"class '{classdef.name}': duplicate slot '{member.name}'", member)
+            seen_slots.add(member.name)
+            if member.default is not None:
+                _err(
+                    f"class '{classdef.name}' slot '{member.name}': default values not "
+                    f"supported by --compile", member,
+                )
+            if member.options:
+                _err(
+                    f"class '{classdef.name}' slot '{member.name}': slot options not "
+                    f"supported by --compile", member,
+                )
+            slots.append((member.name, _ctype(member.type, f"class '{classdef.name}' slot '{member.name}'")))
+        elif isinstance(member, ast.InitDef):
+            _err(f"class '{classdef.name}': 'init' not supported by --compile (constructors not supported yet)", member)
+        else:
+            _err(
+                f"class '{classdef.name}': methods declared inside the class body are not "
+                f"supported by --compile (use 'fn [{classdef.name}] ...')", member,
+            )
+
+    entry_name = f"w_{module_ident}_{classdef.name}"
+    lines = [
+        f"wyrm_error {entry_name}(wyrm_context* context, wyrm_class** out)",
+        "{",
+        "    wyrm_machine* machine = wyrm_context_get_machine(context);",
+        "    wyrm_class* cls = WYRM_NULL;",
+        "    wyrm_error err = wyrm_class_new(context, &cls);",
+        "    if (err != WYRM_ERR_NONE) { return err; }",
+        "",
+        "    wyrm_primitive sym_name = {0};",
+        f'    err = wyrm_machine_insert_symbol(machine, "{classdef.name}", &sym_name);',
+        "    if (err != WYRM_ERR_NONE) { return err; }",
+        "    wyrm_class_set_name_f(cls, sym_name);",
+    ]
+    for slot_name, type_name in slots:
+        _ctype_, tag, _field = _TYPES[type_name]
+        sym = f"sym_slot_{slot_name}"
+        lines.append("")
+        lines.append(f"    wyrm_primitive {sym} = {{0}};")
+        lines.append(f'    err = wyrm_machine_insert_symbol(machine, "{slot_name}", &{sym});')
+        lines.append("    if (err != WYRM_ERR_NONE) { return err; }")
+        lines.append(f"    err = wyrm_class_add_slot_f(cls, {sym}, {tag});")
+        lines.append("    if (err != WYRM_ERR_NONE) { return err; }")
+    lines.append("")
+    lines.append("    *out = cls;")
+    lines.append("    return WYRM_ERR_NONE;")
+    lines.append("}\n")
+    return "\n".join(lines)
+
+
 def compile_module(tree: ast.Program, module_name: str) -> str:
     """Compile a parsed Wyrm module (must `import native`) into C source
     text targeting the real wyrm VM calling convention. Raises
@@ -645,6 +714,7 @@ def compile_module(tree: ast.Program, module_name: str) -> str:
     sections = {p: [] for p in _NATIVE_PORTIONS}
     functions_order = []  # [("fn", FnDef) | ("raw", c_text), ...] in source order
     fn_defs = []
+    class_defs = []
     seen_names = set()
 
     for stmt in tree.body:
@@ -661,6 +731,12 @@ def compile_module(tree: ast.Program, module_name: str) -> str:
             seen_names.add(stmt.name)
             fn_defs.append(stmt)
             functions_order.append(("fn", stmt))
+            continue
+        if isinstance(stmt, ast.ClassDef):
+            if stmt.name in seen_names:
+                _err(f"duplicate top-level definition of '{stmt.name}'", stmt)
+            seen_names.add(stmt.name)
+            class_defs.append(stmt)
             continue
         if isinstance(stmt, ast.ExprStmt) and isinstance(stmt.value, ast.Call) and _is_native_block_call(stmt.value):
             portion, inputs, outputs, body = _parse_native_block_args(stmt.value)
@@ -693,7 +769,10 @@ def compile_module(tree: ast.Program, module_name: str) -> str:
             compiled.extend(texts)
             chunk_protos.extend(f"static wyrm_exec_state {name}(wyrm_state* state);" for name in fc.chunk_names)
 
+    compiled_classes = [_compile_class(cls, module_ident) for cls in class_defs]
+
     protos = [f"wyrm_exec_state w_{module_ident}_{fn.name}(wyrm_state* state);" for fn in fn_defs]
+    protos.extend(f"wyrm_error w_{module_ident}_{cls.name}(wyrm_context* context, wyrm_class** out);" for cls in class_defs)
     protos.extend(chunk_protos)
     if uses_forwarder:
         protos.insert(0, "static wyrm_exec_state __wyrm_forward_result(wyrm_state* state);")
@@ -719,4 +798,5 @@ def compile_module(tree: ast.Program, module_name: str) -> str:
     if uses_forwarder:
         parts.append(_FORWARDER_SRC)
     parts.extend(compiled)
+    parts.extend(compiled_classes)
     return "\n".join(parts) + "\n"
