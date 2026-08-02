@@ -1,0 +1,20 @@
+import native
+
+fn inc(a: int) -> int:
+    return a + 1
+
+fn sum_to(n: int) -> int:
+    i: int = 0
+    total: int = 0
+    while i < n:
+        total = inc(total)
+        i = inc(i)
+    return total
+
+fn abs_via_call(x: int) -> int:
+    result: int
+    if x < 0:
+        result = inc(0 - x)
+    else:
+        result = inc(x)
+    return result

@@ -191,10 +191,10 @@ tiny example).
 `compiler_c.py` is a second, alternative backend over the same
 `ast_nodes.py` tree the evaluator walks: instead of running a module, it
 translates it to C targeting the real wyrm VM's calling convention
-(`wyrm_exec_fn` / `wyrm_state*`, per `src/wyrm/main.c` in the sibling
-`wyrm` repo) - a real step toward wyrm's stated goal of self-hosting with
-C as its "assembly language" (see `doc/language-spec.md`'s "Native Code"
-section).
+(`wyrm_exec_fn` / `wyrm_state*`, following the call-handling pattern
+demonstrated in the reference implementation's worked example) - a real
+step toward wyrm's stated goal of self-hosting with C as its "assembly
+language" (see `doc/language-spec.md`'s "Native Code" section).
 
 This is a deliberately narrow v1 slice, not a general compiler:
 
@@ -206,18 +206,30 @@ This is a deliberately narrow v1 slice, not a general compiler:
   `break`/`continue`, and `return` are compiled. `float` is deliberately
   unsupported: the real `wyrm_type_tag` enum has no dedicated float tag
   yet, so there's no encoding to target honestly.
-- A call to another compiled function is only supported as `return f(...)`
-  (a genuine tail position - `return` always exits, so this covers every
-  real tail call regardless of where it's textually written). It compiles
-  to `wyrm_state_call_continue` plus a small shared forwarding
-  continuation (`__wyrm_forward_result`) that relays the callee's result
-  back up unchanged. This is *not* the zero-overhead
-  `WYRM_EXEC_TAIL_CALL` + `wyrm_stack_replace_frame_f` path `fiber.c`'s
-  trampoline supports - that path has no working example anywhere in the
-  `wyrm` repo to verify frame/stack mechanics against yet, so v1 stays on
-  the one calling pattern that *is* demonstrated (`main.c`'s
-  `w_do_a_mul`). Any other call position (`y = f(x) + 1`, a bare call
-  statement, a call as an argument, ...) raises `CompileError`.
+- Each `fn` compiles to one non-static entry point (`w_{module}_{fn}`)
+  plus a `static` chunk per basic block - every `if`/`elif`/`else` and
+  `while` body is its own chunk, and every non-tail call splits its
+  enclosing block into a chunk before and a chunk after. A call to
+  another compiled function is supported anywhere a statement may appear
+  (`return f(...)`, `x = f(...)`, or a bare `f(...)`) - just not nested
+  inside a larger expression (`y = f(x) + 1` still raises `CompileError`).
+  Locals live in fixed slots on the VM's value stack (not C variables) for
+  a function's whole lifetime, so they survive both kinds of transition
+  between chunks: a same-activation jump (`wyrm_state_set_pending`, used
+  for branch dispatch and loop iteration - it never touches the value
+  stack, so looping this way costs nothing per iteration) and a real call
+  (`wyrm_state_call_continue`, used for an actual call into another
+  compiled `fn` - its return value is copied into the target's slot and
+  the stack immediately truncated back with `wyrm_state_pop_to_value_count`,
+  keeping a function's footprint constant even across many calls or a
+  call inside a loop). `return f(...)` is the one exception, compiling to
+  `wyrm_state_call_continue` plus a small shared forwarding continuation
+  (`__wyrm_forward_result`) that relays the callee's result on up
+  unchanged, rather than the zero-overhead `WYRM_EXEC_TAIL_CALL` +
+  `wyrm_stack_replace_frame_f` path `fiber.c`'s trampoline supports - that
+  path has no worked example to verify frame/stack mechanics against yet.
+  See `compiler_c.py`'s module docstring for the full chunk-naming and
+  jump/call scheme.
 - `native::block('PORTION, '(inputs...), '(outputs...), R"tag(...)tag")`
   (see the language spec) is supported both at module top level (spliced
   into the matching `HEADER`/`TYPES`/`CONSTANTS`/`PROTOS`/`FUNCTIONS`
@@ -327,7 +339,7 @@ Or a single file:
 | `test_eval_io.py` | `wyrm_io.py`'s primitives: write/read round-trip, `lseek`, `dup2` handle aliasing (shared file position), `close`/`flush`, and that a closed handle raises. |
 | `test_cli.py` | The *installed* `wyrm` console script via `subprocess` - arg packing (including args that look like flags), all four exit-code/error paths. Skipped if the `wyrm` console script isn't installed. |
 | `test_lsp.py` | `diagnostics_for_source()` directly (no JSON-RPC/server involved): clean source -> no diagnostics, a syntax error -> exactly one diagnostic on the right (0-indexed) line, and every bundled sample fixture is confirmed diagnostic-free. |
-| `test_compiler_c.py` | `wyrm --compile` (`compiler_c.py`): structural checks on generated C for leaf functions, tail calls, and `native::block` splices; one `CompileError` per documented v1 scope cut; an optional `gcc -fsyntax-only` check against the sibling `wyrm` repo's real headers when both are available. |
+| `test_compiler_c.py` | `wyrm --compile` (`compiler_c.py`): structural checks on generated C for leaf functions, tail and non-tail calls (including calls inside `if`/`while` bodies), and `native::block` splices; one `CompileError` per documented v1 scope cut; an optional `gcc -fsyntax-only` check against the sibling `wyrm` repo's real headers when both are available. |
 
 ## Known gaps
 
@@ -359,7 +371,7 @@ gap worth filing, not an intentional omission - `eval_expr`/`eval_stmt`'s
 final fallback (`cannot evaluate <NodeType>`) is the tell.
 
 `wyrm --compile` (`compiler_c.py`) has its own, much narrower, set of
-deliberate v1 scope cuts (non-tail calls, `float`, `for`, classes,
-coroutines, collections, multi-module compilation) - see "The compiler"
-above rather than this list, since they're compile-time-only and don't
-affect the interpreter.
+deliberate v1 scope cuts (calls nested inside larger expressions, `float`,
+`for`, classes, coroutines, collections, multi-module compilation) - see
+"The compiler" above rather than this list, since they're compile-time-only
+and don't affect the interpreter.

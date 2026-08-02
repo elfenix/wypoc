@@ -64,6 +64,22 @@ def test_non_tail_call_structure():
     assert "return WYRM_EXEC_CONTINUE;" in c_src
 
 
+def test_call_inside_loop_and_if_structure():
+    c_src = compile_sample("compile_call_in_loop.wy")
+    # sum_to()'s while body makes two real calls per iteration; each one must
+    # pop back to exactly the local-slot count before looping, so the value
+    # stack never grows across iterations.
+    assert "static wyrm_exec_state compile_call_in_loop_sum_to_chunk_b0_1(wyrm_state* state)" in c_src
+    assert "static wyrm_exec_state compile_call_in_loop_sum_to_chunk_b0_2(wyrm_state* state)" in c_src
+    assert "static wyrm_exec_state compile_call_in_loop_sum_to_chunk_b0_3(wyrm_state* state)" in c_src
+    assert "wyrm_state_pop_to_value_count(state, 3);" in c_src
+    assert "wyrm_state_set_pending(state, compile_call_in_loop_sum_to_chunk_2);" in c_src
+    # abs_via_call()'s if/else branches each contain a call - previously
+    # rejected as "calls nested inside if/while bodies", now supported.
+    assert "static wyrm_exec_state compile_call_in_loop_abs_via_call_chunk_b0_1(wyrm_state* state)" in c_src
+    assert "static wyrm_exec_state compile_call_in_loop_abs_via_call_chunk_b1_1(wyrm_state* state)" in c_src
+
+
 def test_native_block_splice():
     c_src = compile_sample("compile_native_block.wy")
     assert "#include <stdio.h>" in c_src
@@ -89,7 +105,10 @@ WYRM_INCLUDE_DIR = os.path.normpath(
     reason="gcc and/or the sibling wyrm repo's include/ directory aren't available",
 )
 @pytest.mark.parametrize(
-    "name", ["compile_leaf.wy", "compile_tail_call.wy", "compile_native_block.wy", "compile_non_tail_call.wy"],
+    "name", [
+        "compile_leaf.wy", "compile_tail_call.wy", "compile_native_block.wy",
+        "compile_non_tail_call.wy", "compile_call_in_loop.wy",
+    ],
 )
 def test_generated_c_passes_gcc_syntax_check(name, tmp_path):
     c_src = compile_sample(name)

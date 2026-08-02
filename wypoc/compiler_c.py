@@ -5,40 +5,59 @@ worked example (`w_do_a_mul` / `w_multipart`).
 
 This is a narrow v1 slice, not a general compiler: only `fn` defs with
 `int`/`bool` params & locals, straight-line arithmetic, `if`/`while`,
-calls (tail and non-tail) to other compiled functions in the same
-module, and the `native::block(...)` escape hatch from
-doc/language-spec.md's "Native Code" section. Anything else raises
-CompileError with a specific message - the same "fail loud, not silently
-wrong" convention wyrm_eval_parse_tree.py uses for its own known gaps
-(see wypoc/README.md's "Known gaps").
+calls (tail and non-tail, anywhere a statement may appear) to other
+compiled functions in the same module, and the `native::block(...)`
+escape hatch from doc/language-spec.md's "Native Code" section. Anything
+else raises CompileError with a specific message - the same "fail loud,
+not silently wrong" convention wyrm_eval_parse_tree.py uses for its own
+known gaps (see wypoc/README.md's "Known gaps").
 
-Every compiled `fn` becomes one non-static entry point,
-`w_{module}_{fn}`, plus zero or more `static` continuation chunks,
-`{module}_{fn}_chunk_{n}`, each a full `wyrm_exec_fn`. A chunk boundary
-is introduced at every *non-tail* call site (`x = f(...)` or a bare
-`f(...)` statement) that appears directly in a function's top-level
-statement list - calls nested inside `if`/`while` bodies or larger
-expressions are not split and remain unsupported (CompileError). Each
-call compiles to `wyrm_state_call_continue(state, next_chunk, callee,
-args, argc); return WYRM_EXEC_CONTINUE;`, preceded by pushing every
-local the function has declared so far onto the state's value stack (in
-a fixed, function-wide order) so the next chunk can recover them by
-index once the callee's return value(s) land on top - this mirrors how
-the reference implementation's `wyrm_stack_push/pop_continuation_f`
-preserve a caller's frame beneath a callee's. This "preserve everything,
-every time" scheme is intentionally unoptimized (no liveness analysis)
-in exchange for being simple and uniform; see chunk_id-numbering below.
+Every `fn` body is compiled as a graph of small `wyrm_exec_fn` "chunks"
+rather than one C function - one non-static entry point, `w_{module}_
+{fn}`, plus a `static` chunk per basic block: every `if`/`elif`/`else`
+and `while` body is its own chunk, and every non-tail call site splits
+its enclosing block into a chunk before the call and one after. Chunks
+are named `{module}_{fn}_chunk_b{p0}_b{p1}..._{n}`, where the `b*`
+segments are a tree-coordinate path down through nested blocks (empty
+for the function's own top-level block) and `n` is a sequence number
+among chunks sharing that path. This is intentionally not optimized -
+every block gets a real C function and a real state-machine transition,
+even ones with no call in them - in exchange for one uniform code path
+that already generalizes to arbitrary nesting, per wypoc project notes.
 
-Tail calls (`return f(...)`) still compile to `wyrm_state_call_continue`
-+ a shared forwarding continuation (`__wyrm_forward_result`), not
-`WYRM_EXEC_TAIL_CALL` + `wyrm_stack_replace_frame_f` - the latter is the
-"proper" zero-overhead tail call the reference implementation's fiber
-trampoline supports, but there is no worked example of it to verify
-frame/stack mechanics against (only the CONTINUE-style pattern is
-demonstrated). Generating unverified raw-stack-manipulation code for a
-feature this new isn't worth the risk; the forwarder is a correct, if
-slightly less efficient, alternative confined entirely to the
-demonstrated API surface.
+Two kinds of transition connect chunks, both ending in `return
+WYRM_EXEC_CONTINUE;`:
+
+- A **same-activation jump** (`wyrm_state_set_pending`) - used for
+  `if`/`elif`/`else` branch dispatch, entering/looping a `while`, and
+  `break`/`continue`. It only swaps which `wyrm_exec_fn` runs next; it
+  never touches the value stack, so looping this way costs nothing per
+  iteration (this is *not* `WYRM_EXEC_TAIL_CALL` + `wyrm_stack_
+  replace_frame_f`, the "proper" trampoline `fiber.c` supports - there's
+  still no worked example of that path to verify frame/stack mechanics
+  against; `set_pending` gets the same "no stack growth" property for
+  same-function control flow via the demonstrated API surface instead).
+- A **real call** (`wyrm_state_call_continue`) - used for an actual call
+  into another compiled `fn`. It pushes a fresh frame for the callee, so
+  the caller's locals must already live *on* the value stack (not in C
+  variables) to survive it: every local gets one fixed slot, established
+  once by the entry chunk and addressed via `wyrm_state_value_n(state,
+  slot)` from every chunk of the function for its entire lifetime,
+  restored to exactly that many slots (`wyrm_state_pop_to_value_count`)
+  right after each call's return value is copied out. That keeps a
+  function's own stack footprint at a constant size regardless of how
+  many calls it makes or how many times a loop containing one runs -
+  the loop-inside-a-call-with-no-cleanup-primitive problem this scheme
+  depends on `wyrm_state_pop_to_value_count` (a small addition to the
+  reference implementation made specifically for this) to solve.
+
+Tail calls (`return f(...)`) are the one case that isn't a plain
+same-activation jump or a plain real call: they still compile to
+`wyrm_state_call_continue` plus a shared forwarding continuation
+(`__wyrm_forward_result`) that relays the callee's result stack-for-
+stack back to whatever called *this* function, since a real tail call
+should not grow the caller's own footprint the way an ordinary call's
+"read result, pop back down" sequence does.
 """
 from wypoc import ast_nodes as ast
 from wypoc.wyrm_eval_parse_tree import eval_string_literal
@@ -137,21 +156,26 @@ def _parse_native_block_args(call: ast.Call):
 
 class _FnCompiler:
     """Compiles a single `fn` into one non-static entry `wyrm_exec_fn`
-    (`w_{module}_{fn}`) plus zero or more `static` continuation chunks
-    (`{module}_{fn}_chunk_{n}`), one per non-tail call site."""
+    (`w_{module}_{fn}`) plus a `static` chunk per basic block - see this
+    module's docstring for the chunk-naming and jump/call scheme."""
 
     def __init__(self, fndef: ast.FnDef, functions: dict, module_ident: str):
         self.fndef = fndef
         self.functions = functions  # name -> FnDef, for call resolution
         self.module_ident = module_ident
-        self.locals: dict = {}  # name -> wyrm type name ("int"/"bool")
+        self.locals: dict = {}  # name -> wyrm type name ("int"/"bool"), fn-wide
         self.lines: list = []
         self.indent = 0
         self.uses_forwarder = False
         self._tmp = 0
-        self._chunk_counter = 0
-        self.chunk_texts: list = []  # completed C function texts, entry first
+        self.chunk_texts: list = []  # completed C function texts, in emission order
         self.chunk_names: list = []  # static chunk names, for module-level protos
+        self._block_serial: dict = {}  # block_path -> next chunk serial in that block
+        self._child_counter: dict = {}  # block_path -> next child block index
+        self._break_target = None  # 0-arg callable, or None outside a loop
+        self._continue_target = None
+
+    # -- naming --
 
     def _new_tmp(self, prefix="__t") -> str:
         self._tmp += 1
@@ -160,12 +184,48 @@ class _FnCompiler:
     def _entry_name(self, fn_name=None) -> str:
         return f"w_{self.module_ident}_{fn_name if fn_name is not None else self.fndef.name}"
 
-    def _new_chunk_name(self) -> str:
-        self._chunk_counter += 1
-        return f"{self.module_ident}_{self.fndef.name}_chunk_{self._chunk_counter}"
+    def _format_chunk_name(self, block_path, serial) -> str:
+        prefix = f"{self.module_ident}_{self.fndef.name}_chunk"
+        if not block_path:
+            return f"{prefix}_{serial}"
+        return prefix + "".join(f"_b{p}" for p in block_path) + f"_{serial}"
+
+    def _same_block_chunk_name(self, block_path) -> str:
+        """Allocate the next chunk within block_path (a call-split
+        continuation or a join point), registering it for a proto."""
+        n = self._block_serial.get(block_path, 0) + 1
+        self._block_serial[block_path] = n
+        name = self._format_chunk_name(block_path, n)
+        self.chunk_names.append(name)
+        return name
+
+    def _new_child_block(self, parent_path):
+        """Allocate a fresh nested block (an if/elif/else/while body) and
+        its first chunk. Returns (child_path, first_chunk_name)."""
+        n = self._child_counter.get(parent_path, 0)
+        self._child_counter[parent_path] = n + 1
+        child_path = parent_path + (n,)
+        return child_path, self._same_block_chunk_name(child_path)
+
+    # -- chunk buffer management --
 
     def emit(self, text=""):
         self.lines.append(("    " * self.indent) + text if text else "")
+
+    def _begin_chunk(self, name: str, static: bool):
+        self.lines = []
+        self.indent = 0
+        self.emit(f"{'static ' if static else ''}wyrm_exec_state {name}(wyrm_state* state)")
+        self.emit("{")
+        self.indent += 1
+
+    def _end_chunk(self):
+        self.indent -= 1
+        self.emit("}")
+        self.chunk_texts.append("\n".join(self.lines) + "\n")
+
+    def _emit_done(self):
+        self.emit("return WYRM_EXEC_DONE;")
 
     # -- pass 1: collect locals (every local must have a known type before use) --
 
@@ -225,60 +285,39 @@ class _FnCompiler:
             self.locals[p.name] = _ctype(p.type, f"fn '{fn.name}' param '{p.name}'")
 
         self._collect_locals(fn.body)
-        # Fixed, function-wide order every chunk boundary preserves/restores by index.
+        # Fixed, function-wide slot order every chunk addresses by index for
+        # this fn's whole lifetime.
         self.local_order = list(self.locals.keys())
+        self.local_index = {name: i for i, name in enumerate(self.local_order)}
 
-        param_names = {p.name for p in fn.params}
         self._begin_chunk(self._entry_name(), static=False)
-        for i, p in enumerate(fn.params):
-            ctype, _tag, field_ = _TYPES[self.locals[p.name]]
-            self.emit(f"{ctype} {p.name} = ({ctype})wyrm_state_value_n(state, {i})->data.{field_};")
-        for name, ctype_name in self.locals.items():
-            if name in param_names:
-                continue
-            ctype, _tag, _field = _TYPES[ctype_name]
+        # Params arrive as the incoming call's args (already at slots
+        # 0..len(params)-1); every other local gets a fresh zero-valued slot.
+        for name in self.local_order[len(fn.params):]:
+            ctype, _tag, _field = _TYPES[self.locals[name]]
             zero = "false" if ctype == "bool" else "0"
-            self.emit(f"{ctype} {name} = {zero};")
+            self.emit(f"wyrm_state_push(state, wyrm_value_word((wyrm_word)({zero})));")
 
-        self._compile_top_level(fn.body)
-        if not self._definitely_returns(fn.body):
-            self.emit("return WYRM_EXEC_DONE;")
-        self._end_chunk()
-
+        self._run_stmts(fn.body, (), self._emit_done)
         return self.chunk_texts
 
-    def _begin_chunk(self, name: str, static: bool):
-        self.lines = []
-        self.indent = 0
-        self.emit(f"{'static ' if static else ''}wyrm_exec_state {name}(wyrm_state* state)")
-        self.emit("{")
-        self.indent += 1
+    def _local_ref(self, name) -> str:
+        ctype, _tag, field_ = _TYPES[self.locals[name]]
+        idx = self.local_index[name]
+        return f"(({ctype})wyrm_state_value_n(state, {idx})->data.{field_})"
 
-    def _end_chunk(self):
-        self.indent -= 1
-        self.emit("}")
-        self.chunk_texts.append("\n".join(self.lines) + "\n")
+    def _emit_local_assign(self, name, value_expr: str):
+        _ctype_, _tag, field_ = _TYPES[self.locals[name]]
+        idx = self.local_index[name]
+        self.emit(f"wyrm_state_value_n(state, {idx})->data.{field_} = (wyrm_word)({value_expr});")
 
-    def _definitely_returns(self, stmts) -> bool:
-        if not stmts:
-            return False
-        last = stmts[-1]
-        if isinstance(last, ast.Return):
-            return True
-        if isinstance(last, ast.If) and last.orelse is not None:
-            branches = [last.body] + [e.body for e in last.elifs] + [last.orelse]
-            return all(self._definitely_returns(b) for b in branches)
-        return False
-
-    def _compile_block(self, stmts):
-        for s in stmts:
-            self._compile_stmt(s)
+    # -- statement-list (block) compilation --
 
     def _split_call_stmt(self, s):
-        """If `s` is a non-tail call directly in a top-level statement list
-        (`f(...)` or `x = f(...)`), return (call, target_name|None);
-        otherwise None. Calls nested in bigger expressions or inside
-        if/while bodies fall through to the normal (erroring) path."""
+        """If `s` is a non-tail call (`f(...)` or `x = f(...)`), return
+        (call, target_name|None); otherwise None. Calls nested inside
+        bigger expressions still aren't supported (CompileError, from
+        `_expr`)."""
         if isinstance(s, ast.ExprStmt) and isinstance(s.value, ast.Call) and not _is_native_block_call(s.value):
             return s.value, None
         if (
@@ -292,14 +331,143 @@ class _FnCompiler:
             return s.values[0], s.targets[0].name
         return None
 
-    def _compile_top_level(self, stmts):
-        for s in stmts:
+    def _run_stmts(self, stmts, block_path, fallthrough):
+        """Compile `stmts` into the currently-open chunk, opening/closing
+        further chunks as needed for control flow and calls. `fallthrough`
+        is the 0-arg callable to invoke (then close the chunk) if control
+        falls off the end of `stmts` without an explicit return/break/
+        continue/call-split."""
+        for i, s in enumerate(stmts):
+            if isinstance(s, (ast.Pass, ast.TypeHint)):
+                continue
+            if isinstance(s, ast.Continue):
+                if self._continue_target is None:
+                    _err("'continue' outside of a loop", s)
+                self._continue_target()
+                self._end_chunk()
+                return
+            if isinstance(s, ast.Break):
+                if self._break_target is None:
+                    _err("'break' outside of a loop", s)
+                self._break_target()
+                self._end_chunk()
+                return
+            if isinstance(s, ast.Return):
+                self._compile_return(s)
+                self._end_chunk()
+                return
+            if isinstance(s, ast.If):
+                self._compile_if_stmt(s, block_path, stmts[i + 1:], fallthrough)
+                return
+            if isinstance(s, ast.While):
+                self._compile_while_stmt(s, block_path, stmts[i + 1:], fallthrough)
+                return
             split = self._split_call_stmt(s)
-            if split is None:
-                self._compile_stmt(s)
-            else:
-                call, target_name = split
-                self._compile_call_split(call, target_name)
+            if split is not None:
+                self._compile_call_split(split, block_path, stmts[i + 1:], fallthrough)
+                return
+            if isinstance(s, ast.Assign):
+                self._compile_assign(s)
+                continue
+            if isinstance(s, ast.ExprStmt):
+                self._compile_expr_stmt(s)
+                continue
+            _err("statement not supported by --compile", s)
+        fallthrough()
+        self._end_chunk()
+
+    def _continuation_for(self, remaining_stmts, block_path, fallthrough):
+        """Build the 0-arg jump callable a branch/loop-exit should invoke
+        to continue with `remaining_stmts` (possibly empty) in block_path,
+        followed by `fallthrough`. Returns (jump, materialize) where
+        materialize (or None, if no join chunk was needed) must be called
+        once, after all users of `jump` have been emitted, to compile the
+        join chunk's body."""
+        if not remaining_stmts:
+            return fallthrough, None
+        join_name = self._same_block_chunk_name(block_path)
+
+        def jump():
+            self.emit(f"wyrm_state_set_pending(state, {join_name});")
+            self.emit("return WYRM_EXEC_CONTINUE;")
+
+        def materialize():
+            self._begin_chunk(join_name, static=True)
+            self._run_stmts(remaining_stmts, block_path, fallthrough)
+
+        return jump, materialize
+
+    def _compile_if_stmt(self, s: ast.If, block_path, remaining_stmts, fallthrough):
+        join, materialize_join = self._continuation_for(remaining_stmts, block_path, fallthrough)
+
+        branches = [(s.cond, s.body)] + [(e.cond, e.body) for e in s.elifs]
+        branch_targets = [(cond, *self._new_child_block(block_path), body) for cond, body in branches]
+        else_target = self._new_child_block(block_path) if s.orelse else None
+
+        for i, (cond, _path, name, _body) in enumerate(branch_targets):
+            kw = "if" if i == 0 else "} else if"
+            self.emit(f"{kw} ({self._expr(cond)}) {{")
+            self.indent += 1
+            self.emit(f"wyrm_state_set_pending(state, {name});")
+            self.emit("return WYRM_EXEC_CONTINUE;")
+            self.indent -= 1
+        self.emit("} else {")
+        self.indent += 1
+        if else_target is not None:
+            self.emit(f"wyrm_state_set_pending(state, {else_target[1]});")
+            self.emit("return WYRM_EXEC_CONTINUE;")
+        else:
+            join()
+        self.indent -= 1
+        self.emit("}")
+        self._end_chunk()
+
+        for cond, path, name, body in branch_targets:
+            self._begin_chunk(name, static=True)
+            self._run_stmts(body, path, join)
+        if else_target is not None:
+            else_path, else_name = else_target
+            self._begin_chunk(else_name, static=True)
+            self._run_stmts(s.orelse, else_path, join)
+
+        if materialize_join:
+            materialize_join()
+
+    def _compile_while_stmt(self, s: ast.While, block_path, remaining_stmts, fallthrough):
+        after, materialize_after = self._continuation_for(remaining_stmts, block_path, fallthrough)
+
+        check_name = self._same_block_chunk_name(block_path)
+        body_path, body_name = self._new_child_block(block_path)
+
+        self.emit(f"wyrm_state_set_pending(state, {check_name});")
+        self.emit("return WYRM_EXEC_CONTINUE;")
+        self._end_chunk()
+
+        self._begin_chunk(check_name, static=True)
+        self.emit(f"if ({self._expr(s.cond)}) {{")
+        self.indent += 1
+        self.emit(f"wyrm_state_set_pending(state, {body_name});")
+        self.emit("return WYRM_EXEC_CONTINUE;")
+        self.indent -= 1
+        self.emit("} else {")
+        self.indent += 1
+        after()
+        self.indent -= 1
+        self.emit("}")
+        self._end_chunk()
+
+        def loop_back():
+            self.emit(f"wyrm_state_set_pending(state, {check_name});")
+            self.emit("return WYRM_EXEC_CONTINUE;")
+
+        self._begin_chunk(body_name, static=True)
+        old_break, old_continue = self._break_target, self._continue_target
+        self._break_target, self._continue_target = after, loop_back
+        self._run_stmts(s.body, body_path, loop_back)
+        self._break_target, self._continue_target = old_break, old_continue
+
+        if materialize_after:
+            materialize_after()
 
     def _resolve_callee(self, call: ast.Call):
         if not isinstance(call.func, ast.Name):
@@ -333,85 +501,36 @@ class _FnCompiler:
         self.emit(f"wyrm_value {arr}[{len(entries)}] = {{ " + ", ".join(entries) + " };")
         return arr
 
-    def _compile_call_split(self, call: ast.Call, target_name):
+    def _compile_call_split(self, split, block_path, remaining_stmts, fallthrough):
+        call, target_name = split
         callee_name, callee = self._resolve_callee(call)
 
-        # Preserve every local declared so far (fixed function-wide order) by
-        # pushing it onto the state's value stack ahead of the call - it
-        # survives beneath the callee's frame and is recovered by index in
-        # the next chunk, alongside the callee's return value(s).
-        for name in self.local_order:
-            self.emit(f"wyrm_state_push(state, wyrm_value_word((wyrm_word)({name})));")
-
         args = self._build_args_array(call, callee_name, callee)
-        argc = len(call.args)
-        next_chunk = self._new_chunk_name()
-        self.emit(f"wyrm_state_call_continue(state, {next_chunk}, {self._entry_name(callee_name)}, {args}, {argc});")
+        next_name = self._same_block_chunk_name(block_path)
+        self.emit(
+            f"wyrm_state_call_continue(state, {next_name}, "
+            f"{self._entry_name(callee_name)}, {args}, {len(call.args)});"
+        )
         self.emit("return WYRM_EXEC_CONTINUE;")
         self._end_chunk()
 
-        self._begin_chunk(next_chunk, static=True)
-        self.chunk_names.append(next_chunk)
-        for i, name in enumerate(self.local_order):
-            ctype, _tag, field_ = _TYPES[self.locals[name]]
-            self.emit(f"{ctype} {name} = ({ctype})wyrm_state_value_n(state, {i})->data.{field_};")
+        self._begin_chunk(next_name, static=True)
         if target_name is not None:
-            ctype, _tag, field_ = _TYPES[self.locals[target_name]]
             ret_idx = len(self.local_order)
-            self.emit(f"{target_name} = ({ctype})wyrm_state_value_n(state, {ret_idx})->data.{field_};")
-
-    def _compile_stmt(self, s):
-        if isinstance(s, (ast.Pass, ast.TypeHint)):
-            return
-        if isinstance(s, ast.Continue):
-            self.emit("continue;")
-            return
-        if isinstance(s, ast.Break):
-            self.emit("break;")
-            return
-        if isinstance(s, ast.Return):
-            self._compile_return(s)
-            return
-        if isinstance(s, ast.Assign):
-            self._compile_assign(s)
-            return
-        if isinstance(s, ast.If):
-            self._compile_if(s)
-            return
-        if isinstance(s, ast.While):
-            self.emit(f"while ({self._expr(s.cond)}) {{")
-            self.indent += 1
-            self._compile_block(s.body)
-            self.indent -= 1
-            self.emit("}")
-            return
-        if isinstance(s, ast.ExprStmt):
-            self._compile_expr_stmt(s)
-            return
-        _err("statement not supported by --compile", s)
-
-    def _compile_if(self, s: ast.If):
-        self.emit(f"if ({self._expr(s.cond)}) {{")
-        self.indent += 1
-        self._compile_block(s.body)
-        self.indent -= 1
-        for e in s.elifs:
-            self.emit(f"}} else if ({self._expr(e.cond)}) {{")
-            self.indent += 1
-            self._compile_block(e.body)
-            self.indent -= 1
-        if s.orelse:
-            self.emit("} else {")
-            self.indent += 1
-            self._compile_block(s.orelse)
-            self.indent -= 1
-        self.emit("}")
+            _ctype_, _tag, field_ = _TYPES[self.locals[target_name]]
+            idx = self.local_index[target_name]
+            self.emit(
+                f"wyrm_state_value_n(state, {idx})->data.{field_} = "
+                f"wyrm_state_value_n(state, {ret_idx})->data.{field_};"
+            )
+        self.emit(f"wyrm_state_pop_to_value_count(state, {len(self.local_order)});")
+        self._run_stmts(remaining_stmts, block_path, fallthrough)
 
     def _compile_assign(self, s: ast.Assign):
         if len(s.targets) != len(s.values):
             _err("assignment target/value count mismatch", s)
         if len(s.targets) == 1:
-            self.emit(f"{s.targets[0].name} = {self._expr(s.values[0])};")
+            self._emit_local_assign(s.targets[0].name, self._expr(s.values[0]))
             return
         # Evaluate every RHS into a temp first so `a, b = b, a` works.
         tmp_names = []
@@ -421,7 +540,7 @@ class _FnCompiler:
             self.emit(f"{ctype} {tmp} = {self._expr(v)};")
             tmp_names.append(tmp)
         for t, tmp in zip(s.targets, tmp_names):
-            self.emit(f"{t.name} = {tmp};")
+            self._emit_local_assign(t.name, tmp)
 
     def _compile_return(self, s: ast.Return):
         if s.value is None:
@@ -455,11 +574,8 @@ class _FnCompiler:
         if isinstance(call, ast.Call) and _is_native_block_call(call):
             self._compile_native_block(call)
             return
-        if isinstance(call, ast.Call):
-            _err(
-                "calls nested inside if/while bodies are not supported by --compile "
-                "(only calls directly in a function's top-level statement list are)", call,
-            )
+        # Non-native calls are intercepted by _split_call_stmt before reaching
+        # here, so any Call left is unreachable; keep the fallback generic.
         _err("expression statements are not supported by --compile (only native::block() calls)", s)
 
     def _compile_native_block(self, call: ast.Call):
@@ -469,42 +585,20 @@ class _FnCompiler:
                 _err(f"native::block() references unknown local/param '{name}'", call)
 
         # Copy-in/copy-out through a private nested scope, so the spliced C can
-        # use the bare symbol names (matching the spec's worked example)
-        # without a same-name self-init hazard against the enclosing locals
-        # (`{ int a = a; }` is undefined behavior in C - the inner `a` is
-        # already in scope at its own initializer).
-        self.emit("{")
-        self.indent += 1
-        in_tmp = {}
-        for name in inputs:
-            ctype, _tag, _field = _TYPES[self.locals[name]]
-            tmp = self._new_tmp("__native_in")
-            self.emit(f"{ctype} {tmp} = {name};")
-            in_tmp[name] = tmp
-        out_tmp = {}
-        for name in outputs:
-            ctype, _tag, _field = _TYPES[self.locals[name]]
-            tmp = self._new_tmp("__native_out")
-            self.emit(f"{ctype} {tmp};")
-            out_tmp[name] = tmp
-
+        # use the bare symbol names (matching the spec's worked example).
         self.emit("{")
         self.indent += 1
         for name in inputs:
-            ctype, _tag, _field = _TYPES[self.locals[name]]
-            self.emit(f"{ctype} {name} = {in_tmp[name]};")
+            ctype, _tag, field_ = _TYPES[self.locals[name]]
+            idx = self.local_index[name]
+            self.emit(f"{ctype} {name} = ({ctype})wyrm_state_value_n(state, {idx})->data.{field_};")
         for name in outputs:
             ctype, _tag, _field = _TYPES[self.locals[name]]
             self.emit(f"{ctype} {name};")
         for line in body.splitlines():
             self.emit(line)
         for name in outputs:
-            self.emit(f"{out_tmp[name]} = {name};")
-        self.indent -= 1
-        self.emit("}")
-
-        for name in outputs:
-            self.emit(f"{name} = {out_tmp[name]};")
+            self._emit_local_assign(name, name)
         self.indent -= 1
         self.emit("}")
 
@@ -518,7 +612,7 @@ class _FnCompiler:
         if isinstance(node, ast.Name):
             if node.id not in self.locals:
                 _err(f"unknown identifier '{node.id}'", node)
-            return node.id
+            return self._local_ref(node.id)
         if isinstance(node, ast.UnaryOp):
             if node.op == "-":
                 return f"(-({self._expr(node.operand)}))"
