@@ -1,24 +1,41 @@
 """wyrm --compile: translate a Wyrm module into C, targeting the real wyrm
-VM's calling convention (`wyrm_exec_fn` / `wyrm_state*`, see
-wyrm/src/wyrm/main.c for the hand-written reference example this
-follows).
+VM's calling convention (`wyrm_exec_fn` / `wyrm_state*`), following the
+call-handling pattern demonstrated in the reference implementation's
+worked example (`w_do_a_mul` / `w_multipart`).
 
 This is a narrow v1 slice, not a general compiler: only `fn` defs with
 `int`/`bool` params & locals, straight-line arithmetic, `if`/`while`,
-tail calls (`return f(...)`) to other compiled functions in the same
+calls (tail and non-tail) to other compiled functions in the same
 module, and the `native::block(...)` escape hatch from
 doc/language-spec.md's "Native Code" section. Anything else raises
 CompileError with a specific message - the same "fail loud, not silently
 wrong" convention wyrm_eval_parse_tree.py uses for its own known gaps
 (see wypoc/README.md's "Known gaps").
 
-Tail calls compile to `wyrm_state_call_continue` + a shared forwarding
-continuation (`__wyrm_forward_result`), not `WYRM_EXEC_TAIL_CALL` +
-`wyrm_stack_replace_frame_f` - the latter is the "proper" zero-overhead
-tail call per src/fiber.c's trampoline, but there is no working example
-of it anywhere in the wyrm repo to verify frame/stack mechanics against
-(only the CONTINUE-style pattern is demonstrated, in main.c's
-`w_do_a_mul`). Generating unverified raw-stack-manipulation code for a
+Every compiled `fn` becomes one non-static entry point,
+`w_{module}_{fn}`, plus zero or more `static` continuation chunks,
+`{module}_{fn}_chunk_{n}`, each a full `wyrm_exec_fn`. A chunk boundary
+is introduced at every *non-tail* call site (`x = f(...)` or a bare
+`f(...)` statement) that appears directly in a function's top-level
+statement list - calls nested inside `if`/`while` bodies or larger
+expressions are not split and remain unsupported (CompileError). Each
+call compiles to `wyrm_state_call_continue(state, next_chunk, callee,
+args, argc); return WYRM_EXEC_CONTINUE;`, preceded by pushing every
+local the function has declared so far onto the state's value stack (in
+a fixed, function-wide order) so the next chunk can recover them by
+index once the callee's return value(s) land on top - this mirrors how
+the reference implementation's `wyrm_stack_push/pop_continuation_f`
+preserve a caller's frame beneath a callee's. This "preserve everything,
+every time" scheme is intentionally unoptimized (no liveness analysis)
+in exchange for being simple and uniform; see chunk_id-numbering below.
+
+Tail calls (`return f(...)`) still compile to `wyrm_state_call_continue`
++ a shared forwarding continuation (`__wyrm_forward_result`), not
+`WYRM_EXEC_TAIL_CALL` + `wyrm_stack_replace_frame_f` - the latter is the
+"proper" zero-overhead tail call the reference implementation's fiber
+trampoline supports, but there is no worked example of it to verify
+frame/stack mechanics against (only the CONTINUE-style pattern is
+demonstrated). Generating unverified raw-stack-manipulation code for a
 feature this new isn't worth the risk; the forwarder is a correct, if
 slightly less efficient, alternative confined entirely to the
 demonstrated API surface.
@@ -58,6 +75,14 @@ static wyrm_exec_state __wyrm_forward_result(wyrm_state* state)
     return WYRM_EXEC_DONE;
 }
 """
+
+
+def _c_ident(name: str) -> str:
+    """Sanitize an arbitrary module name into a valid C identifier fragment."""
+    ident = "".join(ch if ch.isalnum() or ch == "_" else "_" for ch in name)
+    if not ident or ident[0].isdigit():
+        ident = f"m_{ident}"
+    return ident
 
 
 def _err(msg, node=None):
@@ -111,20 +136,33 @@ def _parse_native_block_args(call: ast.Call):
 
 
 class _FnCompiler:
-    """Compiles a single `fn` into one `wyrm_exec_fn`-shaped C function."""
+    """Compiles a single `fn` into one non-static entry `wyrm_exec_fn`
+    (`w_{module}_{fn}`) plus zero or more `static` continuation chunks
+    (`{module}_{fn}_chunk_{n}`), one per non-tail call site."""
 
-    def __init__(self, fndef: ast.FnDef, functions: dict):
+    def __init__(self, fndef: ast.FnDef, functions: dict, module_ident: str):
         self.fndef = fndef
-        self.functions = functions  # name -> FnDef, for tail-call resolution
+        self.functions = functions  # name -> FnDef, for call resolution
+        self.module_ident = module_ident
         self.locals: dict = {}  # name -> wyrm type name ("int"/"bool")
         self.lines: list = []
         self.indent = 0
         self.uses_forwarder = False
         self._tmp = 0
+        self._chunk_counter = 0
+        self.chunk_texts: list = []  # completed C function texts, entry first
+        self.chunk_names: list = []  # static chunk names, for module-level protos
 
     def _new_tmp(self, prefix="__t") -> str:
         self._tmp += 1
         return f"{prefix}{self._tmp}"
+
+    def _entry_name(self, fn_name=None) -> str:
+        return f"w_{self.module_ident}_{fn_name if fn_name is not None else self.fndef.name}"
+
+    def _new_chunk_name(self) -> str:
+        self._chunk_counter += 1
+        return f"{self.module_ident}_{self.fndef.name}_chunk_{self._chunk_counter}"
 
     def emit(self, text=""):
         self.lines.append(("    " * self.indent) + text if text else "")
@@ -173,7 +211,7 @@ class _FnCompiler:
 
     # -- pass 2: emit --
 
-    def compile(self) -> str:
+    def compile(self) -> list:
         fn = self.fndef
         if fn.class_target:
             _err(f"fn '{fn.name}': class-target/message fns not supported by --compile")
@@ -187,11 +225,11 @@ class _FnCompiler:
             self.locals[p.name] = _ctype(p.type, f"fn '{fn.name}' param '{p.name}'")
 
         self._collect_locals(fn.body)
+        # Fixed, function-wide order every chunk boundary preserves/restores by index.
+        self.local_order = list(self.locals.keys())
 
         param_names = {p.name for p in fn.params}
-        self.emit(f"wyrm_exec_state func__{fn.name}(wyrm_state* state)")
-        self.emit("{")
-        self.indent += 1
+        self._begin_chunk(self._entry_name(), static=False)
         for i, p in enumerate(fn.params):
             ctype, _tag, field_ = _TYPES[self.locals[p.name]]
             self.emit(f"{ctype} {p.name} = ({ctype})wyrm_state_value_n(state, {i})->data.{field_};")
@@ -199,15 +237,27 @@ class _FnCompiler:
             if name in param_names:
                 continue
             ctype, _tag, _field = _TYPES[ctype_name]
-            self.emit(f"{ctype} {name};")
+            zero = "false" if ctype == "bool" else "0"
+            self.emit(f"{ctype} {name} = {zero};")
 
-        self._compile_block(fn.body)
+        self._compile_top_level(fn.body)
         if not self._definitely_returns(fn.body):
             self.emit("return WYRM_EXEC_DONE;")
+        self._end_chunk()
 
+        return self.chunk_texts
+
+    def _begin_chunk(self, name: str, static: bool):
+        self.lines = []
+        self.indent = 0
+        self.emit(f"{'static ' if static else ''}wyrm_exec_state {name}(wyrm_state* state)")
+        self.emit("{")
+        self.indent += 1
+
+    def _end_chunk(self):
         self.indent -= 1
         self.emit("}")
-        return "\n".join(self.lines) + "\n"
+        self.chunk_texts.append("\n".join(self.lines) + "\n")
 
     def _definitely_returns(self, stmts) -> bool:
         if not stmts:
@@ -223,6 +273,92 @@ class _FnCompiler:
     def _compile_block(self, stmts):
         for s in stmts:
             self._compile_stmt(s)
+
+    def _split_call_stmt(self, s):
+        """If `s` is a non-tail call directly in a top-level statement list
+        (`f(...)` or `x = f(...)`), return (call, target_name|None);
+        otherwise None. Calls nested in bigger expressions or inside
+        if/while bodies fall through to the normal (erroring) path."""
+        if isinstance(s, ast.ExprStmt) and isinstance(s.value, ast.Call) and not _is_native_block_call(s.value):
+            return s.value, None
+        if (
+            isinstance(s, ast.Assign)
+            and len(s.targets) == 1
+            and len(s.values) == 1
+            and isinstance(s.values[0], ast.Call)
+            and not _is_native_block_call(s.values[0])
+            and isinstance(s.targets[0], ast.NameTarget)
+        ):
+            return s.values[0], s.targets[0].name
+        return None
+
+    def _compile_top_level(self, stmts):
+        for s in stmts:
+            split = self._split_call_stmt(s)
+            if split is None:
+                self._compile_stmt(s)
+            else:
+                call, target_name = split
+                self._compile_call_split(call, target_name)
+
+    def _resolve_callee(self, call: ast.Call):
+        if not isinstance(call.func, ast.Name):
+            _err("only calls to a plain function name are supported by --compile", call)
+        callee_name = call.func.id
+        callee = self.functions.get(callee_name)
+        if callee is None:
+            _err(f"call to unknown/uncompiled function '{callee_name}'", call)
+        for a in call.args:
+            if isinstance(a, (ast.Kwarg, ast.SpreadPos, ast.SpreadKw)):
+                _err("keyword/spread arguments not supported by --compile", call)
+        if len(call.args) != len(callee.params):
+            _err(
+                f"call to '{callee_name}': expected {len(callee.params)} argument(s), "
+                f"got {len(call.args)}", call,
+            )
+        return callee_name, callee
+
+    def _build_args_array(self, call: ast.Call, callee_name: str, callee) -> str:
+        """Emit (if needed) a `wyrm_value[]` of the call's evaluated arguments
+        and return the C expression to pass as `wyrm_state_call_continue`'s
+        `args` parameter (a temp array name, or "NULL")."""
+        if not call.args:
+            return "NULL"
+        entries = []
+        for p, a in zip(callee.params, call.args):
+            ctype_name = _ctype(p.type, f"param '{p.name}' of '{callee_name}'")
+            ctype, tag, field_ = _TYPES[ctype_name]
+            entries.append(f"{{ .type = {tag}, .data.{field_} = ({ctype})({self._expr(a)}) }}")
+        arr = self._new_tmp("__args")
+        self.emit(f"wyrm_value {arr}[{len(entries)}] = {{ " + ", ".join(entries) + " };")
+        return arr
+
+    def _compile_call_split(self, call: ast.Call, target_name):
+        callee_name, callee = self._resolve_callee(call)
+
+        # Preserve every local declared so far (fixed function-wide order) by
+        # pushing it onto the state's value stack ahead of the call - it
+        # survives beneath the callee's frame and is recovered by index in
+        # the next chunk, alongside the callee's return value(s).
+        for name in self.local_order:
+            self.emit(f"wyrm_state_push(state, wyrm_value_word((wyrm_word)({name})));")
+
+        args = self._build_args_array(call, callee_name, callee)
+        argc = len(call.args)
+        next_chunk = self._new_chunk_name()
+        self.emit(f"wyrm_state_call_continue(state, {next_chunk}, {self._entry_name(callee_name)}, {args}, {argc});")
+        self.emit("return WYRM_EXEC_CONTINUE;")
+        self._end_chunk()
+
+        self._begin_chunk(next_chunk, static=True)
+        self.chunk_names.append(next_chunk)
+        for i, name in enumerate(self.local_order):
+            ctype, _tag, field_ = _TYPES[self.locals[name]]
+            self.emit(f"{ctype} {name} = ({ctype})wyrm_state_value_n(state, {i})->data.{field_};")
+        if target_name is not None:
+            ctype, _tag, field_ = _TYPES[self.locals[target_name]]
+            ret_idx = len(self.local_order)
+            self.emit(f"{target_name} = ({ctype})wyrm_state_value_n(state, {ret_idx})->data.{field_};")
 
     def _compile_stmt(self, s):
         if isinstance(s, (ast.Pass, ast.TypeHint)):
@@ -305,39 +441,13 @@ class _FnCompiler:
         self.emit("return WYRM_EXEC_DONE;")
 
     def _compile_tail_call(self, call: ast.Call):
-        if not isinstance(call.func, ast.Name):
-            _err("only calls to a plain function name are supported by --compile", call)
-        callee_name = call.func.id
-        callee = self.functions.get(callee_name)
-        if callee is None:
-            _err(f"call to unknown/uncompiled function '{callee_name}'", call)
-        for a in call.args:
-            if isinstance(a, (ast.Kwarg, ast.SpreadPos, ast.SpreadKw)):
-                _err("keyword/spread arguments not supported by --compile", call)
-        if len(call.args) != len(callee.params):
-            _err(
-                f"call to '{callee_name}': expected {len(callee.params)} argument(s), "
-                f"got {len(call.args)}", call,
-            )
-
+        callee_name, callee = self._resolve_callee(call)
         self.uses_forwarder = True
-        if call.args:
-            entries = []
-            for p, a in zip(callee.params, call.args):
-                ctype_name = _ctype(p.type, f"param '{p.name}' of '{callee_name}'")
-                ctype, tag, field_ = _TYPES[ctype_name]
-                entries.append(f"{{ .type = {tag}, .data.{field_} = ({ctype})({self._expr(a)}) }}")
-            arr = self._new_tmp("__args")
-            self.emit(f"wyrm_value {arr}[{len(entries)}] = {{ " + ", ".join(entries) + " };")
-            self.emit(
-                f"wyrm_state_call_continue(state, __wyrm_forward_result, "
-                f"func__{callee_name}, {arr}, {len(entries)});"
-            )
-        else:
-            self.emit(
-                f"wyrm_state_call_continue(state, __wyrm_forward_result, "
-                f"func__{callee_name}, NULL, 0);"
-            )
+        args = self._build_args_array(call, callee_name, callee)
+        self.emit(
+            f"wyrm_state_call_continue(state, __wyrm_forward_result, "
+            f"{self._entry_name(callee_name)}, {args}, {len(call.args)});"
+        )
         self.emit("return WYRM_EXEC_CONTINUE;")
 
     def _compile_expr_stmt(self, s: ast.ExprStmt):
@@ -346,7 +456,10 @@ class _FnCompiler:
             self._compile_native_block(call)
             return
         if isinstance(call, ast.Call):
-            _err("non-tail calls not yet supported by --compile (only 'return f(...)' is)", call)
+            _err(
+                "calls nested inside if/while bodies are not supported by --compile "
+                "(only calls directly in a function's top-level statement list are)", call,
+            )
         _err("expression statements are not supported by --compile (only native::block() calls)", s)
 
     def _compile_native_block(self, call: ast.Call):
@@ -417,7 +530,10 @@ class _FnCompiler:
                 _err(f"operator '{node.op}' not supported by --compile", node)
             return f"({self._expr(node.left)} {_BINOPS[node.op]} {self._expr(node.right)})"
         if isinstance(node, ast.Call):
-            _err("non-tail calls not yet supported by --compile (only 'return f(...)' is)", node)
+            _err(
+                "calls nested inside larger expressions are not supported by --compile "
+                "(only 'return f(...)', 'x = f(...)', or a bare 'f(...)' statement are)", node,
+            )
         _err("expression not supported by --compile", node)
 
 
@@ -468,19 +584,23 @@ def compile_module(tree: ast.Program, module_name: str) -> str:
             "(only 'fn' definitions and native::block() calls are allowed)", stmt,
         )
 
+    module_ident = _c_ident(module_name)
     functions = {fn.name: fn for fn in fn_defs}
     compiled = []
+    chunk_protos = []
     uses_forwarder = False
     for kind, item in functions_order:
         if kind == "raw":
             compiled.append(item)
         else:
-            fc = _FnCompiler(item, functions)
-            text = fc.compile()
+            fc = _FnCompiler(item, functions, module_ident)
+            texts = fc.compile()
             uses_forwarder = uses_forwarder or fc.uses_forwarder
-            compiled.append(text)
+            compiled.extend(texts)
+            chunk_protos.extend(f"static wyrm_exec_state {name}(wyrm_state* state);" for name in fc.chunk_names)
 
-    protos = [f"wyrm_exec_state func__{fn.name}(wyrm_state* state);" for fn in fn_defs]
+    protos = [f"wyrm_exec_state w_{module_ident}_{fn.name}(wyrm_state* state);" for fn in fn_defs]
+    protos.extend(chunk_protos)
     if uses_forwarder:
         protos.insert(0, "static wyrm_exec_state __wyrm_forward_result(wyrm_state* state);")
 

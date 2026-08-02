@@ -644,7 +644,7 @@ is read, the chunk is placed, and the output variables are written.
 
 Generated C block:
 
-    wyrm_error func__quadratic_formula(wyrm_state* state)
+    wyrm_error w_mymodule_quadratic_formula(wyrm_state* state)
     {
         /* magic start */
         /* magic block start */
