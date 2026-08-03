@@ -130,7 +130,6 @@ all items. The '$[' sigil defines the type.
 
     $[1, 2, 3, 4]
 
-
 #### Tables or Dictionaries
 
 Dictionary definitions use a `${` sigil rather than bare braces.
@@ -157,6 +156,10 @@ may be a list of parameters:
 
     list[int]
     callable[[int, float], int]
+
+Type constraints may represent summation types as well:
+
+    int | MyClass
 
 ### Operators
 
@@ -261,14 +264,46 @@ A variable may have a type specified prior to assignment:
     else:
         foo = 10
 
-Static variables start with the '$' operator. A static variable is tied
-to the symbol definition rather than the execution context. A static
-variable should generally be initialized with the `?=` operator.
+The static keyword is used to indicate a variable definition tied to the
+lexical scope itself instead of the current dynamic scope. This is may
+be used to create class variables and function variables. It may be
+used to indicate a variable is referenced this way, prior to access:
 
     fn call_count():
-        $foo: int ?= 0
-        $foo = $foo + 1
-        return $foo
+        static foo: int
+
+        foo ?= 0
+        foo = foo + 1
+        return foo
+
+Or it may be used with an initial assignment:
+
+    fn call_count():
+        static foo: int = 0
+        foo = foo + 1
+        return foo
+
+The initial assignment is semantically equivalent to a definition
+check followed by assignment:
+
+    if not defined('foo):
+        foo = 0
+
+If the function is called recursively, each default will appear as
+undefined at the call site and result in assignments at each level
+of recursion as the variable resolved.
+
+Functions bodies are evaluated at the time of first call.
+
+The static keyword may also be used in a class definition to define
+a variable associated with the class:
+
+    class MyClass:
+         static foo: int = 0
+
+A class body is evaluated when the class is constructed, therefore
+any function calls for foo will happen when the class is created on
+import of the module.
 
 ### Modules and Imports
 
@@ -288,7 +323,7 @@ Once a module is imported, the name scope operator can pull in elements:
 The import statement creates the namespace for each module part. It is
 valid to alias the import if desired:
 
-    import mod::baz::bar as bar
+    import mod::baz::bleet as bar
 
 The alias results in only 'bar' being added to the module namespace.
 
@@ -346,7 +381,7 @@ do statement is the last executed line:
 ### Basic Functions
 
 Basic functions should look exceedingly familiar to Python users. Most all
- the same rules apply – including no function overloading.
+ the same rules apply – including no function overloading in parameters.
 
 The basic syntax for a function is:
 
@@ -385,26 +420,50 @@ Parameters may be specified:
     fn message(greeting: str, name: str) -> str:
         return greeting + name
     
+Arguments may have default values:
+
+    fn message(name: str, greeting: str = "Hello") -> str:
+        return greeting + name
+
 Variable length arguments may be collected by the '*' operator:
 
     fn message(*arguments) -> str:
         greeting, name = arguments
         return greeting + name
 
-Arguments may have default values:
-
-    fn message(name: str, greeting: str = "Hello") -> str:
-        return greeting + name
-
-The '/' special argument specifies prior arguments must be positional:
-
-    fn message(name: str, /,  greeting: str = "Hello") -> str:
-        return greeting + name
-
 And '**' may be used to collect keyword argument into a dict:
 
     fn message(**kwargs) -> str:
         return kwargs["greeting"] + kwargs["name"]
+
+Specifying one or more types creates a message. A message defines
+'this' as the value of the type list (a tuple for multiple types,
+or an instance for one). 
+
+    fn [int, str] message(what: str) -> str: # message A
+        ...
+    
+    fn [int] message(what: str) -> str: # message B
+        ...
+
+    (5, "ModA") ! message("Hello") # calls A
+    5 ! message("Bye") # calls B
+
+Invoking a function is familiar - parens and argument list:
+
+    message(arg1, arg2, ... argn)
+
+You may specify an argument pack (iterable):
+
+    message(*args)
+
+You may specify keyword argument pack (dictionary):
+
+    message(**kwargs)
+
+Or a combination of all:
+
+    message(arg1, *args_n, **kwargs)
 
 ### Control Flow
 
@@ -436,6 +495,9 @@ For statement:
             break
     else:
         statement_if_no_break
+
+The 'in' statement must be an iterable. See special methods for
+the contract.
 
 Like other statements, `if`/`while`/`for` produce the value of the
 last statement executed in whichever branch or iteration actually
@@ -487,7 +549,7 @@ The try statement may specify the resultant return value using return.
 Defer block. The contents of the block are executed when the dynamic
 scope of the containing block is complete.
 
-    v = new resource()
+    v = resource()
     defer:
         v ! release()
 
@@ -495,7 +557,7 @@ Defer with return condition. The block is armed during the dynamic scope
 of the calling block and will trigger if any block within the calling block's
 dynamic scope forces a return with either 'return' or 'try' statements.
 
-    v = new resource()
+    v = resource()
     defer on error:       # equivalent to defer { if ( defined_return_value is error ) ... }
         v ! release()
 
@@ -508,7 +570,7 @@ In simple cases, a message may utilized just as a method call:
 
     arr_len = array_object!length();
 
-A message may be executed on a tuple:
+A message may be executed on a tuple for multiple dispatch:
 
     (canvas, shape) ! draw();
 
@@ -518,9 +580,10 @@ Classes are used to define structure suitable for dynamic dispatch. Objects
 work in a similar fashion to CLOS or Dylan. A class is a collection of variables
 associated with an inheritance tree.
 
-A basic class defines a data structure and inheritance tree. The class name
-may then be used to specify dispatch of methods. A simple class is created
-by simple defining the data structure:
+A basic class defines a data structure and inherited super class. Only
+single inheritance is supported. The class name may then be used to
+specify dispatch of methods. A simple class is created by defining
+the data structure:
 
     class person:
         slot name: str
@@ -554,23 +617,21 @@ defined externally:
     fn [person] get_full_name() -> str:
         return this.last_name + " " + this.first_name
 
+Multiple dispatch possible by giving multiple classes:
+
+    fn [person, job] get_decorated_name() -> str:
+        person_inst, job_inst = this
+        return job_inst.title + " " + person_inst.last_name
+
 Class attributes and variables can be access with the `.` operator.
 The `.` operator looks up the given name and creates an attribute
 ref. Assigning to the attribute ref results in setting a property.
 
     person.first_name = "Sam"
 
-Functions defined within the class scope will have attributes
-within the created created class. These may be accessed and
-called directly, though this is not normally recommended:
+Methods defined in a class are invoked using the message operator.
 
-    person.get_full_name()
-
-The preferred mechanism to call a method is to utilize the
-message operator `!`. The message operator replaces the class
-access operator:
-
-    person!get_full_name()
+    person ! get_full_name()
 
 The `!` operator creates a closure. The closure may be elided
 in cases where the method is called directly, or it may
@@ -599,10 +660,10 @@ The `super` allows classes to call 'up' the inheritance tree.
     fn [coordinate3d] length_squared:
         return super() + (z**2)
 
-Objects are constructed with the 'new' keyword. The new keyword specifies
-parameters to the constructor:
+Objects are constructed by calling the class as a function. The return type
+of the construct is always the summation of the class type with error.
 
-    person_instance = new person()
+    person_instance = person()
 
 The value of the new type is either the object type constructed or error.
 Essentially:
@@ -611,47 +672,29 @@ Essentially:
 
 A class constructor may be specified within the class. The constructor defines
 the default initialized variables for the object and then a block of code
-that executes immediately after. All variables must have defined default
-
-Basic syntax:
-
-    init (arguments) [with 'defaults block...'] [do: 'initialization block']
-
-Example with both with and do:
+that executes immediately after. The constructor must be named 'init'. Variables
+without defaults will be set to the default value for the given type.
+For GC types this will be a nil reference, integers 0, or false.
 
     class vector:
         slot x: float
         slot y: float
         slot len: float
     
-        init (a_x: float, a_y: float) with:
-            x = a_x
-            y = a_y
-        do:
-            # this.len == 0 (system forced default value)
+        fn init(x: float, y: float):
+            this.x = x
+            this.y = y
             this.len = (x ** 2 + y ** 2) ** 0.5
-
-Example with only do:
-
-    class options:
-        slot opt_1: int = 0
-        slot opt_2: int = 0
-
-        init (set: int, first: bool) do:
-            if first:
-                this.opt_1 = set
-            else:
-                this.opt_2 = set
 
 Errors / RAII - returning an error in init overides the 'new' result:
 
     class demo:
         slot result: int
 
-        init (num: int, den: int) do:
+        fn init(num: int, den: int):
             this.result = try num / den
 
-    x: demo | str = new demo(5, 0) catch 'div0'
+    x: demo | str = demo(5, 0) catch 'div0'
 
 
 #### Slots
@@ -697,51 +740,126 @@ Output may be specified:
 
 Coroutines may also accept values:
 
-    co mirror_5x() -> float:
-        a = yield 0
-        a = yield a
-        a = yield a
-        a = yield a
-        a = yield a
-        yield a
+    co mirror_5x(initial) -> float | sym:
+        a = yield initial
+        b = yield a
+        c = yield b
+        d = yield c
+        e = yield d
+        yield e
 
 The input type may be specified:
 
     co div2_1x(<- int) -> float:
-        a = yield 0
+        a = yield 0.0
         yield a / 2.0
 
 An example with other parameters:
 
-    co add_5x(<- float, addend: float) -> float:
-         a = yield 0
+    co mirror_5x_with_add(<- float, initial: float, addend: float) -> float | sym:
+         a = yield initial
          a = yield a + addend
          a = yield a + addend
          a = yield a + addend
          a = yield a + addend
          yield a + addend
 
+Coroutines also support delegation via 'yield from'. Yield from delegates
+all yield results until the subgenerator returns.
+
+    co mirror_10x():
+        yield from mirror_5x()
+
+The 'next' builtin method requests the next value from the coroutine. The
+send builtin method sends a value to the coroutine. A coroutine must be
+started with 'next' before sending.
+
+    cofun = mirror_5x()
+
+    next(cofun) # returns 'initial, mirror_5x is paused
+    next(cofun) # sends nil to mirror_5x, a=nil, yields nil
+    send(cofun, 5) # sends 5 to mirror_5x, b=5, yields 5
+
+Cooroutines may be invoked as a message:
+
+    class summation:
+        slot total: int = 0
+
+    co [summation] term_adder(<- int | nil) -> int:
+        term = 0
+        while term is int:
+            term = yield this.total
+            this.total = this.total + term
+
+    # usage example
+    adder = summation() ! term_adder()
+    next(adder)         # value is 0
+    send(adder, 5)      # value is 5
+    send(adder, 10)     # value is 15
+    send(adder, nil)    # value is error of stop iteration
+
+A coroutine may stop execution at any point, this is done via a return statement:
+
+    co do_1x():
+        yield 1
+        return 5
+        yield 2 # not reached
+
+The return statement from a coroutine is stored in the 'value' attribute. An
+active coroutine will return an error when accessing:
+
+    cofun = do_1x()
+    a = next(cofun) # a = 1
+    b = cofun.value catch "expected"  # b = "expected"
+    c = next(cofun) # c = StopIteration error
+    d = cofun.value # d = 5
 
 ## Types and Type System
 
-### Primitive Types
+### Fundamental Types
 
-A wyrm variable reserves place for a primitive. A primitive tags the variable
-type and holds a primitive value. The 'is' boolean operator checks that the
-variable type matches and the primitive value is identical.
+Fundamental types are core to the operation of wyrm. They are used and
+provide core foundations for wyrm operations. These types listed here
+do not include internal or implementation specific types.
 
-Primitive types:
-  - **nil**: a nil value
-  - **error**: an error value
-  - **bool**: a boolean True/False value
-  - **float**: floating point
-  - **int**: a machine word
-  - **sym**: Symbol table entry (growing dynamic entries)
-  - **dict** GC ref: dictionary
-  - **pair** GC ref: a pair (or list)
-  - **array** GC ref: an array
-  - **object** GC ref: object information, any general purpose class or user defined class
-  - **str** GC ref: a string value
+Wyrm provides low level fundamental types. 'Primitive' types are non-mutable
+fundamental values where two uniquely created items will satisfy an `is`
+check. Primitive types:
+
+  - **nil**: a nil value, use 'nil' global to instantiate
+  - **bool**: a boolean true/alse, use 'true', 'false' to instantiate, bool() call casts
+  - **float**: single precision floating point, use literal to instantiate, float() call casts
+  - **int**: minimum 32bit integer, use literal to instantiate, int() call casts
+  - **uint**: minimum 32bit unsigned integer, use literal to instantiate, uint() call casts
+  - **sym**: an interned symbol table entry, use literal to instantiate
+
+Fundamental types expand to include more complicated collections and variables
+requiring dynamic memory allocation. Some of these types are not available within
+the wyrm source code:
+
+  - **bytes**: a byte buffer
+  - **str**: a string
+  - **dict**: dictionary
+  - **pair**: a linked list pair
+  - **array**: an array object
+  - **fiber**: thread of execution
+  - **closure**: a closure
+  - **coroutine**: instantiated coroutine
+  - **message**: a message set
+  - **class**: a class definition
+  - **object**: a class instance
+
+Class types inherit from object. These may be further subclassed as desired.
+
+  - **error**: an error object
+  - **file**: a file object
+
+Inherited / Extended predefined class types:
+
+  - **OutOfMemory: error** - out of memory error
+  - **StopIteration: error** - stop iteration error
+  - **RuntimeError: error** - generic runtime error
+  - **OSError: error** - OS error with errno
 
 ## Core Features
 
@@ -760,6 +878,13 @@ operators may be overloaded:
     __eq__ - equality comparison
     __ne__ - inequality comparison
     __lt__ - less than comparison
+    __gt__ - greater than comparison
+    __lte__ - less than or equal comparison
+    __gte__ - greater than or equal
+    __iter__ - obtain an iterable
+    __call__ - operate as closure and called
+    __message__ - find closure for this message
+    __hash__ - return integer hash representation of this object
 
 ### Native Code
 
@@ -853,7 +978,7 @@ Annotate functions that may return error using union error:
 
 Leverage defer on error to handle cleanup:
 
-    resource = new resource()
+    resource = resource()
     defer on error:
         resource ! cleanup()
 
@@ -862,7 +987,7 @@ Leverage defer on error to handle cleanup:
 
 Consider cleaning up and terminating the error if it makes sense:
 
-    resource = new resource()
+    resource = resource()
     defer on error | nil:
         resource ! cleanup()
 
@@ -880,3 +1005,19 @@ and eventually used with a try statement for a series of attempts:
 Leverage catch to detect actual errors if truthy false is a valid result:
 
     f = lookup['value'] catch 0
+
+Error may be inherited to create new error types. Using error as a method
+(basic constructor) will result in a new error of the base type.
+
+    fn make_error(bad: bool) -> int | error:
+        if bad:
+            return error("this is an error")
+        return 0
+
+You may also create new error types by subclassing error:
+
+    class DetectedHardwareFailure(error) {}
+
+    fn hardware_failed() -> int | error:
+        return DetectedHardwareFailure()
+
