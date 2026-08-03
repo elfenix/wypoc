@@ -55,6 +55,33 @@ BOOL = PrimitiveType("bool", _to_bool)
 PRIMITIVE_TYPES = {t.name: t for t in (STR, INT, FLOAT, BOOL)}
 
 
+class WyrmError:
+    """The internal tracked "error" type `error(what)` builds and `try`/
+    `catch` (see wyrm.gram's Try/Catch nodes, handled in eval_expr) check
+    for: `try EXPR` returns out of the enclosing function immediately if
+    EXPR evaluates to one of these, and `EXPR catch HANDLER` substitutes
+    HANDLER's value instead. Nothing but that error-ness check inspects
+    it right now - `what` is carried along only for display/comparison."""
+
+    def __init__(self, what: str):
+        self.what = what
+
+    def __repr__(self):
+        return f"WyrmError({self.what!r})"
+
+    def __eq__(self, other):
+        return isinstance(other, WyrmError) and self.what == other.what
+
+    def __hash__(self):
+        return hash((WyrmError, self.what))
+
+
+def error(what: str) -> WyrmError:
+    """(error "message") -> a new WyrmError carrying that message - the
+    only way wyrm code constructs one."""
+    return WyrmError(what)
+
+
 class Pair:
     """A Scheme-style mutable cons cell: `(car . cdr)`. Chaining pairs
     through `cdr` (NIL-terminated for a proper list, any other value for an
@@ -229,6 +256,6 @@ def install(ctx: dict) -> None:
 
     expose_all(
         ctx, **PRIMITIVE_TYPES, cons=cons, car=car, cdr=cdr, nil=NIL,
-        copy=copy, len=length, print=print_,
+        copy=copy, len=length, print=print_, error=error,
     )
     register_native_method("substr", substr, ctx)

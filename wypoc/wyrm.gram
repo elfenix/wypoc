@@ -16,6 +16,14 @@ from wypoc.ast_nodes import (
 # ===========================================================================
 # Wyrm grammar, PEG form (pegen), derived from doc/grammar.ebnf.
 #
+# Status: doc/grammar.ebnf is the intended production grammar; this file
+# (plus wyrm_tokenizer.py) is a proof-of-concept implementation bootstrapping
+# toward it, not a byte-for-byte transcription. The two are allowed to
+# diverge on tokenizer-level edge cases (e.g. indentation/brace handling)
+# as long as the annotated samples under wypoc/samples/ (test/test_grammar.py)
+# keep parsing as intended - that's the compatibility bar, not line-for-line
+# equivalence with the EBNF.
+#
 # Notes on deviations from the EBNF (see doc/grammar.ebnf's own header for
 # the "INFERRED" convention this follows):
 #

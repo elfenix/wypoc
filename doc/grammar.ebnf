@@ -23,6 +23,17 @@
    tokens and to treat NEWLINE as a statement separator; grammar rules
    below consume these virtual tokens directly rather than re-deriving
    indentation from raw whitespace.
+
+   Status: this file is the intended PRODUCTION grammar - the target for
+   a future real tokenizer/parser. wypoc/wyrm.gram (the pegen PEG grammar
+   actually driving this proof-of-concept's hand-rolled tokenizer) is
+   derived from it but is not required to match it exactly on every edge
+   case; the POC's job is to bootstrap toward this grammar, not to be a
+   byte-for-byte implementation of it. Where the two diverge, that's
+   acceptable as long as the annotated samples under wypoc/samples/
+   (test/test_grammar.py) still parse as intended - divergences worth
+   preserving should be noted in wyrm.gram's own "deviations" header, but
+   the EBNF here is not obligated to track every POC tokenizer quirk.
    ========================================================================= *)
 
 

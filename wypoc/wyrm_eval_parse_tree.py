@@ -783,6 +783,19 @@ def eval_expr(node, ctx: dict):
         return dispatch_message(node.name, receivers, node.args, ctx)
     if isinstance(node, ast.ThisRef):
         return lookup("this", ctx)
+    if isinstance(node, ast.Try):
+        value = eval_expr(node.value, ctx)
+        if isinstance(value, wyrm_builtins.WyrmError):
+            raise ReturnSignal(value)
+        return value
+    if isinstance(node, ast.Catch):
+        value = eval_expr(node.value, ctx)
+        if not isinstance(value, wyrm_builtins.WyrmError):
+            return value
+        if isinstance(node.handler, ast.Return):
+            handler_value = eval_expr(node.handler.value, ctx) if node.handler.value is not None else None
+            raise ReturnSignal(handler_value)
+        return eval_expr(node.handler, ctx)
     raise NotImplementedError(f"cannot evaluate {type(node).__name__}")
 
 
