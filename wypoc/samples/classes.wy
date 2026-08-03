@@ -42,15 +42,15 @@ class coordinate3d(coordinate2d) {
 fn [coordinate3d] length_squared():
     return super() + (z ** 2)
 
-person_instance = new person()
+person_instance = person()
 
 class coordinate2d:
     slot x: float
     slot y: float
 
-    init (x: float, y: float) with:
-        x = x
-        y = y
+    fn init(x: float, y: float):
+        this.x = x
+        this.y = y
 
 class person:
     slot name: str = "John Doe"

@@ -14,6 +14,11 @@ EXPECTED = {
     "classify_pos": "positive",
     "packed": (1, 2, 3),
     "lambda_result": 9,
+    "call_count_1": 1,
+    "call_count_2": 2,
+    "call_count_3": 3,
+    "call_count_declared_1": 1,
+    "call_count_declared_2": 2,
 }
 
 

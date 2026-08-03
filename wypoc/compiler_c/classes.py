@@ -1,6 +1,8 @@
 """`class` compilation - see DESIGN.md's "Classes" section for the supported
-subset: bare typed slots only, no bases, defaults, slot options, or `init`
-(constructors and inheritance aren't supported by --compile v1)."""
+subset: bare typed slots only, no bases, defaults, slot options, or methods
+(there's no dedicated constructor syntax any more - `init` is just an
+ordinary method named "init", so it's rejected by the same "methods aren't
+supported by --compile" path as any other class-body `fn`)."""
 from wypoc import ast_nodes as ast
 
 from .errors import err
@@ -33,8 +35,6 @@ def compile_class(classdef: ast.ClassDef, module_ident: str) -> str:
                     f"supported by --compile", member,
                 )
             slots.append((member.name, ctype(member.type, f"class '{classdef.name}' slot '{member.name}'")))
-        elif isinstance(member, ast.InitDef):
-            err(f"class '{classdef.name}': 'init' not supported by --compile (constructors not supported yet)", member)
         else:
             err(
                 f"class '{classdef.name}': methods declared inside the class body are not "

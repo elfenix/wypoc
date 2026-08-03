@@ -11,7 +11,6 @@
     { "include": "#symbols" },
     { "include": "#keywords" },
     { "include": "#storage-types" },
-    { "include": "#static-vars" },
     { "include": "#class-decl" },
     { "include": "#function-decl" },
     { "include": "#coroutine-decl" },
@@ -109,14 +108,6 @@
         }
       ]
     },
-    "static-vars": {
-      "patterns": [
-        {
-          "name": "variable.other.static.wyrm",
-          "match": "\\$[A-Za-z_][A-Za-z0-9_]*"
-        }
-      ]
-    },
     "keywords": {
       "patterns": [
         {
@@ -156,8 +147,8 @@
           "match": "\\b(import|from|using)\\b"
         },
         {
-          "name": "keyword.other.new.wyrm",
-          "match": "\\bnew\\b"
+          "name": "keyword.other.static.wyrm",
+          "match": "\\bstatic\\b"
         },
         {
           "name": "keyword.other.with.wyrm",
@@ -166,10 +157,6 @@
         {
           "name": "keyword.other.slot.wyrm",
           "match": "\\bslot\\b"
-        },
-        {
-          "name": "keyword.other.init.wyrm",
-          "match": "\\binit\\b"
         },
         {
           "name": "support.function.builtin.wyrm",

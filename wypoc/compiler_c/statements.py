@@ -54,6 +54,12 @@ def _collect_type_hint(ctx: FnContext, s: ast.TypeHint):
 
 @LOCAL_COLLECT_HANDLERS.register(ast.Assign)
 def _collect_assign(ctx: FnContext, s: ast.Assign):
+    if s.op == "?=":
+        # `foo ?= expr` (only assign if `foo` is undefined/an error) has no
+        # compiled equivalent yet - _compile_assign below would otherwise
+        # silently emit an unconditional assignment, which is wrong rather
+        # than merely unsupported.
+        err("'?=' not supported by --compile", s)
     for t in s.targets:
         if not isinstance(t, ast.NameTarget):
             err("only plain name targets are supported by --compile", s)

@@ -8,6 +8,7 @@ naturally. This is a proof-of-concept for statement/expression evaluation,
 not a real interpreter.
 """
 import operator
+import threading
 
 from wypoc import ast_nodes as ast
 from wypoc import wyrm_builtins
@@ -39,7 +40,13 @@ class Function:
 
 class Class:
     """A user-defined class/type: parent classes plus its own slots/methods,
-    unevaluated (method bodies aren't run until message dispatch exists)."""
+    unevaluated (method bodies aren't run until message dispatch happens).
+
+    There's no dedicated constructor node any more - `init` (if any) is
+    just a regular entry in `self.methods`, dispatched at construction time
+    the same way any other message is (see instantiate() below), which is
+    also how an `init` inherited from a base class (no override in this
+    class) falls out for free via the normal multi-dispatch machinery."""
 
     def __init__(self, name, node: ast.ClassDef, closure: dict, bases: list):
         self.name = name
@@ -49,7 +56,6 @@ class Class:
         self.slots: dict = {}
         self.methods: dict = {}
         self.coroutines: dict = {}
-        self.init: ast.InitDef | None = None
         for member in node.body:
             if isinstance(member, ast.SlotDef):
                 self.slots[member.name] = member
@@ -57,8 +63,18 @@ class Class:
                 self.methods[member.name] = member
             elif isinstance(member, ast.CoDef):
                 self.coroutines[member.name] = member
-            elif isinstance(member, ast.InitDef):
-                self.init = member
+            elif isinstance(member, ast.StaticDecl):
+                # A class-scoped `static`: evaluated once, eagerly, right
+                # here (vs. a fn-local static's lazy first-call init - see
+                # eval_stmt's StaticDecl case) and bound directly into the
+                # class's closure so every method (whose own local scope is
+                # seeded from this same closure - see call_overload) sees
+                # and shares the one Variable. This does mean the name is
+                # also visible as an ordinary binding in the enclosing
+                # scope the class was defined in - a POC simplification,
+                # not full encapsulation.
+                value = eval_expr(member.default, self.closure) if member.default is not None else None
+                bind(member.name, value, self.closure)
 
     def all_slots(self) -> dict:
         """(slot_def, owning_class) in MRO order - base classes first, so a
@@ -78,8 +94,39 @@ class Class:
         return f"Class({self.name!r}{f'({bases})' if bases else ''})"
 
 
+# The built-in `error` type, as a real Class so `class Foo(error) {}`
+# (base-class subclassing) type-checks like any other inheritance - see
+# eval_stmt's ClassDef case, which just requires isinstance(base, Class).
+# Its own construction (`error("msg")`) is special-cased in instantiate()
+# to build a WyrmError rather than a plain ClassInstance, preserving the
+# existing WyrmError representation for the base case; subclasses (no
+# override) construct as ordinary ClassInstances - is_error() (see
+# wyrm_builtins.py) recognizes both via class-ancestry.
+ERROR_CLASS = Class(
+    "error",
+    ast.ClassDef("error", [], [ast.SlotDef("what", None, None, None)]),
+    {},
+    [],
+)
+
+
+def _builtin_error_subtype(name: str) -> Class:
+    """A trivial `class {name}(error) {{}}` - one of doc/language-spec.md's
+    predefined error subtypes (OutOfMemory, RuntimeError, OSError,
+    StopIteration). No extra slots/behavior of their own; is_error()
+    recognizes them (and any further user subclass) via class ancestry."""
+    return Class(name, ast.ClassDef(name, [], []), {}, [ERROR_CLASS])
+
+
+OUT_OF_MEMORY_CLASS = _builtin_error_subtype("OutOfMemory")
+RUNTIME_ERROR_CLASS = _builtin_error_subtype("RuntimeError")
+OS_ERROR_CLASS = _builtin_error_subtype("OSError")
+STOP_ITERATION_CLASS = _builtin_error_subtype("StopIteration")
+
+
 class ClassInstance:
-    """A `new`-constructed object: its class plus its own slot storage."""
+    """A constructed object (built by calling its class - see
+    call_value/instantiate): its class plus its own slot storage."""
 
     def __init__(self, cls: Class):
         self.cls = cls
@@ -91,7 +138,9 @@ class ClassInstance:
 
 
 class Coroutine:
-    """A user-defined co, stored but not (yet) drivable/resumable."""
+    """A `co` definition itself (like Function, but for coroutines) - not
+    yet running. Calling it (see call_value) builds a CoroutineInstance,
+    which is what next()/send() actually drive."""
 
     def __init__(self, name, node: ast.CoDef, closure: dict):
         self.name = name
@@ -100,6 +149,154 @@ class Coroutine:
 
     def __repr__(self):
         return f"Coroutine({self.name!r})"
+
+
+_current_coroutine = threading.local()
+
+
+class CoroutineInstance:
+    """A running (or not-yet-started, or finished) `co` instance, driven by
+    next()/send() - see doc/language-spec.md's Coroutines section.
+
+    Implemented with a dedicated (daemon) OS thread that blocks on a
+    threading.Event whenever it isn't the one actively running - Python's
+    GIL means only one of {caller thread, this coroutine's thread} is ever
+    truly executing at a time, so despite being real threads this behaves
+    like ordinary cooperative coroutines: `yield` (see _yield_value) hands
+    control back to whichever next()/send() call is waiting, and stays
+    suspended until the coroutine is driven again."""
+
+    def __init__(self, node: ast.CoDef, local_ctx: dict):
+        self.node = node
+        self.local_ctx = local_ctx
+        self._to_co = threading.Event()
+        self._to_caller = threading.Event()
+        self._in_value = None
+        self._out_value = None
+        self._started = False
+        self._finished = False
+        self._result = None
+        self._thread: "threading.Thread | None" = None
+
+    def __repr__(self):
+        state = "finished" if self._finished else ("running" if self._started else "not started")
+        return f"CoroutineInstance({self.node.name!r}, {state})"
+
+    def _run(self) -> None:
+        _current_coroutine.instance = self
+        try:
+            eval_block(self.node.body, self.local_ctx)
+        except ReturnSignal as ret:
+            self._result = ret.value
+        except BaseException as exc:  # noqa: BLE001
+            # An uncaught crash inside the body (e.g. an operation that
+            # doesn't tolerate the value sent in) ends the coroutine like
+            # any other completion, with an error as its result - so it
+            # surfaces the same way doc/language-spec.md's own example
+            # shows (`send(adder, nil) # value is error of stop
+            # iteration`), not as a raw Python traceback in the caller.
+            self._result = wyrm_builtins.error(str(exc))
+        finally:
+            self._finished = True
+            self._to_caller.set()
+
+    def _suspend(self, value):
+        """Called from inside the coroutine's own thread (via
+        _yield_value) when it hits a `yield`: hands `value` back to
+        whichever next()/send() call is waiting, then blocks until driven
+        again, returning whatever was sent in."""
+        self._out_value = value
+        self._to_caller.set()
+        self._to_co.wait()
+        self._to_co.clear()
+        return self._in_value
+
+    def _advance_raw(self, send_value) -> tuple:
+        """Resumes the coroutine (starting its thread on first call) and
+        blocks until it either yields or finishes. Returns
+        (finished, value): value is the yielded value if not finished, or
+        the coroutine's `return` value if finished - calling this again
+        after it's already finished just keeps returning (True, result),
+        matching Python generators' "StopIteration forever after
+        exhaustion" behavior. Used directly by 'yield from' (see
+        _yield_from); next()/send() (see below) wrap this into the
+        StopIteration-error convention doc/language-spec.md describes."""
+        if self._finished:
+            return True, self._result
+        if not self._started:
+            self._started = True
+            self._thread = threading.Thread(target=self._run, daemon=True)
+            self._thread.start()
+        else:
+            self._in_value = send_value
+            self._to_co.set()
+        self._to_caller.wait()
+        self._to_caller.clear()
+        if self._finished:
+            return True, self._result
+        return False, self._out_value
+
+
+def _yield_value(value):
+    """`yield value` from inside a running coroutine's body: suspends the
+    current (coroutine) thread and hands `value` back to next()/send()."""
+    co = getattr(_current_coroutine, "instance", None)
+    if co is None:
+        raise TypeError("'yield' used outside of a coroutine body")
+    return co._suspend(value)
+
+
+def _yield_from(sub) -> "object":
+    """`yield from sub`: re-yields every value `sub` yields (forwarding
+    whatever's sent back in) until `sub` finishes, then evaluates to
+    `sub`'s own return value - see doc/language-spec.md's "Coroutines also
+    support delegation via 'yield from'"."""
+    if not isinstance(sub, CoroutineInstance):
+        raise TypeError("'yield from' expects a coroutine")
+    outer = getattr(_current_coroutine, "instance", None)
+    if outer is None:
+        raise TypeError("'yield from' used outside of a coroutine body")
+    finished, value = sub._advance_raw(None)
+    while not finished:
+        sent = outer._suspend(value)
+        finished, value = sub._advance_raw(sent)
+    return value
+
+
+def instantiate_coroutine(node: ast.CoDef, closure: dict, positional, kwargs, this_value) -> CoroutineInstance:
+    """Builds a CoroutineInstance: binds params/this into a fresh local
+    scope (same machinery ordinary calls use - see _bind_params) but
+    doesn't run the body yet. `this_value` is None for a bare `co(...)`
+    call, or the receiver(s) for a message-dispatched `co [Cls] ...`."""
+    local_ctx = dict(closure)
+    if this_value is not None:
+        bind_new("this", this_value, local_ctx)
+        if isinstance(this_value, ClassInstance):
+            local_ctx.update(this_value.attrs)
+    _bind_params(node, local_ctx, positional, kwargs, node.name)
+    return CoroutineInstance(node, local_ctx)
+
+
+def next_(co) -> "object":
+    """(next co) -> resumes `co` (starting it, the first time) and returns
+    what it yields, or a StopIteration error if it's already finished."""
+    if not isinstance(co, CoroutineInstance):
+        raise TypeError(f"next() expects a coroutine (got {type(co).__name__})")
+    finished, value = co._advance_raw(None)
+    return stop_iteration() if finished else value
+
+
+def send_(co, value) -> "object":
+    """(send co, value) -> sends `value` into `co` (resuming it) and
+    returns what it yields next, or a StopIteration error if it finishes.
+    `co` must already have been started with next() - see
+    doc/language-spec.md's Coroutines section."""
+    if not isinstance(co, CoroutineInstance):
+        raise TypeError(f"send() expects a coroutine (got {type(co).__name__})")
+    if not co._started:
+        raise TypeError("a coroutine must be started with next() before send()")
+    finished, out = co._advance_raw(value)
+    return stop_iteration() if finished else out
 
 
 class NativeBody:
@@ -283,12 +480,30 @@ class ContinueSignal(Exception):
     """Unwinds a loop body back to the nearest enclosing while/for on `continue`."""
 
 
+def _safe_div(a, b):
+    """a / b, except division by zero is a WyrmError value (catchable via
+    try/catch) rather than a raw Python exception - see
+    doc/language-spec.md's "Errors / RAII" `this.result = try num / den`
+    example, which relies on this producing a proper error value."""
+    try:
+        return operator.truediv(a, b)
+    except ZeroDivisionError:
+        return wyrm_builtins.error("division by zero")
+
+
+def _safe_mod(a, b):
+    try:
+        return operator.mod(a, b)
+    except ZeroDivisionError:
+        return wyrm_builtins.error("modulo by zero")
+
+
 BINOPS = {
     "+": operator.add,
     "-": operator.sub,
     "*": operator.mul,
-    "/": operator.truediv,
-    "%": operator.mod,
+    "/": _safe_div,
+    "%": _safe_mod,
     "**": operator.pow,
     "&": operator.and_,
     "|": operator.or_,
@@ -369,10 +584,38 @@ def unwrap(value):
     return value.value if isinstance(value, Variable) else value
 
 
+class _UnsetType:
+    """The value of a `static foo: int` (declare, no initializer) binding
+    until something actually assigns it - distinct from `nil`/None, which
+    is a perfectly good real value. lookup() below refuses to hand this
+    out, matching doc/language-spec.md's "Undefined variables will
+    generate an error if attempted to be evaluated"."""
+
+    def __repr__(self):
+        return "<unset>"
+
+
+UNSET = _UnsetType()
+
+
 def lookup(name: str, ctx: dict):
     if name not in ctx:
         raise NameError(f"undefined variable {name!r}")
-    return unwrap(ctx[name])
+    value = unwrap(ctx[name])
+    if value is UNSET:
+        raise NameError(f"variable {name!r} is declared but has no value yet")
+    return value
+
+
+def is_defined(name: str, ctx: dict) -> bool:
+    """`defined('foo)`/`?=`'s "already defined and not of error type" check
+    (see doc/language-spec.md's Variables section)."""
+    if name not in ctx:
+        return False
+    value = unwrap(ctx[name])
+    if value is UNSET:
+        return False
+    return not wyrm_builtins.is_error(value)
 
 
 def bind(name: str, value, ctx: dict) -> None:
@@ -444,19 +687,33 @@ def eval_args(arg_nodes, ctx: dict):
     return positional, kwargs
 
 
-def _bind_params_and_run(node, local_ctx: dict, positional, kwargs, display_name: str):
-    """Shared by call_function and call_overload: binds params/*args/**kwargs
-    into local_ctx (already seeded with whatever closure/this/slots the
-    caller wants visible), then runs the body and unwinds ReturnSignal."""
+def _static_store_for(node) -> dict:
+    """The persistent Variable-storage dict for a fn/co's `static` locals -
+    tied to the AST node itself (i.e. "the symbol definition", per
+    doc/language-spec.md's Variables section) rather than to any one call's
+    local_ctx, which is rebuilt fresh every call. Lazily attached to the
+    node on first use; every call after that shares the same dict."""
+    store = getattr(node, "_static_store", None)
+    if store is None:
+        store = {}
+        node._static_store = store
+    return store
+
+
+def _bind_params(node, local_ctx: dict, positional, kwargs, display_name: str) -> None:
+    """Binds a fn/co's params/*args/**kwargs into local_ctx (already seeded
+    with whatever closure/this/slots the caller wants visible). Shared by
+    _bind_params_and_run (ordinary fn/message calls, which also run the
+    body immediately) and instantiate_coroutine (which binds params up
+    front but only runs the body lazily, on first next()/send())."""
     kwargs = dict(kwargs)
     positional = list(positional)
+    local_ctx["__statics__"] = _static_store_for(node)
 
     plain_params = []
     var_positional_name = None
     var_keyword_name = None
     for p in node.params:
-        if isinstance(p, ast.PosOnlyMarker):
-            continue
         if isinstance(p, ast.VarPositional):
             var_positional_name = p.name
         elif isinstance(p, ast.VarKeyword):
@@ -492,6 +749,11 @@ def _bind_params_and_run(node, local_ctx: dict, positional, kwargs, display_name
         unexpected = ", ".join(sorted(kwargs))
         raise TypeError(f"{display_name}() got unexpected keyword argument(s): {unexpected}")
 
+
+def _bind_params_and_run(node, local_ctx: dict, positional, kwargs, display_name: str):
+    """Shared by call_function and call_overload: binds params (see
+    _bind_params) then runs the body and unwinds ReturnSignal."""
+    _bind_params(node, local_ctx, positional, kwargs, display_name)
     try:
         eval_block(node.body, local_ctx)
     except ReturnSignal as ret:
@@ -514,6 +776,12 @@ def call_overload(overload: MethodOverload, receivers: list, positional, kwargs)
     this_value = receivers[0] if len(receivers) == 1 else tuple(receivers)
     if isinstance(overload.node, NativeBody):
         return overload.node.fn(this_value, *positional, **kwargs)
+    if isinstance(overload.node, ast.CoDef):
+        # A message-dispatched coroutine (`co [Cls] name(...)`, invoked via
+        # `recv ! name(...)`) - construct the CoroutineInstance rather than
+        # running a body, exactly like calling a bare `co` does (see
+        # instantiate_coroutine/call_value's Coroutine branch).
+        return instantiate_coroutine(overload.node, overload.closure, positional, kwargs, this_value)
     local_ctx = dict(overload.closure)
     if len(receivers) == 1 and isinstance(receivers[0], ClassInstance):
         local_ctx.update(receivers[0].attrs)
@@ -522,8 +790,12 @@ def call_overload(overload: MethodOverload, receivers: list, positional, kwargs)
 
 
 def call_value(func, positional, kwargs):
+    if isinstance(func, Class):
+        return instantiate(func, positional, kwargs)
     if isinstance(func, Function):
         return call_function(func, positional, kwargs)
+    if isinstance(func, Coroutine):
+        return instantiate_coroutine(func.node, func.closure, positional, kwargs, None)
     if isinstance(func, BoundMessage):
         return call_overload(func.overload, func.receivers, positional, kwargs)
     if isinstance(func, wyrm_builtins.PrimitiveType):
@@ -594,6 +866,18 @@ def resolve_overload(method: "Method", receivers: list) -> MethodOverload:
 _WILDCARD_DISTANCE = float("inf")
 
 
+def _try_resolve_overload(method: "Method", receivers: list) -> "MethodOverload | None":
+    """Like resolve_overload, but None (rather than raising) when nothing
+    matches - used by instantiate() for `init`, which is optional: a class
+    with no applicable `init` overload anywhere in its ancestry just skips
+    construction-time dispatch instead of erroring, unless the caller
+    passed constructor arguments (see instantiate())."""
+    try:
+        return resolve_overload(method, receivers)
+    except TypeError:
+        return None
+
+
 def dispatch_message(name: str, receivers: list, args_node, ctx: dict):
     """Shared by `recv ! name(...)`, `recv ! name`, and `(a, b) ! name(...)`:
     looks up the generic function, resolves the best-matching overload for
@@ -660,21 +944,97 @@ def register_overload(name: str, signature, node, closure: dict, target_ctx: dic
     method.add_overload(signature, node, closure)
 
 
-def instantiate(cls: Class, positional, kwargs) -> "ClassInstance":
-    """`new Cls(...)`: builds a ClassInstance and fills its slots with their
-    declared defaults. Passing constructor args would require running
-    init()/a method body with `this` bound to the new instance, which needs
-    message dispatch (not implemented yet), so that's left as a clear error
-    for now rather than silently ignored."""
-    if positional or kwargs:
-        raise NotImplementedError(
-            f"new {cls.name}(...) with constructor arguments requires calling "
-            f"init() via message dispatch, which isn't implemented yet"
-        )
+def _zero_value(type_expr: "ast.TypeExpr | None"):
+    """A slot's implicit default when it has none declared, per
+    doc/language-spec.md's "Basic Classes": bool -> false, int/uint -> 0,
+    everything else (float, GC types, or no type hint at all) -> nil
+    (Python None throughout this POC - see e.g. instantiate's old
+    no-default branch, or an unset variable's value elsewhere)."""
+    if type_expr is None or not type_expr.parts:
+        return None
+    name = type_expr.parts[-1]
+    if name == "bool":
+        return False
+    if name in ("int", "uint"):
+        return 0
+    return None
+
+
+def stop_iteration() -> ClassInstance:
+    """A fresh StopIteration instance - what next()/send() hand back once
+    a coroutine has finished (see instantiate_coroutine/CoroutineInstance
+    above)."""
+    inst = ClassInstance(STOP_ITERATION_CLASS)
+    inst.attrs["what"] = Variable("StopIteration")
+    return inst
+
+
+_PRIMITIVE_TYPE_CHECKS = {
+    "nil": lambda v: v is None,
+    "bool": lambda v: isinstance(v, bool),
+    "int": lambda v: isinstance(v, int) and not isinstance(v, bool),
+    "uint": lambda v: isinstance(v, int) and not isinstance(v, bool) and v >= 0,
+    "float": lambda v: isinstance(v, float),
+    # No distinct symbol representation in this POC (see eval_expr's
+    # ast.Symbol case) - `is sym` can't be told apart from `is str` here.
+    "str": lambda v: isinstance(v, str),
+    "sym": lambda v: isinstance(v, str),
+    "error": lambda v: wyrm_builtins.is_error(v),
+}
+
+
+def _matches_type(value, type_expr: "ast.TypeExpr", ctx: dict) -> bool:
+    """`value is <type_expr>` for one constraint of a (possibly unioned)
+    type check - see eval_expr's ast.TypeCheck case. Primitive type names
+    check the Python representation directly; anything else is looked up
+    as a Class and checked by ancestry (so `x is Shape` also matches a
+    Circle instance)."""
+    name = type_expr.parts[-1] if type_expr.parts else None
+    check = _PRIMITIVE_TYPE_CHECKS.get(name)
+    if check is not None:
+        return check(value)
+    try:
+        cls = _lookup_class(name, ctx)
+    except (NameError, TypeError):
+        return False
+    return isinstance(value, ClassInstance) and _class_distance(value.cls, cls) is not None
+
+
+def instantiate(cls: Class, positional, kwargs) -> "ClassInstance | WyrmError":
+    """`Cls(...)`: builds an instance with every slot zero-valued (or its
+    declared default), then dispatches to `init` (if the class or any
+    ancestor defines one) with `this` bound to the new instance, exactly
+    like any other message send - so an `init` inherited from a base class
+    is picked up automatically by the same multi-dispatch resolution any
+    other inherited method would use. If `init`'s result is an error, that
+    error is returned in place of the instance (RAII - see
+    doc/language-spec.md's "Errors / RAII" example).
+
+    ERROR_CLASS is special-cased: it has no `init` (it's a builtin, not
+    wyrm-defined), so `error("msg")` is handled directly here instead."""
+    if cls is ERROR_CLASS:
+        if kwargs or len(positional) != 1:
+            raise TypeError("error(...) takes exactly one positional argument (the message)")
+        return wyrm_builtins.error(positional[0])
+
     inst = ClassInstance(cls)
     for slot_name, (slot_def, owner) in cls.all_slots().items():
-        value = eval_expr(slot_def.default, owner.closure) if slot_def.default is not None else None
+        if slot_def.default is not None:
+            value = eval_expr(slot_def.default, owner.closure)
+        else:
+            value = _zero_value(slot_def.type)
         inst.attrs[slot_name] = Variable(value)
+
+    method = unwrap(cls.closure["init"]) if "init" in cls.closure else None
+    if isinstance(method, Method):
+        overload = _try_resolve_overload(method, [inst])
+        if overload is not None:
+            result = call_overload(overload, [inst], positional, kwargs)
+            if wyrm_builtins.is_error(result):
+                return result
+            return inst
+    if positional or kwargs:
+        raise TypeError(f"{cls.name}(...) takes no arguments (no applicable 'init')")
     return inst
 
 
@@ -744,16 +1104,6 @@ def eval_expr(node, ctx: dict):
         func = eval_expr(node.func, ctx)
         positional, kwargs = eval_args(node.args, ctx)
         return call_value(func, positional, kwargs)
-    if isinstance(node, ast.NewExpr):
-        parts = node.type.parts
-        if len(parts) > 1:
-            cls = lookup(parts[-1], import_module(parts[:-1]).ctx)
-        else:
-            cls = lookup(parts[0], ctx)
-        if not isinstance(cls, Class):
-            raise TypeError(f"{'::'.join(parts)} does not name a class")
-        positional, kwargs = eval_args(node.args, ctx)
-        return instantiate(cls, positional, kwargs)
     if isinstance(node, ast.Index):
         obj = eval_expr(node.obj, ctx)
         idx = eval_expr(node.index, ctx)
@@ -772,6 +1122,13 @@ def eval_expr(node, ctx: dict):
         raise NotImplementedError(f"'::' is only supported on modules right now (got {type(obj).__name__})")
     if isinstance(node, ast.Attr):
         obj = eval_expr(node.obj, ctx)
+        if isinstance(obj, CoroutineInstance) and node.name == "value":
+            # "The return statement from a coroutine is stored in the
+            # 'value' attribute. An active coroutine will return an error
+            # when accessing [it]" - doc/language-spec.md's Coroutines.
+            if not obj._finished:
+                return wyrm_builtins.error(f"coroutine {obj.node.name!r} has not finished")
+            return obj._result
         if isinstance(obj, ClassInstance):
             return lookup(node.name, obj.attrs)
         raise NotImplementedError(f"'.' is only supported on class instances right now (got {type(obj).__name__})")
@@ -783,14 +1140,43 @@ def eval_expr(node, ctx: dict):
         return dispatch_message(node.name, receivers, node.args, ctx)
     if isinstance(node, ast.ThisRef):
         return lookup("this", ctx)
+    if isinstance(node, ast.Defined):
+        return is_defined(node.symbol.name, ctx)
+    if isinstance(node, ast.SetIfUnset):
+        if isinstance(node.target, ast.Name):
+            if is_defined(node.target.id, ctx):
+                return lookup(node.target.id, ctx)
+            value = eval_expr(node.value, ctx)
+            bind(node.target.id, value, ctx)
+            return value
+        # Best-effort for a non-plain-name target (e.g. `this.x ?= 5`):
+        # short-circuit if already a real, non-error value; otherwise just
+        # evaluate the RHS. Writing back through an arbitrary lvalue
+        # expression here isn't modeled by this POC evaluator.
+        try:
+            current = eval_expr(node.target, ctx)
+        except NameError:
+            current = UNSET
+        if current is not UNSET and not wyrm_builtins.is_error(current):
+            return current
+        return eval_expr(node.value, ctx)
+    if isinstance(node, ast.TypeCheck):
+        value = eval_expr(node.value, ctx)
+        return any(_matches_type(value, t, ctx) for t in node.types)
+    if isinstance(node, ast.Yield):
+        if node.from_:
+            sub = eval_expr(node.value, ctx)
+            return _yield_from(sub)
+        value = eval_expr(node.value, ctx) if node.value is not None else None
+        return _yield_value(value)
     if isinstance(node, ast.Try):
         value = eval_expr(node.value, ctx)
-        if isinstance(value, wyrm_builtins.WyrmError):
+        if wyrm_builtins.is_error(value):
             raise ReturnSignal(value)
         return value
     if isinstance(node, ast.Catch):
         value = eval_expr(node.value, ctx)
-        if not isinstance(value, wyrm_builtins.WyrmError):
+        if not wyrm_builtins.is_error(value):
             return value
         if isinstance(node.handler, ast.Return):
             handler_value = eval_expr(node.handler.value, ctx) if node.handler.value is not None else None
@@ -813,8 +1199,23 @@ def eval_stmt(stmt, ctx: dict) -> None:
         eval_using(stmt, ctx)
         return
     if isinstance(stmt, ast.Assign):
-        values = [eval_expr(v, ctx) for v in stmt.values]
         targets = stmt.targets
+        if stmt.op == "?=":
+            # Each target/value pair short-circuits independently: a
+            # NameTarget already defined (and non-error) keeps its value
+            # without evaluating that value expression at all - see
+            # doc/language-spec.md's "set if unset" operator.
+            if len(targets) != len(stmt.values):
+                raise ValueError(
+                    f"assignment target/value count mismatch: "
+                    f"{len(targets)} targets, {len(stmt.values)} values"
+                )
+            for t, v_node in zip(targets, stmt.values):
+                if isinstance(t, ast.NameTarget) and is_defined(t.name, ctx):
+                    continue
+                assign_target(t, eval_expr(v_node, ctx), ctx)
+            return
+        values = [eval_expr(v, ctx) for v in stmt.values]
         if len(targets) == 1 and len(values) == 1:
             assign_target(targets[0], values[0], ctx)
         elif len(targets) == len(values):
@@ -826,8 +1227,29 @@ def eval_stmt(stmt, ctx: dict) -> None:
                 f"{len(targets)} targets, {len(values)} values"
             )
         return
+    if isinstance(stmt, ast.StaticDecl):
+        store = ctx.get("__statics__")
+        if store is None:
+            raise TypeError("'static' is only valid inside a fn/co body (or a class body)")
+        if stmt.name not in store:
+            value = eval_expr(stmt.default, ctx) if stmt.default is not None else UNSET
+            store[stmt.name] = Variable(value)
+        # Alias, don't copy: later plain assignment (`foo = foo + 1`) or
+        # `?=` mutates this same Variable in place (see bind()), so the
+        # write is visible through `store` on the next call too.
+        ctx[stmt.name] = store[stmt.name]
+        return
     if isinstance(stmt, ast.ExprStmt):
         eval_expr(stmt.value, ctx)
+        return
+    if isinstance(stmt, ast.Yield):
+        # A bare `yield 1` / `yield from sub()` line (yield_stmt, not
+        # wrapped in ExprStmt - see wyrm.gram). Same suspension as the
+        # expression form; the yielded-back-in value is just discarded.
+        if stmt.from_:
+            _yield_from(eval_expr(stmt.value, ctx))
+        else:
+            _yield_value(eval_expr(stmt.value, ctx) if stmt.value is not None else None)
         return
     if isinstance(stmt, ast.Pass):
         return
@@ -878,7 +1300,15 @@ def eval_stmt(stmt, ctx: dict) -> None:
         register_overload(stmt.name, signature, stmt, ctx, ctx)
         return
     if isinstance(stmt, ast.CoDef):
-        bind(stmt.name, Coroutine(stmt.name, stmt, ctx), ctx)
+        # A tagged `co [Cls, ...] name(...)` is a message like a tagged
+        # `fn` (dispatched via `recv ! name(...)`, see call_overload's
+        # CoDef branch); a bare `co name(...)` is a plain callable
+        # coroutine factory instead (see call_value's Coroutine branch).
+        if stmt.class_target is None:
+            bind(stmt.name, Coroutine(stmt.name, stmt, ctx), ctx)
+        else:
+            signature = tuple(_lookup_class(n, ctx) for n in stmt.class_target)
+            register_overload(stmt.name, signature, stmt, ctx, ctx)
         return
     if isinstance(stmt, ast.ClassDef):
         bases = [eval_expr(b, ctx) for b in stmt.bases]
@@ -887,10 +1317,13 @@ def eval_stmt(stmt, ctx: dict) -> None:
                 raise TypeError(f"base class {base_expr!r} does not name a class (got {base!r})")
         cls = Class(stmt.name, stmt, ctx, bases)
         bind(stmt.name, cls, ctx)
-        # A class-body method is equivalent to `fn [ThisClass] name(...)`
-        # defined externally - see doc/language-spec.md's Messages section.
+        # A class-body method/coroutine is equivalent to `fn`/`co`
+        # `[ThisClass] name(...)` defined externally - see
+        # doc/language-spec.md's Messages section.
         for method_name, method_node in cls.methods.items():
             register_overload(method_name, (cls,), method_node, cls.closure, ctx)
+        for co_name, co_node in cls.coroutines.items():
+            register_overload(co_name, (cls,), co_node, cls.closure, ctx)
         return
     raise NotImplementedError(f"cannot evaluate statement {type(stmt).__name__}")
 

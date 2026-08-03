@@ -172,7 +172,7 @@ roughly the order a "closes the most ground" heuristic would suggest:
 
 - **Expressions** (`expressions.py`): only `Num`/`Bool`/`Name`/`UnaryOp`/
   `BinOp` are registered. Missing: `Str`, `Char`, `Symbol`, `Array`,
-  `Pair`, `Tuple`, `Dict`, `Attr`, `Index`, `Message`, `Scope`, `NewExpr`,
+  `Pair`, `Tuple`, `Dict`, `Attr`, `Index`, `Message`, `Scope`,
   `Defined`, `Lambda`, `SetIfUnset`, float literals (blocked on the VM
   having no `WYRM_TYPE_TAG_FLOAT` yet, not a compiler gap). Each is one
   `EXPR_HANDLERS.register(...)` entry away.

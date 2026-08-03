@@ -28,6 +28,6 @@ class File:
         return __close(handle)
 
 fn open(path, mode="r") -> File:
-    f = new File()
+    f = File()
     f.handle = __open(path, mode)
     return f

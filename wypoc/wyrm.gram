@@ -3,11 +3,11 @@ from wypoc.actions import fold_left, make_tuple, fold_postfix
 from wypoc.ast_nodes import (
     Program, Pass, ExprStmt, Return, Yield, ElifClause, If, While, For,
     Continue, Break, NameTarget,
-    AttrTarget, Assign, TypeHint, StaticRef, TypeExpr, WithSimple,
-    WithBinding, WithBlock, Import, FromImport, Using, Param, PosOnlyMarker,
+    AttrTarget, Assign, TypeHint, StaticDecl, TypeExpr, WithSimple,
+    WithBinding, WithBlock, Import, FromImport, Using, Param,
     VarPositional, VarKeyword, FnDef, CoDef, ClassDef, SlotOption, SlotDef,
-    InitDef, Num, Str, Char, Bool, Symbol, Name, ThisRef, SuperCall, Defined,
-    Lambda, NewExpr, Array, Pair, Tuple, DictEntry, Dict, MessageTupleExpr,
+    Num, Str, Char, Bool, Symbol, Name, ThisRef, SuperCall, Defined,
+    Lambda, Array, Pair, Tuple, DictEntry, Dict, MessageTupleExpr,
     Kwarg, SpreadPos, SpreadKw, UnaryOp, BinOp, SetIfUnset, Call, Index,
     Attr, Message, Scope, Defer, Try, Catch, TypeCheck,
 )
@@ -91,6 +91,7 @@ simple_stmt_line[object]:
 
 simple_stmt[object]:
     | with_stmt_simple
+    | static_stmt
     | assignment_stmt
     | type_hint_stmt
     | from_import_stmt
@@ -124,6 +125,7 @@ return_stmt[object]:
     | 'return' { Return(None) }
 
 yield_stmt[object]:
+    | 'yield' 'from' e=expression { Yield(e, True) }
     | 'yield' e=expression { Yield(e) }
     | 'yield' { Yield(None) }
 
@@ -161,14 +163,13 @@ defer_stmt[object]:
 # ---- assignment / bindings ---------------------------------------------
 
 assignment_stmt[object]:
-    | targets=target_list ty=(":" type_expr)? op=assign_op vals=expr_list {
+    | targets=target_list ty=(":" ann_type)? op=assign_op vals=expr_list {
           Assign(targets, ty[1] if ty else None, op, vals) }
 
 target_list[object]:
     | first=target rest=("," target)* { [first] + [t for _, t in rest] }
 
 target[object]:
-    | static_ref
     | 'this' rest=("." NAME)+ { AttrTarget(ThisRef(), [a.string for _, a in rest]) }
     | n=NAME rest=("." NAME)+ { AttrTarget(n.string, [a.string for _, a in rest]) }
     | NAME { NameTarget(name.string) }
@@ -178,18 +179,35 @@ assign_op[object]:
     | "=" { '=' }
 
 type_hint_stmt[object]:
-    | n=NAME ":" t=type_expr { TypeHint(n.string, t) }
+    | n=NAME ":" t=ann_type { TypeHint(n.string, t) }
 
-static_ref[object]:
-    | "$" n=NAME { StaticRef(n.string) }
+# `static` declares a binding tied to the enclosing fn/class definition
+# rather than the current call/instance (see doc/language-spec.md's
+# "Variables" section). After declaration the name is an ordinary target -
+# no special sigil needed at use sites, just NameTarget like any local.
+static_stmt[object]:
+    | 'static' n=NAME ty=(":" ann_type)? dflt=("=" assign_expr)? {
+          StaticDecl(n.string, ty[1] if ty else None, dflt[1] if dflt else None) }
 
 type_expr[object]:
     | first=NAME rest=("::" NAME)* { TypeExpr([first.string] + [n.string for _, n in rest]) }
 
+# An annotation position (return type, param/slot/variable type, coroutine
+# input type, ...) accepts a `|`-unioned type per doc/language-spec.md
+# ("Type constraints may represent summation types as well", used
+# throughout the spec's prose as e.g. `-> int | error`). This POC doesn't
+# model types at runtime beyond a couple of decorative checks (see
+# wyrm_eval_parse_tree.py's _zero_value/_matches_type and
+# compiler_c/wtypes.ctype), so a union annotation parses fully but keeps
+# only its first arm - good enough to accept the spec's own examples
+# without needing every annotation field to become a list.
+ann_type[object]:
+    | first=type_expr ("|" type_expr)* { first }
+
 # ---- immutable bindings --------------------------------------------------
 
 with_stmt_simple[object]:
-    | 'with' n=NAME ty=(":" type_expr)? "=" e=assign_expr {
+    | 'with' n=NAME ty=(":" ann_type)? "=" e=assign_expr {
           WithSimple(n.string, ty[1] if ty else None, e) }
 
 with_block[object]:
@@ -201,7 +219,7 @@ with_binding_list[object]:
     | first=with_binding { [first] }
 
 with_binding[object]:
-    | n=NAME ty=(":" type_expr)? "=" e=assign_expr { WithBinding(n.string, ty[1] if ty else None, e) }
+    | n=NAME ty=(":" ann_type)? "=" e=assign_expr { WithBinding(n.string, ty[1] if ty else None, e) }
 
 # ---------------------------------------------------------------------
 # Modules and imports
@@ -234,9 +252,9 @@ using_stmt[object]:
 # ---------------------------------------------------------------------
 
 fn_def[object]:
-    | 'fn' cls=class_target n=NAME "(" params=param_list? ")" ret=("->" type_expr)? body=block {
+    | 'fn' cls=class_target n=NAME "(" params=param_list? ")" ret=("->" ann_type)? body=block {
           FnDef(cls, n.string, params or [], ret[1] if ret else None, body) }
-    | 'fn' n=NAME "(" params=param_list? ")" ret=("->" type_expr)? body=block {
+    | 'fn' n=NAME "(" params=param_list? ")" ret=("->" ann_type)? body=block {
           FnDef(None, n.string, params or [], ret[1] if ret else None, body) }
 
 class_target[object]:
@@ -246,16 +264,14 @@ param_list[object]:
     | first=param rest=("," param)* { [first] + [p for _, p in rest] }
 
 param[object]:
-    | pos_only_marker
     | var_positional
     | var_keyword
     | plain_param
 
 plain_param[object]:
-    | n=NAME ty=(":" type_expr)? dflt=("=" assign_expr)? {
+    | n=NAME ty=(":" ann_type)? dflt=("=" assign_expr)? {
           Param(n.string, ty[1] if ty else None, dflt[1] if dflt else None) }
 
-pos_only_marker[object]: "/" { PosOnlyMarker() }
 var_positional[object]: "*" n=NAME { VarPositional(n.string) }
 var_keyword[object]: "**" n=NAME { VarKeyword(n.string) }
 
@@ -271,43 +287,50 @@ var_keyword[object]: "**" n=NAME { VarKeyword(n.string) }
 # separate rule from `param`/`param_list` (used by `fn_def` too) so `<-`
 # never becomes legal in a plain function's parameter list.
 co_params[object]:
-    | "<-" t=type_expr "," p=param_list { (t, p) }
-    | "<-" t=type_expr { (t, []) }
+    | "<-" t=ann_type "," p=param_list { (t, p) }
+    | "<-" t=ann_type { (t, []) }
     | p=param_list { (None, p) }
 
 co_def[object]:
-    | 'co' cls=class_target n=NAME "(" cp=co_params? ")" ret=("->" type_expr)? body=block {
+    | 'co' cls=class_target n=NAME "(" cp=co_params? ")" ret=("->" ann_type)? body=block {
           CoDef(cls, n.string, cp[1] if cp else [], cp[0] if cp else None, ret[1] if ret else None, body) }
-    | 'co' n=NAME "(" cp=co_params? ")" ret=("->" type_expr)? body=block {
+    | 'co' n=NAME "(" cp=co_params? ")" ret=("->" ann_type)? body=block {
           CoDef(None, n.string, cp[1] if cp else [], cp[0] if cp else None, ret[1] if ret else None, body) }
 
 # ---------------------------------------------------------------------
 # Classes
 # ---------------------------------------------------------------------
 
+# class_block's action wraps its member list in a 1-tuple (never falsy,
+# even for an empty class body like `class Foo(error) {}`) rather than
+# returning the bare list directly - pegen's generated code truthiness-
+# checks a required (non-*, non-?) sub-rule capture, and `*`/`?` captures
+# get an automatic trailing-comma wrap that plain rule references don't,
+# so a genuinely empty member list would otherwise make class_def's whole
+# alternative look like a failed match. class_def unwraps with body[0].
 class_def[object]:
-    | 'class' n=NAME "(" bases=arg_list? ")" body=class_block { ClassDef(n.string, bases or [], body) }
-    | 'class' n=NAME body=class_block { ClassDef(n.string, [], body) }
+    | 'class' n=NAME "(" bases=arg_list? ")" body=class_block { ClassDef(n.string, bases or [], body[0]) }
+    | 'class' n=NAME body=class_block { ClassDef(n.string, [], body[0]) }
 
 class_block[object]:
-    | ":" NEWLINE INDENT members=class_member_item* DEDENT { members }
-    | "{" NEWLINE* members=class_member_brace* "}" { members }
+    | ":" NEWLINE INDENT members=class_member_item* DEDENT { (members,) }
+    | "{" NEWLINE* members=class_member_brace* "}" { (members,) }
 
 class_member_brace[object]:
     | m=fn_def NEWLINE* { m }
     | m=co_def NEWLINE* { m }
     | m=slot_def NEWLINE* { m }
-    | m=init_def NEWLINE* { m }
+    | m=static_stmt NEWLINE* { m }
 
 class_member_item[object]:
     | m=fn_def NEWLINE? { m }
     | m=co_def NEWLINE? { m }
     | m=slot_def NEWLINE { m }
     | m=slot_def { m }
-    | m=init_def NEWLINE? { m }
+    | m=static_stmt NEWLINE? { m }
 
 slot_def[object]:
-    | 'slot' n=NAME ty=(":" type_expr)? dflt=("=" assign_expr)? opts=('with' slot_options)? {
+    | 'slot' n=NAME ty=(":" ann_type)? dflt=("=" assign_expr)? opts=('with' slot_options)? {
           SlotDef(n.string, ty[1] if ty else None, dflt[1] if dflt else None, opts[1] if opts else None) }
 
 slot_options[object]:
@@ -326,10 +349,10 @@ slot_option[object]:
     | kind=('setter' | 'getter') "=" 'undefined' { SlotOption(kind.string, 'undefined') }
     | kind=('setter' | 'getter') "=" e=assign_expr { SlotOption(kind.string, e) }
 
-# Constructor syntax is explicitly unfinished/ugly in the spec; this mirrors
-# the one worked example (`init (params) with: stmt...`) as an INFERRED form.
-init_def[object]:
-    | 'init' "(" params=param_list? ")" 'with' body=block { InitDef(params or [], body) }
+# No dedicated constructor syntax: `init` is just an ordinary fn_def member
+# (`fn init(...): ...`), promoted to the class's constructor by name alone -
+# see doc/language-spec.md's "Basic Classes" section. `init` is no longer a
+# reserved word (see wyrm_tokenizer.py), so this needs no grammar of its own.
 
 # ---------------------------------------------------------------------
 # Expressions
@@ -342,6 +365,7 @@ expr_list[object]:
     | first=assign_expr rest=("," assign_expr)* { [first] + [e for _, e in rest] }
 
 assign_expr[object]:
+    | 'yield' 'from' e=expression { Yield(e, True) }
     | 'yield' e=expression { Yield(e) }
     | 'yield' { Yield(None) }
     | a=or_expr "?=" b=or_expr { SetIfUnset(a, b) }
@@ -455,7 +479,6 @@ argument[object]:
 
 primary[object]:
     | literal
-    | new_expr
     | message_tuple_expr
     | paren_or_tuple
     | array_literal
@@ -465,7 +488,6 @@ primary[object]:
     | 'super' "(" args=arg_list? ")" { SuperCall(args or []) }
     | 'defined' "(" s=symbol_literal ")" { Defined(s) }
     | lambda_expr
-    | static_ref
     | NAME { Name(name.string) }
 
 literal[object]:
@@ -518,9 +540,6 @@ message_tuple_expr[object]:
           MessageTupleExpr(items, n.string, args or []) }
     | "(" items=expr_list ")" "!" n=NAME {
           MessageTupleExpr(items, n.string, None) }
-
-new_expr[object]:
-    | 'new' t=type_expr "(" args=arg_list? ")" { NewExpr(t, args or []) }
 
 lambda_expr[object]:
     | 'fn' "(" params=param_list? ")" body=block { Lambda(params or [], body) }

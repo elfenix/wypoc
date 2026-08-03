@@ -73,7 +73,7 @@ def test_module_and_package_objects(ctx):
 def test_qualified_type_path(ctx):
     c = ctx["c"].value
     assert isinstance(c, ClassInstance) and c.cls.name == "Circle", (
-        "new shapes::Circle() works via qualified type path"
+        "shapes::Circle() works via qualified type path"
     )
     assert isinstance(ctx["c_area_fn"].value, Class), "shapes::Circle (via `::`) resolves to the Class object"
 

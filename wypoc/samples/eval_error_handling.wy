@@ -19,3 +19,19 @@ fn returns_via_catch_return():
     return value
 
 catch_return_result = returns_via_catch_return()
+
+class DetectedHardwareFailure(error) {}
+
+fn hardware_failed() -> int:
+    return DetectedHardwareFailure()
+
+hardware_error = hardware_failed()
+
+class demo:
+    slot result: int
+
+    fn init(num: int, den: int):
+        this.result = try num / den
+
+demo_ok = demo(10, 2) catch 'div0
+demo_div_by_zero = demo(10, 0) catch 'div0

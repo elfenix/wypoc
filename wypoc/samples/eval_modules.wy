@@ -1,7 +1,7 @@
 import shapes
 import std::io
 
-c = new shapes::Circle()
+c = shapes::Circle()
 c_area_fn = shapes::Circle
 
 greeted = std::io::println("hi")

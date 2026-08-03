@@ -77,9 +77,27 @@ class WyrmError:
 
 
 def error(what: str) -> WyrmError:
-    """(error "message") -> a new WyrmError carrying that message - the
-    only way wyrm code constructs one."""
+    """(error "message") -> a new WyrmError carrying that message. This
+    backs the *base* `error` type's construction specifically - see
+    wyrm_eval_parse_tree.instantiate()'s special case for ERROR_CLASS.
+    User error subtypes (`class Foo(error) {}`) construct as ordinary
+    ClassInstances instead; is_error() below recognizes both."""
     return WyrmError(what)
+
+
+def is_error(value) -> bool:
+    """True for the base error type's WyrmError representation *and* for
+    an instance of any user class that (transitively) subclasses `error`
+    (see doc/language-spec.md's "Error may be inherited to create new
+    error types") - the single predicate `try`/`catch`/`?=`/`defined()`
+    all check (see wyrm_eval_parse_tree.py)."""
+    if isinstance(value, WyrmError):
+        return True
+    from wypoc.wyrm_eval_parse_tree import ClassInstance, ERROR_CLASS, _class_distance
+
+    if isinstance(value, ClassInstance):
+        return _class_distance(value.cls, ERROR_CLASS) is not None
+    return False
 
 
 class Pair:
@@ -251,11 +269,28 @@ def print_(*args) -> None:
 
 def install(ctx: dict) -> None:
     """Expose str/int/float/bool, cons/car/cdr, nil, copy, len, and print
-    as wyrm-visible builtins, plus str's substr as a `!`-callable message."""
-    from wypoc.wyrm_eval_parse_tree import expose_all, register_native_method
+    as wyrm-visible builtins, plus str's substr as a `!`-callable message.
+
+    `error` is bound to ERROR_CLASS (a real Class), not the `error()`
+    Python function directly - calling it (`error("msg")`) goes through
+    the ordinary Class-is-callable construction path (see call_value),
+    which special-cases ERROR_CLASS to build a WyrmError; that's also
+    what makes `class Foo(error) {}` legal (base must be a Class).
+
+    `next`/`send` drive a coroutine (see CoroutineInstance); the four
+    predefined error subtypes (OutOfMemory, RuntimeError, OSError,
+    StopIteration - see doc/language-spec.md's Fundamental Types) are
+    exposed the same way `error` is, as real subclassable Classes."""
+    from wypoc.wyrm_eval_parse_tree import (
+        ERROR_CLASS, OS_ERROR_CLASS, OUT_OF_MEMORY_CLASS, RUNTIME_ERROR_CLASS,
+        STOP_ITERATION_CLASS, expose_all, next_, register_native_method, send_,
+    )
 
     expose_all(
         ctx, **PRIMITIVE_TYPES, cons=cons, car=car, cdr=cdr, nil=NIL,
-        copy=copy, len=length, print=print_, error=error,
+        copy=copy, len=length, print=print_, error=ERROR_CLASS,
+        OutOfMemory=OUT_OF_MEMORY_CLASS, RuntimeError=RUNTIME_ERROR_CLASS,
+        OSError=OS_ERROR_CLASS, StopIteration=STOP_ITERATION_CLASS,
+        next=next_, send=send_,
     )
     register_native_method("substr", substr, ctx)

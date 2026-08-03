@@ -120,6 +120,7 @@ statement       ::= simple_stmt | compound_stmt ;
 simple_stmt     ::= expr_stmt
                    | assignment_stmt
                    | type_hint_stmt
+                   | static_stmt
                    | with_stmt_simple
                    | import_stmt
                    | using_stmt
@@ -144,7 +145,8 @@ expr_stmt       ::= expression ;
 
 return_stmt     ::= "return" , [ expression ] ;
 
-yield_stmt      ::= "yield" , [ expression ] ;
+yield_stmt      ::= "yield" , "from" , expression
+                   | "yield" , [ expression ] ;
 
 continue_stmt   ::= "continue" ;
 
@@ -184,16 +186,23 @@ for_stmt        ::= "for" , identifier , "in" , expression , block ,
    foo_with_type: int ?= 5
 *)
 
-assignment_stmt ::= target_list , [ ":" , type_expr ] , assign_op , expr_list ;
+assignment_stmt ::= target_list , [ ":" , type_constraint ] , assign_op , expr_list ;
 
 target_list     ::= target , { "," , target } ;
-target          ::= identifier | attr_ref | static_ref ;
+target          ::= identifier | attr_ref ;
 
 assign_op       ::= "=" | "?=" ;
 
-type_hint_stmt  ::= identifier , ":" , type_expr ;
+type_hint_stmt  ::= identifier , ":" , type_constraint ;
 
-static_ref      ::= "$" , identifier ;
+(* `static` declares a binding tied to the lexical definition (the
+   enclosing fn or class) rather than the current dynamic call/instance -
+   see language-spec.md's "Variables" section. Usable as a statement
+   inside a fn body (lazily initialized on first call) or directly inside
+   a class body (eagerly initialized when the class is defined). After
+   declaration the name is referenced/assigned like any ordinary target -
+   no special sigil or target form is needed at the use site. *)
+static_stmt     ::= "static" , identifier , [ ":" , type_constraint ] , [ "=" , expression ] ;
 
 type_expr       ::= identifier , { "::" , identifier } ;   (* e.g. mod::Type *)
 
@@ -206,12 +215,12 @@ type_expr       ::= identifier , { "::" , identifier } ;   (* e.g. mod::Type *)
 *)
 
 with_stmt_simple
-                ::= "with" , identifier , [ ":" , type_expr ] , "=" , expression ;
+                ::= "with" , identifier , [ ":" , type_constraint ] , "=" , expression ;
 
 with_block      ::= "with" , ":" , NEWLINE , INDENT ,
                      { with_binding , stmt_sep } ,
                      DEDENT ;
-with_binding    ::= identifier , [ ":" , type_expr ] , "=" , expression ;
+with_binding    ::= identifier , [ ":" , type_constraint ] , "=" , expression ;
 
 
 (* ---------------------------------------------------------------------
@@ -237,7 +246,7 @@ using_stmt      ::= "using" , module_path
    --------------------------------------------------------------------- *)
 
 fn_def          ::= "fn" , [ class_target ] , identifier , "(" , [ param_list ] , ")" ,
-                     [ "->" , type_expr ] , block ;
+                     [ "->" , type_constraint ] , block ;
 
 (* `fn [type1, type2, ...] name(...)`: defines a message/method external to
    a class body, dispatched on a tuple of that many receivers - see the
@@ -246,14 +255,12 @@ class_target    ::= "[" , identifier , { "," , identifier } , "]" ;
 
 param_list      ::= param , { "," , param } ;
 
-param           ::= pos_only_marker
-                   | var_positional
+param           ::= var_positional
                    | var_keyword
                    | plain_param ;
 
-plain_param     ::= identifier , [ ":" , type_expr ] , [ "=" , expression ] ;
+plain_param     ::= identifier , [ ":" , type_constraint ] , [ "=" , expression ] ;
 
-pos_only_marker ::= "/" ;                       (* marks preceding params positional-only *)
 var_positional  ::= "*" , identifier ;          (* collects extra positional args *)
 var_keyword     ::= "**" , identifier ;         (* collects extra keyword args into dict *)
 
@@ -263,14 +270,14 @@ var_keyword     ::= "**" , identifier ;         (* collects extra keyword args i
    --------------------------------------------------------------------- *)
 
 co_def          ::= "co" , [ class_target ] , identifier , "(" , [ co_param_list ] , ")" ,
-                     [ "->" , type_expr ] , block ;
+                     [ "->" , type_constraint ] , block ;
 
 (* The coroutine input type, if given, is a leading marker in the parameter
    list rather than a trailing arrow after the parens - e.g.
    `co f(<- str, x: int, y: int) -> int:`. It is not itself a bindable
    parameter (no name, never supplied by the caller), only the type of
    whatever value is sent in through each `yield` expression. *)
-co_param_list   ::= "<-" , type_expr , [ "," , param_list ]
+co_param_list   ::= "<-" , type_constraint , [ "," , param_list ]
                    | param_list ;
 
 
@@ -284,11 +291,11 @@ class_block     ::= ":" , NEWLINE , INDENT , { class_member } , DEDENT
                    | "{" , { class_member , [ ";" ] } , "}" ;
 
 class_member    ::= slot_def
-                   | init_def
+                   | static_stmt
                    | fn_def
                    | co_def ;
 
-slot_def        ::= "slot" , identifier , [ ":" , type_expr ] ,
+slot_def        ::= "slot" , identifier , [ ":" , type_constraint ] ,
                      [ "=" , expression ] , [ "with" , slot_options ] ;
 
 slot_options    ::= ":" , NEWLINE , INDENT , { slot_option , stmt_sep } , DEDENT
@@ -296,10 +303,11 @@ slot_options    ::= ":" , NEWLINE , INDENT , { slot_option , stmt_sep } , DEDENT
 
 slot_option     ::= ( "setter" | "getter" ) , "=" , ( expression | "undefined" ) ;
 
-(* Constructor syntax is explicitly unfinished in the spec
-   ("TODO TODO TODO: constructor syntax still ugly / needs improvement").
-   The rule below (INFERRED) captures the one worked example given. *)
-init_def        ::= "init" , "(" , [ param_list ] , ")" , "with" , block ;   (* INFERRED, unstable *)
+(* No dedicated constructor syntax: the constructor is simply a method
+   named `init`, defined with ordinary fn_def syntax (`fn init(...): ...`)
+   inside the class body. Slots without an explicit default are
+   zero-valued (nil ref / 0 / false, per type) before `init` runs - see
+   language-spec.md's "Basic Classes" section. *)
 
 
 (* ---------------------------------------------------------------------
@@ -381,18 +389,24 @@ argument        ::= expression
 
 primary         ::= literal
                    | identifier
-                   | static_ref
                    | "(" , expression , ")"
                    | tuple_literal
                    | array_literal
                    | pair_literal
                    | dict_literal
-                   | new_expr
                    | message_tuple_expr
                    | "this"
                    | "super" , "(" , [ arg_list ] , ")"
                    | "defined" , "(" , symbol_literal , ")"
                    | lambda_expr ;
+
+(* No `new` keyword: a class is constructed by calling it like any other
+   callable - `MyClass(args)` invokes `init` (if any) with `this` bound to
+   a fresh, zero-valued instance and yields `MyClass | error` (an error
+   returned from `init` overrides the constructed instance - RAII, see
+   language-spec.md). This falls out of ordinary call_op / postfix_expr
+   applied to an identifier naming a class; no dedicated primary form
+   is needed. *)
 
 literal         ::= int_literal
                    | float_literal
@@ -421,11 +435,11 @@ dict_literal    ::= "${" , [ dict_body ] , "}" ;
 dict_body       ::= dict_pair , { "," , dict_pair } ;
 dict_pair       ::= expression , ":" , expression ;
 
-(* (canvas, shape) ! draw();  -- message dispatch against a tuple *)
+(* (canvas, shape) ! draw();  -- message dispatch against a tuple, also
+   how multiple dispatch is invoked (see fn_def's class_target, which may
+   name more than one type). *)
 message_tuple_expr
                 ::= "(" , expr_list , ")" , "!" , identifier , [ "(" , [ arg_list ] , ")" ] ;
-
-new_expr        ::= "new" , type_expr , "(" , [ arg_list ] , ")" ;
 
 lambda_expr     ::= "fn" , "(" , [ param_list ] , ")" , block ;   (* anonymous fn, e.g. slot setter *)
 
@@ -435,9 +449,9 @@ lambda_expr     ::= "fn" , "(" , [ param_list ] , ")" , block ;   (* anonymous f
    --------------------------------------------------------------------- *)
 
 (* and, break, catch, class, co, continue, defer, defined, elif, else,
-   false, fn, for, from, getter, if, import, in, init, is, new, not, or,
-   pass, return, setter, slot, super, this, true, try, undefined, using,
-   while, with, yield
+   false, fn, for, from, getter, if, import, in, is, not, or,
+   pass, return, setter, slot, static, super, this, true, try, undefined,
+   using, while, with, yield
 
    Soft keywords (reserved only inside their own construct, still valid as
    ordinary identifiers elsewhere): on, error (see defer_stmt). *)

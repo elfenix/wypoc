@@ -16,9 +16,9 @@ class Square(Shape):
     fn area() -> float:
         return side * side
 
-c = new Circle()
-s = new Square()
-plain = new Shape()
+c = Circle()
+s = Square()
+plain = Shape()
 
 circle_area = c!area()
 square_area = s!area()
@@ -45,6 +45,6 @@ fn [Circle, Circle] collide():
 fn [Circle, Square] collide():
     return "circle-square collision"
 
-cc = (c, new Circle()) ! collide()
+cc = (c, Circle()) ! collide()
 cs = (c, s) ! collide()
 gen = (s, s) ! collide()

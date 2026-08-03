@@ -23,7 +23,8 @@ ERROR_SAMPLES = {
     "compile_err_float_param.wy": "unsupported type 'float'",
     "compile_err_non_tail_call.wy": "calls nested inside larger expressions",
     "compile_err_for_loop.wy": "statement not supported by --compile",
-    "compile_err_class_def.wy": "'init' not supported by --compile",
+    "compile_err_class_def.wy": "methods declared inside the class body are not supported by --compile",
+    "compile_err_set_if_unset.wy": "'?=' not supported by --compile",
 }
 
 

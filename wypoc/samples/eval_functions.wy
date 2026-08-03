@@ -26,3 +26,21 @@ packed = pack(1, 2, 3)
 adder = fn (a, b):
     return a + b
 lambda_result = adder(4, 5)
+
+fn call_count():
+    static count: int = 0
+    count = count + 1
+    return count
+
+call_count_1 = call_count()
+call_count_2 = call_count()
+call_count_3 = call_count()
+
+fn call_count_declared():
+    static count: int
+    count ?= 0
+    count = count + 1
+    return count
+
+call_count_declared_1 = call_count_declared()
+call_count_declared_2 = call_count_declared()

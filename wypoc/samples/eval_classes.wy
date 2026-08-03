@@ -21,7 +21,18 @@ class Square(Rectangle):
     slot width: float = 5.0
     slot height: float = 5.0
 
-c = new Circle()
-r = new Rectangle()
-s = new Square()
-plain = new Shape()
+c = Circle()
+r = Rectangle()
+s = Square()
+plain = Shape()
+
+class Counter:
+    static total: int = 0
+
+    fn init():
+        total = total + 1
+
+Counter()
+Counter()
+Counter()
+counter_total = total

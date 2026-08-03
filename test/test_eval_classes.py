@@ -70,6 +70,15 @@ def test_instances_dont_share_slot_storage(ctx, classes):
     assert c.attrs["radius"].value == 2.0
 
 
-def test_init_with_args_not_implemented(classes):
-    with pytest.raises(NotImplementedError):
+def test_class_scoped_static(ctx):
+    """Counter's `static total` is shared across every Counter() call's
+    `init`, not per-instance - see Class.__init__'s StaticDecl handling."""
+    assert ctx["counter_total"].value == 3
+
+
+def test_construction_rejects_args_with_no_init(classes):
+    """Circle defines no `init`, so Circle(5.0) - too many args for a
+    no-init construction - is a clear error rather than silently ignored
+    (see instantiate())."""
+    with pytest.raises(TypeError):
         instantiate(classes["Circle"], [5.0], {})

@@ -17,10 +17,14 @@ TokenInfo = tokenize.TokenInfo
 KEYWORDS = {
     "and", "break", "catch", "class", "co", "continue", "defer", "defined",
     "elif", "else", "false", "fn", "for", "from", "getter", "if", "import",
-    "in", "init", "is", "new", "not", "or", "pass", "return", "setter",
-    "slot", "super", "this", "true", "try", "undefined", "using", "while",
-    "with", "yield",
+    "in", "is", "not", "or", "pass", "return", "setter",
+    "slot", "static", "super", "this", "true", "try", "undefined", "using",
+    "while", "with", "yield",
 }
+# Not included above: "init" is no longer a reserved word - a class
+# constructor is just an ordinary method named `init` (see wyrm.gram's
+# class_member_item/fn_def). "new" was dropped entirely: classes are
+# constructed by calling them like any other value (`MyClass(args)`).
 # Not included above: "on" / "error" are soft keywords, reserved only in the
 # `defer on error` construct (see wyrm.gram) - they remain valid identifiers
 # elsewhere (e.g. `slot on: bool`).

@@ -640,18 +640,9 @@ be stored:
     name_func = person!get_full_name
     name_func()
 
-Methods may be defined external to the class. These may *not*
-be called using attribute reference, but may be called via
-the message operator.
-
-    fn [person] get_name():
-        return this.name
-
-    fn [coordinate2d] length_squared() {
-        return (x**2 + y**2)
-    }
-
-The `super` allows classes to call 'up' the inheritance tree.
+The `super` allows classes to call 'up' the inheritance tree in single
+dispatch or chain to the next most general function in multiple
+dispatch cases.
 
     class coordinate3d(coordinate2d) {
         slot z: float;

@@ -8,7 +8,8 @@ This is a narrow v1 slice, not a general compiler: only `fn` defs with
 (tail and non-tail, anywhere a statement may appear) to other compiled
 functions in the same module, the `native::block(...)` escape hatch from
 doc/language-spec.md's "Native Code" section, and bare `class` defs (typed
-slots only - no bases, defaults, slot options, or `init`) compiled to a
+slots only - no bases, defaults, slot options, or methods, `init` included)
+compiled to a
 `w_{module}_{class}` builder returning a `wyrm_class*`. Anything else raises
 CompileError with a specific message - the same "fail loud, not silently
 wrong" convention wyrm_eval_parse_tree.py uses for its own known gaps (see

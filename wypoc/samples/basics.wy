@@ -46,16 +46,23 @@ fn message(*arguments) -> str:
 fn message(name: str, greeting: str = "Hello") -> str:
     return greeting + name
 
-fn message(name: str, /, greeting: str = "Hello") -> str:
-    return greeting + name
-
 fn message(**kwargs) -> str:
     return kwargs["greeting"] + kwargs["name"]
 
 fn call_count():
-    $foo: int ?= 0
-    $foo = $foo + 1
-    return $foo
+    static foo: int = 0
+    foo = foo + 1
+    return foo
+
+fn call_count_2():
+    static foo: int
+    foo ?= 0
+    foo = foo + 1
+    return foo
+
+message_spread = message(*t1)
+message_spread_kw = message(**d)
+message_spread_combo = message(1, *t1, **d)
 
 arr_len = array_object!length()
 

@@ -1,0 +1,44 @@
+co do_1x():
+    yield 1
+    return 5
+    yield 2
+
+cofun = do_1x()
+first_next = next(cofun)
+value_while_active = cofun.value catch "expected"
+second_next = next(cofun)
+value_after_finish = cofun.value
+
+co mirror_5x(initial):
+    step_a = yield initial
+    step_b = yield step_a
+    yield step_b
+
+mirrored = mirror_5x(10)
+mirror_start = next(mirrored)
+mirror_echo_1 = send(mirrored, 20)
+mirror_echo_2 = send(mirrored, 30)
+
+co mirror_10x():
+    yield from mirror_5x(1)
+
+delegated = mirror_10x()
+delegate_1 = next(delegated)
+delegate_2 = send(delegated, 2)
+delegate_3 = send(delegated, 3)
+delegate_4 = send(delegated, 4)
+
+class summation:
+    slot total: int = 0
+
+co [summation] term_adder(<- int | nil) -> int:
+    term = 0
+    while term is int:
+        term = yield this.total
+        this.total = this.total + term
+
+adder = summation() ! term_adder()
+sum_start = next(adder)
+sum_after_5 = send(adder, 5)
+sum_after_10 = send(adder, 10)
+sum_stopped = send(adder, nil)

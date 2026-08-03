@@ -98,7 +98,7 @@ class Tokenizer:
     }
 
     fn _make_token(kind, text: str, tline: int, tcol: int) -> Token:
-        t = new Token()
+        t = Token()
         t.type = kind
         t.text = text
         t.line = tline
@@ -400,7 +400,7 @@ fn main():
     _filename = __ARGS[0]
 
     _dfile = std::io::open(_filename, "r")
-    tok = new Tokenizer()
+    tok = Tokenizer()
     tok.buffer = _dfile!readall()
     _dfile!close()
 

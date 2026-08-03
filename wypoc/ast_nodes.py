@@ -62,6 +62,7 @@ class Return(Node):
 @dataclass
 class Yield(Node):
     value: Optional["Expr"]
+    from_: bool = False
 
 
 @dataclass
@@ -134,8 +135,10 @@ class TypeHint(Node):
 
 
 @dataclass
-class StaticRef(Node):
+class StaticDecl(Node):
     name: str
+    type: Optional["TypeExpr"]
+    default: Optional["Expr"]
     pos: Optional[tuple] = None
 
 
@@ -196,11 +199,6 @@ class Param(Node):
 
 
 @dataclass
-class PosOnlyMarker(Node):
-    pos: Optional[tuple] = None
-
-
-@dataclass
 class VarPositional(Node):
     name: str
 
@@ -254,11 +252,8 @@ class SlotDef(Node):
     options: Optional[list]
 
 
-@dataclass
-class InitDef(Node):
-    params: list
-    body: list
-
+# No InitDef: a class constructor is just a FnDef named "init" living in
+# ClassDef.body like any other method (see wyrm_eval_parse_tree.Class).
 
 # ---------------------------------------------------------------------
 # Expressions
@@ -321,10 +316,8 @@ class Lambda(Node):
     body: list
 
 
-@dataclass
-class NewExpr(Node):
-    type: TypeExpr
-    args: list
+# No NewExpr: constructing a class is an ordinary Call whose func evaluates
+# to a Class value (see wyrm_eval_parse_tree.call_value's Class branch).
 
 
 @dataclass
@@ -446,7 +439,7 @@ class TypeCheck(Node):
 
 Expr = Union[
     Num, Str, Char, Bool, Symbol, Name, ThisRef, SuperCall, Defined, Lambda,
-    NewExpr, Array, Pair, Tuple, Dict, MessageTupleExpr, UnaryOp, BinOp,
+    Array, Pair, Tuple, Dict, MessageTupleExpr, UnaryOp, BinOp,
     SetIfUnset, Call, Index, Attr, Message, Scope, Yield, Try, Catch,
     TypeCheck,
 ]

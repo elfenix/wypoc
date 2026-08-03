@@ -64,14 +64,24 @@ class coordinate3d(coordinate2d) {
 fn [coordinate3d] length_squared:
     return super() + (z**2)
 
-person_instance = new person()
+person_instance = person()
 arr_len = array_object!length();
 (canvas, shape) ! draw();
 
-call_count():
-    $foo: int ?= 0
-    $foo = $foo + 1
-    return $foo
+fn call_count():
+    static foo: int = 0
+    foo = foo + 1
+    return foo
+
+class demo:
+    slot result: int
+
+    fn init(num: int, den: int):
+        this.result = try num / den
+
+x: demo | str = demo(5, 0) catch 'div0
+
+class DetectedHardwareFailure(error) {}
 
 if foo:
     action()
