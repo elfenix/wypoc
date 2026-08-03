@@ -29,3 +29,31 @@ fn first_even(items):
     return -1
 
 found_even = first_even($[1, 3, 4, 5])
+
+co count_to(n):
+    i = 1
+    while i <= n:
+        yield i
+        i = i + 1
+
+coroutine_total: int = 0
+for x in count_to(5):
+    coroutine_total = coroutine_total + x
+
+class IntRange:
+    slot lo: int = 0
+    slot hi: int = 0
+
+co [IntRange] __iter__() -> int:
+    i = this.lo
+    while i < this.hi:
+        yield i
+        i = i + 1
+
+an_int_range = IntRange()
+an_int_range.lo = 0
+an_int_range.hi = 5
+
+class_iter_total: int = 0
+for x in an_int_range:
+    class_iter_total = class_iter_total + x

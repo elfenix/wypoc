@@ -129,6 +129,17 @@ class Pair:
             node = node.cdr
         return False
 
+    def __iter__(self):
+        # So `for x in some_pair_chain:` (see wyrm_eval_parse_tree.py's
+        # _iter_values) walks car-by-car out to the terminating NIL, same
+        # as len()/__contains__ above.
+        node = self
+        while isinstance(node, Pair):
+            yield node.car
+            node = node.cdr
+        if node is not NIL:
+            raise TypeError("iteration: improper list has no well-defined end")
+
 
 class _Nil:
     """The empty list, Scheme's `'()` - a singleton distinct from Pair, None,
@@ -155,6 +166,9 @@ class _Nil:
 
     def __contains__(self, item):
         return False
+
+    def __iter__(self):
+        return iter(())
 
 
 NIL = _Nil()

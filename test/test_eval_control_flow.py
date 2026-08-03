@@ -11,6 +11,8 @@ EXPECTED = {
     "total": 6,   # 1 + 2 + 3, then break at x == 4 (for/else's else is skipped)
     "summed": 106,  # 1 + 2 + 3, loop completes -> else adds 100
     "found_even": 4,  # first_even returns as soon as it finds an even item
+    "coroutine_total": 15,  # `for x in count_to(5):` drives the coroutine directly
+    "class_iter_total": 10,  # `for x in an_int_range:` dispatches __iter__ first
 }
 
 

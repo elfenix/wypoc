@@ -1025,17 +1025,66 @@ def instantiate(cls: Class, positional, kwargs) -> "ClassInstance | WyrmError":
             value = _zero_value(slot_def.type)
         inst.attrs[slot_name] = Variable(value)
 
-    method = unwrap(cls.closure["init"]) if "init" in cls.closure else None
-    if isinstance(method, Method):
-        overload = _try_resolve_overload(method, [inst])
-        if overload is not None:
-            result = call_overload(overload, [inst], positional, kwargs)
-            if wyrm_builtins.is_error(result):
-                return result
-            return inst
+    method = _lookup_dunder(cls, "init")
+    overload = _try_resolve_overload(method, [inst]) if method is not None else None
+    if overload is not None:
+        result = call_overload(overload, [inst], positional, kwargs)
+        if wyrm_builtins.is_error(result):
+            return result
+        return inst
     if positional or kwargs:
         raise TypeError(f"{cls.name}(...) takes no arguments (no applicable 'init')")
     return inst
+
+
+def _lookup_dunder(cls: Class, name: str) -> "Method | None":
+    """A special method (e.g. `__iter__`) applicable to `cls`, if any class
+    in scope has defined one - same lookup instantiate() uses for `init`:
+    dunders register into the class's own defining scope (`cls.closure`)
+    as ordinary Methods, so this is just a name lookup, not a new
+    mechanism."""
+    method = unwrap(cls.closure[name]) if name in cls.closure else None
+    return method if isinstance(method, Method) else None
+
+
+def _call_dunder(instance: ClassInstance, name: str, positional=()):
+    """Dispatches `name` (e.g. `__iter__`) on `instance` the same way a
+    message send would, or raises if no applicable overload exists."""
+    method = _lookup_dunder(instance.cls, name)
+    overload = _try_resolve_overload(method, [instance]) if method is not None else None
+    if overload is None:
+        raise TypeError(f"'{instance.cls.name}' object has no applicable {name}")
+    return call_overload(overload, [instance], list(positional), {})
+
+
+def _iter_values(value, ctx: dict):
+    """Values produced by `for x in value:` - see doc/language-spec.md's
+    "The 'in' statement must be an iterable. See special methods for the
+    contract":
+
+      - a ClassInstance dispatches `__iter__` first (its result - typically
+        a coroutine - is what's actually iterated);
+      - a CoroutineInstance is driven with next() until it finishes, so
+        `for x in some_coroutine():` just drives the coroutine - the same
+        idea `__iter__` hooks into, and why no separate __next__ protocol
+        is needed here;
+      - anything else (str/list/tuple/dict/Pair/nil/...) iterates however
+        Python already knows how to iterate it.
+    """
+    if isinstance(value, ClassInstance):
+        value = _call_dunder(value, "__iter__")
+    if isinstance(value, CoroutineInstance):
+        while True:
+            finished, item = value._advance_raw(None)
+            if finished:
+                return
+            yield item
+        return
+    try:
+        iterator = iter(value)
+    except TypeError:
+        raise TypeError(f"'{type(value).__name__}' object is not iterable") from None
+    yield from iterator
 
 
 def assign_target(target, value, ctx: dict) -> None:
@@ -1281,7 +1330,7 @@ def eval_stmt(stmt, ctx: dict) -> None:
         return
     if isinstance(stmt, ast.For):
         broke = False
-        for item in eval_expr(stmt.iter, ctx):
+        for item in _iter_values(eval_expr(stmt.iter, ctx), ctx):
             bind(stmt.var, item, ctx)
             try:
                 eval_block(stmt.body, ctx)
