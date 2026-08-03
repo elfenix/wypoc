@@ -12,8 +12,8 @@ this is still part of the string.""
 h = R"(Arbitrary Text)"
 i = R"extra(WE can noow have (" )extra"
 
-j = '(1, 2, 3, 4, '. 6)
-k = '('a)
+j = [1, 2, 3, 4, $. 6]
+k = ['a]
 
 m = -5
 n = -5.5

@@ -103,6 +103,12 @@ class Break(Node):
 
 
 @dataclass
+class Defer(Node):
+    on_error: bool
+    body: list
+
+
+@dataclass
 class NameTarget(Node):
     name: str
 
@@ -421,8 +427,26 @@ class Scope(Node):
     name: str
 
 
+@dataclass
+class Try(Node):
+    value: "Expr"
+
+
+@dataclass
+class Catch(Node):
+    value: "Expr"
+    handler: "Union[Expr, Return]"
+
+
+@dataclass
+class TypeCheck(Node):
+    value: "Expr"
+    types: list  # list[TypeExpr]; union via `is int | float`
+
+
 Expr = Union[
     Num, Str, Char, Bool, Symbol, Name, ThisRef, SuperCall, Defined, Lambda,
     NewExpr, Array, Pair, Tuple, Dict, MessageTupleExpr, UnaryOp, BinOp,
-    SetIfUnset, Call, Index, Attr, Message, Scope, Yield,
+    SetIfUnset, Call, Index, Attr, Message, Scope, Yield, Try, Catch,
+    TypeCheck,
 ]

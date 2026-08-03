@@ -9,7 +9,7 @@ from wypoc.ast_nodes import (
     InitDef, Num, Str, Char, Bool, Symbol, Name, ThisRef, SuperCall, Defined,
     Lambda, NewExpr, Array, Pair, Tuple, DictEntry, Dict, MessageTupleExpr,
     Kwarg, SpreadPos, SpreadKw, UnaryOp, BinOp, SetIfUnset, Call, Index,
-    Attr, Message, Scope,
+    Attr, Message, Scope, Defer, Try, Catch, TypeCheck,
 )
 """
 
@@ -33,6 +33,13 @@ from wypoc.ast_nodes import (
 #    "." tokens.
 #  * elif/else on `if`, like the EBNF itself, are INFERRED (not shown
 #    verbatim in the spec prose).
+#  * `catch`'s handler accepts `return EXPR` or a plain `or_expr`; `try` and
+#    `catch` are composable (`try EXPR catch HANDLER`) though the spec only
+#    shows them separately. Both are INFERRED shapes - the spec's prose and
+#    its one `catch return 0` example are the only constraints given.
+#  * `on` / `error` in `defer on error` are soft keywords (double-quoted),
+#    not reserved words, so plain identifiers like a slot named `on` are
+#    unaffected.
 # ===========================================================================
 
 start[object]: p=program ENDMARKER { p }
@@ -96,6 +103,7 @@ compound_stmt[object]:
     | co_def
     | class_def
     | with_block
+    | defer_stmt
 
 pass_stmt[object]: 'pass' { Pass() }
 continue_stmt[object]: 'continue' { Continue() }
@@ -132,6 +140,15 @@ while_stmt[object]:
 
 for_stmt[object]:
     | 'for' n=NAME 'in' it=expression body=block orelse=else_clause? { For(n.string, it, body, orelse) }
+
+# ---- defer statement ------------------------------------------------------
+# `on`/`error` are soft keywords (double-quoted below) rather than reserved
+# words, so e.g. `slot on: bool` (see wypoc/samples/compile_class_def.wy)
+# keeps working - only literal `defer on error` triggers this form.
+
+defer_stmt[object]:
+    | 'defer' "on" "error" body=block { Defer(True, body) }
+    | 'defer' body=block { Defer(False, body) }
 
 # ---- assignment / bindings ---------------------------------------------
 
@@ -238,11 +255,23 @@ var_keyword[object]: "**" n=NAME { VarKeyword(n.string) }
 # Coroutines
 # ---------------------------------------------------------------------
 
+# The coroutine input type, if given, is a leading marker inside the
+# parameter list rather than a trailing arrow after the parens - e.g.
+# `co f(<- str, x: int, y: int) -> int:`. It isn't itself a bindable
+# parameter (no name, never supplied by the caller), only the type of
+# whatever value is sent in through each `yield` expression. This is a
+# separate rule from `param`/`param_list` (used by `fn_def` too) so `<-`
+# never becomes legal in a plain function's parameter list.
+co_params[object]:
+    | "<-" t=type_expr "," p=param_list { (t, p) }
+    | "<-" t=type_expr { (t, []) }
+    | p=param_list { (None, p) }
+
 co_def[object]:
-    | 'co' cls=class_target n=NAME "(" params=param_list? ")" intype=("<-" type_expr)? ret=("->" type_expr)? body=block {
-          CoDef(cls, n.string, params or [], intype[1] if intype else None, ret[1] if ret else None, body) }
-    | 'co' n=NAME "(" params=param_list? ")" intype=("<-" type_expr)? ret=("->" type_expr)? body=block {
-          CoDef(None, n.string, params or [], intype[1] if intype else None, ret[1] if ret else None, body) }
+    | 'co' cls=class_target n=NAME "(" cp=co_params? ")" ret=("->" type_expr)? body=block {
+          CoDef(cls, n.string, cp[1] if cp else [], cp[0] if cp else None, ret[1] if ret else None, body) }
+    | 'co' n=NAME "(" cp=co_params? ")" ret=("->" type_expr)? body=block {
+          CoDef(None, n.string, cp[1] if cp else [], cp[0] if cp else None, ret[1] if ret else None, body) }
 
 # ---------------------------------------------------------------------
 # Classes
@@ -308,6 +337,24 @@ assign_expr[object]:
     | 'yield' e=expression { Yield(e) }
     | 'yield' { Yield(None) }
     | a=or_expr "?=" b=or_expr { SetIfUnset(a, b) }
+    | catch_expr
+
+# ---- try / catch ---------------------------------------------------------
+# `try EXPR` returns immediately from the enclosing function if EXPR's value
+# is an error; `EXPR catch HANDLER` substitutes HANDLER's value instead
+# (HANDLER may itself be `return EXPR`). The two compose: `try EXPR catch ...`.
+
+catch_expr[object]:
+    | v=try_operand 'catch' h=catch_handler { Catch(v, h) }
+    | try_operand
+
+try_operand[object]:
+    | 'try' e=or_expr { Try(e) }
+    | or_expr
+
+catch_handler[object]:
+    | 'return' e=expression { Return(e) }
+    | 'return' { Return(None) }
     | or_expr
 
 or_expr[object]:
@@ -321,6 +368,7 @@ not_expr[object]:
     | comparison
 
 comparison[object]:
+    | a=bitwise_or_expr 'is' t=type_constraint { TypeCheck(a, t) }
     | a=bitwise_or_expr op=comp_op b=bitwise_or_expr { BinOp(op, a, b) }
     | bitwise_or_expr
 
@@ -333,6 +381,10 @@ comp_op[object]:
     | "<" { '<' }
     | ">" { '>' }
     | 'in' { 'in' }
+
+# Type constraint: a union of type names, e.g. `int` or `int | float`.
+type_constraint[object]:
+    | first=type_expr rest=("|" type_expr)* { [first] + [t for _, t in rest] }
 
 bitwise_or_expr[object]:
     | first=bitwise_xor_expr rest=("|" bitwise_xor_expr)* { fold_left(first, [('|', e) for _, e in rest]) }
@@ -424,17 +476,17 @@ symbol_literal[object]:
 # ---- collection literals ------------------------------------------------
 
 array_literal[object]:
-    | "[" items=expr_list? "]" { Array(items or []) }
+    | "$" "[" items=expr_list? "]" { Array(items or []) }
 
-# Pair / list: '(a) single pair, '(1, 2, 3) list of pairs,
-# '(1, 2, '. 6) improper list.
+# Pair / list: [a] single pair, [1, 2, 3] list of pairs,
+# [1, 2, 3, $. 6] improper list.
 pair_literal[object]:
-    | "'" "(" body=pair_body? ")" { Pair(body[0], body[1]) if body else Pair([], None) }
+    | "[" body=pair_body? "]" { Pair(body[0], body[1]) if body else Pair([], None) }
 
 pair_body[object]:
-    | first=assign_expr rest=("," assign_expr)* tail=("," "'" "." assign_expr)? {
+    | first=assign_expr rest=("," assign_expr)* tail=("," "$" "." assign_expr)? {
           ([first] + [e for _, e in rest], tail[3] if tail else None) }
-    | "'" "." e=assign_expr { ([], e) }
+    | "$" "." e=assign_expr { ([], e) }
 
 paren_or_tuple[object]:
     | "(" ")" { Tuple([]) }
@@ -444,7 +496,7 @@ paren_or_tuple[object]:
     | "(" e=assign_expr ")" { e }
 
 dict_literal[object]:
-    | "'" "{" body=dict_body? "}" { Dict(body or []) }
+    | "$" "{" body=dict_body? "}" { Dict(body or []) }
 
 dict_body[object]:
     | first=dict_pair rest=("," dict_pair)* { [first] + [p for _, p in rest] }

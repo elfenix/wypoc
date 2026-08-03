@@ -16,7 +16,8 @@
     { "include": "#function-decl" },
     { "include": "#coroutine-decl" },
     { "include": "#dict-sigil" },
-    { "include": "#pair-sigil" },
+    { "include": "#array-sigil" },
+    { "include": "#pair-improper-marker" },
     { "include": "#message-op" },
     { "include": "#scope-op" },
     { "include": "#attribute-access" },
@@ -263,20 +264,24 @@
       "patterns": [
         {
           "name": "punctuation.definition.dict.wyrm",
-          "match": "'\\{"
+          "match": "\\$\\{"
         }
       ]
     },
-    "pair-sigil": {
+    "array-sigil": {
       "patterns": [
         {
-          "comment": "'. improper-list separator, must come before generic pair-open match",
-          "name": "keyword.operator.pair-dot.wyrm",
-          "match": "'\\."
-        },
+          "name": "punctuation.definition.array.wyrm",
+          "match": "\\$\\["
+        }
+      ]
+    },
+    "pair-improper-marker": {
+      "patterns": [
         {
-          "name": "punctuation.definition.pair.wyrm",
-          "match": "'\\("
+          "comment": "$. improper-list tail separator inside a [...] pair/list literal, e.g. [1, 2, $. 3]",
+          "name": "keyword.operator.pair-dot.wyrm",
+          "match": "\\$\\."
         }
       ]
     },

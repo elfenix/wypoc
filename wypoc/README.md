@@ -77,8 +77,9 @@ PYTHONPATH=. .venv/bin/python wypoc/parse.py wypoc/samples/basics.wy
 ### Why a custom tokenizer
 
 Python's stdlib `tokenize` can't be reused as-is: a bare `'` starts a string
-literal in Python but is wyrm's symbol/pair/dict sigil (`'name`, `'(`, `'{`),
-and wyrm has operators (`::`, `?=`, `<=>`, `!`, `$`) stdlib `tokenize` has
+literal in Python but is wyrm's symbol sigil (`'name`), `[` doubles as wyrm's
+pair/list literal, and `$[`/`${` are the array/dict sigils; wyrm also has
+operators (`::`, `?=`, `<=>`, `!`, `$`) stdlib `tokenize` has
 never heard of. `wyrm_tokenizer.py` implements wyrm's own lexical rules
 directly (see `doc/grammar.ebnf` section 0), including Haskell/Python-style
 layout (INDENT/DEDENT) and the rule that brace-delimited blocks (`{ }`) opt
@@ -230,7 +231,7 @@ This is a deliberately narrow v1 slice, not a general compiler:
   path has no worked example to verify frame/stack mechanics against yet.
   See `compiler_c.py`'s module docstring for the full chunk-naming and
   jump/call scheme.
-- `native::block('PORTION, '(inputs...), '(outputs...), R"tag(...)tag")`
+- `native::block('PORTION, [inputs...], [outputs...], R"tag(...)tag")`
   (see the language spec) is supported both at module top level (spliced
   into the matching `HEADER`/`TYPES`/`CONSTANTS`/`PROTOS`/`FUNCTIONS`
   output section) and as a function-body statement (spliced inline,

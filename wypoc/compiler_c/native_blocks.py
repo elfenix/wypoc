@@ -31,7 +31,7 @@ def parse_native_block_args(call: ast.Call):
     if not isinstance(portion, ast.Symbol):
         err("native::block()'s first argument must be a symbol literal, e.g. 'HEADER", call)
     if not isinstance(inputs, ast.Pair) or not isinstance(outputs, ast.Pair):
-        err("native::block()'s input/output arguments must be pair-list literals, e.g. '('a, 'b)", call)
+        err("native::block()'s input/output arguments must be pair-list literals, e.g. ['a, 'b]", call)
     if inputs.tail is not None or outputs.tail is not None:
         err("native::block()'s input/output lists must be proper lists (no '.' tail)", call)
     for sym in inputs.elements + outputs.elements:

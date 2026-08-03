@@ -15,11 +15,15 @@ from typing import Iterator, List, Tuple
 TokenInfo = tokenize.TokenInfo
 
 KEYWORDS = {
-    "and", "break", "class", "co", "continue", "defined", "elif", "else",
-    "false", "fn", "for", "from", "getter", "if", "import", "in", "init",
-    "new", "not", "or", "pass", "return", "setter", "slot", "super", "this",
-    "true", "undefined", "using", "while", "with", "yield",
+    "and", "break", "catch", "class", "co", "continue", "defer", "defined",
+    "elif", "else", "false", "fn", "for", "from", "getter", "if", "import",
+    "in", "init", "is", "new", "not", "or", "pass", "return", "setter",
+    "slot", "super", "this", "true", "try", "undefined", "using", "while",
+    "with", "yield",
 }
+# Not included above: "on" / "error" are soft keywords, reserved only in the
+# `defer on error` construct (see wyrm.gram) - they remain valid identifiers
+# elsewhere (e.g. `slot on: bool`).
 
 # Multi-character operators, longest first so scanning is maximal-munch.
 MULTI_OPS = sorted(

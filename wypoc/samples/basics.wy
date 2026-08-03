@@ -59,17 +59,17 @@ fn call_count():
 
 arr_len = array_object!length()
 
-x = [1, 2, 3, 4]
+x = $[1, 2, 3, 4]
 
-y = '(1, 2, 3, 4, 5)
-z = '(1, 2, 3, 4, '. 6)
+y = [1, 2, 3, 4, 5]
+z = [1, 2, 3, 4, $. 6]
 
 t1 = 1, 2, 3, 4
 t2 = (1,)
 t3 = ()
 
-d = '{ "Name": 15 }
-d2 = '{}
+d = ${ "Name": 15 }
+d2 = ${}
 
 a = a ** 2
 b = a + b + c
@@ -112,6 +112,6 @@ co mirror_5x() -> float:
     a = yield a
     yield a
 
-co div2_1x() <- int -> float:
+co div2_1x(<- int) -> float:
     a = yield 0
     yield a / 2.0

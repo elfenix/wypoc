@@ -14,7 +14,7 @@ CLOSE_BRACKETS = ")]"
 
 # Longest-first doesn't matter here (every entry is 2 chars), but kept in
 # the same order as wypoc/wyrm_tokenizer.py's MULTI_OPS for easy comparison.
-MULTI_OPS = ["**", "->", "<-", "<=", ">=", "==", "!=", "::", "?="]
+MULTI_OPS = $["**", "->", "<-", "<=", ">=", "==", "!=", "::", "?="]
 
 
 # Each of these must check for 'EOF itself, up front: wyrm's `and`/`or`
@@ -59,8 +59,8 @@ class Tokenizer:
     slot line: int = 0
     slot col: int = 0
     slot current: int = 0
-    slot block_stack: pair = '()   # stack of 'bracket/'brace, one per open ( [ {
-    slot indent_stack: pair = '()  # stack of int indent widths; empty means top is 0
+    slot block_stack: pair = []   # stack of 'bracket/'brace, one per open ( [ {
+    slot indent_stack: pair = []  # stack of int indent widths; empty means top is 0
     slot pending_dedents: int = 0
     slot pending_indent: bool = false
     slot at_line_start: bool = true

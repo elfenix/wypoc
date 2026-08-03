@@ -21,7 +21,7 @@ while i < 5:
         break
 
 total: int = 0
-for x in [1, 2, 3, 4, 5]:
+for x in $[1, 2, 3, 4, 5]:
     if x == 4:
         break
     total = total + x
@@ -29,7 +29,7 @@ else:
     total = -1
 
 not_broken: int = 0
-for x in [1, 2, 3]:
+for x in $[1, 2, 3]:
     not_broken = not_broken + x
 else:
     not_broken = not_broken + 100

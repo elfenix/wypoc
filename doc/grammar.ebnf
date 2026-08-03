@@ -124,7 +124,8 @@ compound_stmt   ::= if_stmt
                    | fn_def
                    | co_def
                    | class_def
-                   | with_block ;
+                   | with_block
+                   | defer_stmt ;
 
 pass_stmt       ::= "pass" ;
 
@@ -137,6 +138,13 @@ yield_stmt      ::= "yield" , [ expression ] ;
 continue_stmt   ::= "continue" ;
 
 break_stmt      ::= "break" ;
+
+
+(* ---- defer statement ----------------------------------------------------
+   `on` / `error` are only reserved as part of this literal construct - they
+   remain ordinary identifiers everywhere else (e.g. a slot named `on`). *)
+
+defer_stmt      ::= "defer" , [ "on" , "error" ] , block ;
 
 
 (* ---- if statement ----------------------------------------------------- *)
@@ -243,8 +251,16 @@ var_keyword     ::= "**" , identifier ;         (* collects extra keyword args i
    5. Coroutines
    --------------------------------------------------------------------- *)
 
-co_def          ::= "co" , [ class_target ] , identifier , "(" , [ param_list ] , ")" ,
-                     [ "<-" , type_expr ] , [ "->" , type_expr ] , block ;
+co_def          ::= "co" , [ class_target ] , identifier , "(" , [ co_param_list ] , ")" ,
+                     [ "->" , type_expr ] , block ;
+
+(* The coroutine input type, if given, is a leading marker in the parameter
+   list rather than a trailing arrow after the parens - e.g.
+   `co f(<- str, x: int, y: int) -> int:`. It is not itself a bindable
+   parameter (no name, never supplied by the caller), only the type of
+   whatever value is sent in through each `yield` expression. *)
+co_param_list   ::= "<-" , type_expr , [ "," , param_list ]
+                   | param_list ;
 
 
 (* ---------------------------------------------------------------------
@@ -289,19 +305,34 @@ expr_list       ::= expression , { "," , expression } ;
 
 tuple_expr      ::= assign_expr , { "," , assign_expr } ;   (* comma = tuple, lowest precedence *)
 
-assign_expr     ::= set_if_unset_expr ;                     (* "?=" also usable in expr position *)
+assign_expr     ::= set_if_unset_expr                       (* "?=" also usable in expr position *)
+                   | catch_expr ;
 
 set_if_unset_expr
                 ::= or_expr , [ "?=" , or_expr ] ;
+
+(* ---- try / catch --------------------------------------------------------
+   `try EXPR` returns immediately from the enclosing function if EXPR's
+   value is an error. `EXPR catch HANDLER` substitutes HANDLER's value
+   instead when EXPR is an error; HANDLER may itself be `return EXPR`. The
+   two compose: `try EXPR catch HANDLER`. *)
+
+catch_expr      ::= try_operand , [ "catch" , catch_handler ] ;
+try_operand     ::= [ "try" ] , or_expr ;
+catch_handler   ::= "return" , [ expression ]
+                   | or_expr ;
 
 or_expr         ::= and_expr , { "or" , and_expr } ;
 and_expr        ::= not_expr , { "and" , not_expr } ;
 not_expr        ::= "not" , not_expr
                    | comparison ;
 
-comparison      ::= bitwise_or_expr ,
-                     [ comp_op , bitwise_or_expr ] ;
-comp_op         ::= "<=" | ">=" | "<=>" | "<" | ">" | "==" | "!=" ;
+(* `a is int` / `b is int | float` - type checking, see type_constraint. *)
+comparison      ::= bitwise_or_expr , "is" , type_constraint
+                   | bitwise_or_expr , [ comp_op , bitwise_or_expr ] ;
+comp_op         ::= "<=" | ">=" | "<=>" | "<" | ">" | "==" | "!=" | "in" ;
+
+type_constraint ::= type_expr , { "|" , type_expr } ;
 
 bitwise_or_expr  ::= bitwise_xor_expr , { "|" , bitwise_xor_expr } ;
 bitwise_xor_expr ::= bitwise_and_expr , { "^" , bitwise_and_expr } ;
@@ -361,13 +392,13 @@ literal         ::= int_literal
 
 (* ---- collection literals ----------------------------------------------- *)
 
-array_literal   ::= "[" , [ expr_list ] , "]" ;
+array_literal   ::= "$[" , [ expr_list ] , "]" ;
 
-(* Pair / list: '(a) single pair, '(1, 2, 3) list of pairs,
-   '(1, 2, '. 6) improper list. *)
-pair_literal    ::= "'(" , [ pair_body ] , ")" ;
-pair_body       ::= pair_element , { "," , pair_element } , [ "," , "'." , expression ]
-                   | "'." , expression ;
+(* Pair / list: [a] single pair, [1, 2, 3] list of pairs,
+   [1, 2, 3, $. 6] improper list. *)
+pair_literal    ::= "[" , [ pair_body ] , "]" ;
+pair_body       ::= pair_element , { "," , pair_element } , [ "," , "$." , expression ]
+                   | "$." , expression ;
 pair_element    ::= expression ;
 
 tuple_literal   ::= "(" , ")"                                (* empty tuple *)
@@ -375,7 +406,7 @@ tuple_literal   ::= "(" , ")"                                (* empty tuple *)
                    | "(" , expr_list , ")" ;                  (* n>=2 handled by tuple_expr already;
                                                                    parens here only force grouping *)
 
-dict_literal    ::= "'{" , [ dict_body ] , "}" ;
+dict_literal    ::= "${" , [ dict_body ] , "}" ;
 dict_body       ::= dict_pair , { "," , dict_pair } ;
 dict_pair       ::= expression , ":" , expression ;
 
@@ -392,6 +423,10 @@ lambda_expr     ::= "fn" , "(" , [ param_list ] , ")" , block ;   (* anonymous f
    8. Keyword summary (reserved words)
    --------------------------------------------------------------------- *)
 
-(* and, break, class, co, continue, defined, elif, else, false, fn, for,
-   from, getter, if, import, in, init, new, not, or, pass, return, setter,
-   slot, super, this, true, undefined, using, while, with, yield *)
+(* and, break, catch, class, co, continue, defer, defined, elif, else,
+   false, fn, for, from, getter, if, import, in, init, is, new, not, or,
+   pass, return, setter, slot, super, this, true, try, undefined, using,
+   while, with, yield
+
+   Soft keywords (reserved only inside their own construct, still valid as
+   ordinary identifiers elsewhere): on, error (see defer_stmt). *)
