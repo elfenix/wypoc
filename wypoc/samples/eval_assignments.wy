@@ -6,3 +6,19 @@ greeting = "Hello, " + name
 pi_ish = 3.14
 negated = -x
 a, b = 1, 2
+
+arr = $[1, 2, 3, 4]
+arr[0] = 99
+
+d = ${ "a": 1, "b": 2 }
+d["a"] = 100
+
+grid = $[$[1, 2], $[3, 4]]
+grid[0][1] = 42
+
+class Box:
+    slot cells: str
+
+box = Box()
+box.cells = $[1, 2, 3]
+box.cells[1] = 55

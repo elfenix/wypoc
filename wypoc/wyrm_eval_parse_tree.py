@@ -1087,6 +1087,28 @@ def _iter_values(value, ctx: dict):
     yield from iterator
 
 
+def _resolve_target_value(target, ctx: dict):
+    """Reads the value a target currently denotes - used when a target is
+    itself the *base* of an IndexTarget (`grid[i][j] = x`'s `grid[i]`, or
+    `this.cells[i] = x`'s `this.cells`), so IndexTarget can nest on top of
+    any other target shape. Mirrors the lookup rules assign_target uses
+    for its own base, factored out rather than duplicated."""
+    if isinstance(target, ast.NameTarget):
+        return lookup(target.name, ctx)
+    if isinstance(target, ast.AttrTarget):
+        obj = lookup("this", ctx) if isinstance(target.base, ast.ThisRef) else lookup(target.base, ctx)
+        for name in target.attrs:
+            if not isinstance(obj, ClassInstance):
+                raise TypeError(f"'.' access is only supported on class instances right now (got {type(obj).__name__})")
+            obj = lookup(name, obj.attrs)
+        return obj
+    if isinstance(target, ast.IndexTarget):
+        obj = _resolve_target_value(target.base, ctx)
+        idx = eval_expr(target.index, ctx)
+        return obj[idx]
+    raise NotImplementedError(f"unsupported target base: {target}")
+
+
 def assign_target(target, value, ctx: dict) -> None:
     if isinstance(target, ast.NameTarget):
         bind(target.name, value, ctx)
@@ -1100,6 +1122,21 @@ def assign_target(target, value, ctx: dict) -> None:
         if not isinstance(obj, ClassInstance):
             raise TypeError(f"'.' assignment is only supported on class instances right now (got {type(obj).__name__})")
         bind(target.attrs[-1], value, obj.attrs)
+        return
+    if isinstance(target, ast.IndexTarget):
+        # `base[index] = value` - base is itself a target (Name/Attr/
+        # another Index), resolved to the actual container the same way a
+        # read would be, then mutated in place via Python's own
+        # __setitem__ (arrays are plain lists, dicts are plain dicts in
+        # this evaluator, so this needs no new value representation).
+        obj = _resolve_target_value(target.base, ctx)
+        idx = eval_expr(target.index, ctx)
+        if isinstance(obj, (str, tuple)):
+            raise TypeError(f"'{type(obj).__name__}' object does not support item assignment (immutable)")
+        try:
+            obj[idx] = value
+        except TypeError:
+            raise TypeError(f"'{type(obj).__name__}' object does not support item assignment") from None
         return
     raise NotImplementedError(f"unsupported assignment target: {target}")
 

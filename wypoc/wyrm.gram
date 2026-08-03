@@ -1,5 +1,5 @@
 @subheader """
-from wypoc.actions import fold_left, make_tuple, fold_postfix
+from wypoc.actions import fold_left, make_tuple, fold_postfix, fold_index_target
 from wypoc.ast_nodes import (
     Program, Pass, ExprStmt, Return, Yield, ElifClause, If, While, For,
     Continue, Break, NameTarget,
@@ -169,10 +169,22 @@ assignment_stmt[object]:
 target_list[object]:
     | first=target rest=("," target)* { [first] + [t for _, t in rest] }
 
+# A target may carry trailing `[expr]` suffixes (`arr[i] = x`,
+# `grid[i][j] = x`, `this.cells[i] = x`), each wrapping the previous
+# target in an IndexTarget - see fold_index_target (wypoc/actions.py) and
+# assign_target's IndexTarget case (mutates the underlying array/dict in
+# place via Python's own __setitem__, since that's what arrays/dicts
+# already are in this POC evaluator).
 target[object]:
+    | base=target_base idxs=target_index_suffix* { fold_index_target(base, idxs) }
+
+target_base[object]:
     | 'this' rest=("." NAME)+ { AttrTarget(ThisRef(), [a.string for _, a in rest]) }
     | n=NAME rest=("." NAME)+ { AttrTarget(n.string, [a.string for _, a in rest]) }
     | NAME { NameTarget(name.string) }
+
+target_index_suffix[object]:
+    | "[" e=expression "]" { e }
 
 assign_op[object]:
     | "?=" { '?=' }

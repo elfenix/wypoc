@@ -189,7 +189,10 @@ for_stmt        ::= "for" , identifier , "in" , expression , block ,
 assignment_stmt ::= target_list , [ ":" , type_constraint ] , assign_op , expr_list ;
 
 target_list     ::= target , { "," , target } ;
-target          ::= identifier | attr_ref ;
+(* A target may carry trailing `[ expression ]` suffixes - `arr[i] = x`,
+   `grid[i][j] = x`, `this.cells[i] = x` - mutating the array/dict in
+   place rather than only ever rebuilding it. *)
+target          ::= ( identifier | attr_ref ) , { "[" , expression , "]" } ;
 
 assign_op       ::= "=" | "?=" ;
 

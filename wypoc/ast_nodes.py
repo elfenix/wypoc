@@ -121,6 +121,16 @@ class AttrTarget(Node):
 
 
 @dataclass
+class IndexTarget(Node):
+    """`base[index] = value` - `base` is itself a target (NameTarget,
+    AttrTarget, or another IndexTarget, so `grid[i][j] = x` nests two of
+    these), letting an array/dict be mutated in place rather than only
+    ever rebuilt. See wyrm_eval_parse_tree.py's assign_target."""
+    base: "Node"
+    index: "Expr"
+
+
+@dataclass
 class Assign(Node):
     targets: list
     type: Optional["TypeExpr"]
