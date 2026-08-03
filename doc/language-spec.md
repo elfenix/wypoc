@@ -221,33 +221,22 @@ terminated by newline, semicolon, or a brace matching the block.
 
 ### Variables
 
-Variables defined by simply setting them:
+Variables are defined using the 'var' keyword:
 
-    # Set with type
-    foo: int = 5
+    var foo: int = 5   # Canonical definition with type hint
+    var foo = 5        # variable with inferred type
 
-    # Multivalue - type must be specified before
-    foo, bar = 5, 4
+A variable may be forward bound. Primitives will be set to default
+value (0 or false equivalent) and objects set to error:
 
-A type hint may only be defined for a variable once within a scope.
-A variable may be constrained to a type with a type hint statement:
+    var foo: int      # foo is 0
+    var foo: dict     # foo is error
 
-    foo: int
+Assignment works as expected:
 
-A type hint constraint statement does _not_ define the variable - access
-afterward is equivalent to an unset/undefined variable. Undefined
-variables will generate an error if attempted to be evaluated:
+    foo = 5
 
-    if foo:
-
-Generates an error if not assigned. It's possible to test if a variable
-is defined in the current scope utilizing the 'defined()' function. The
-symbol name must be used:
-
-    if defined('foo):
-        foo = foo + 1
-    else:
-        foo = 1
+Attempting to assign an unbound variable is an error.
 
 Wyrm offers a 'set if unset' operator. Evaluation is short circuited
 if the variable is already defined and not of error type, otherwise
@@ -258,7 +247,7 @@ the evaluation is processed:
 
 A variable may have a type specified prior to assignment:
 
-    foo: int
+    var foo: int
     if check:
         foo = 5
     else:
@@ -266,13 +255,12 @@ A variable may have a type specified prior to assignment:
 
 The static keyword is used to indicate a variable definition tied to the
 lexical scope itself instead of the current dynamic scope. This is may
-be used to create class variables and function variables. It may be
-used to indicate a variable is referenced this way, prior to access:
+be used to create class variables and function variables. The static
+variable is bound to the given value during creation of the class or
+function.
 
     fn call_count():
-        static foo: int
-
-        foo ?= 0
+        static foo: int = 0
         foo = foo + 1
         return foo
 
@@ -282,16 +270,6 @@ Or it may be used with an initial assignment:
         static foo: int = 0
         foo = foo + 1
         return foo
-
-The initial assignment is semantically equivalent to a definition
-check followed by assignment:
-
-    if not defined('foo):
-        foo = 0
-
-If the function is called recursively, each default will appear as
-undefined at the call site and result in assignments at each level
-of recursion as the variable resolved.
 
 Functions bodies are evaluated at the time of first call.
 
@@ -748,7 +726,7 @@ The input type may be specified:
 An example with other parameters:
 
     co mirror_5x_with_add(<- float, initial: float, addend: float) -> float | sym:
-         a = yield initial
+         a := yield initial
          a = yield a + addend
          a = yield a + addend
          a = yield a + addend
@@ -777,13 +755,13 @@ Cooroutines may be invoked as a message:
         slot total: int = 0
 
     co [summation] term_adder(<- int | nil) -> int:
-        term = 0
+        term := 0
         while term is int:
             term = yield this.total
             this.total = this.total + term
 
     # usage example
-    adder = summation() ! term_adder()
+    adder := summation() ! term_adder()
     next(adder)         # value is 0
     send(adder, 5)      # value is 5
     send(adder, 10)     # value is 15
@@ -800,10 +778,10 @@ The return statement from a coroutine is stored in the 'value' attribute. An
 active coroutine will return an error when accessing:
 
     cofun = do_1x()
-    a = next(cofun) # a = 1
-    b = cofun.value catch "expected"  # b = "expected"
-    c = next(cofun) # c = StopIteration error
-    d = cofun.value # d = 5
+    a := next(cofun) # a = 1
+    b := cofun.value catch "expected"  # b = "expected"
+    c := next(cofun) # c = StopIteration error
+    d := cofun.value # d = 5
 
 ## Types and Type System
 
@@ -919,8 +897,8 @@ The code chunk is placed within it's own dedicated scope. The list of input vari
 is read, the chunk is placed, and the output variables are written.
 
     fn quadratic_formula(a, b, c) -> float, float:
-        x: float
-        y: float
+        var x: float
+        var y: float
         native::block('HEADER, ['a, 'b, 'c], ['x, 'y], R"C(
             x = (-b + sqrt(b*b - 4*a*c)) / (2*a)
             y = (-b - sqrt(b*b - 4*a*c)) / (2*a)
@@ -969,7 +947,7 @@ Annotate functions that may return error using union error:
 
 Leverage defer on error to handle cleanup:
 
-    resource = resource()
+    resource := resource()
     defer on error:
         resource ! cleanup()
 
@@ -978,7 +956,7 @@ Leverage defer on error to handle cleanup:
 
 Consider cleaning up and terminating the error if it makes sense:
 
-    resource = resource()
+    resource := resource()
     defer on error | nil:
         resource ! cleanup()
 
@@ -989,13 +967,13 @@ Consider cleaning up and terminating the error if it makes sense:
 Use the ?= operator to catch and default values. This can be leveraged
 and eventually used with a try statement for a series of attempts:
 
-    f = open('try_location_1.txt')
+    f := open('try_location_1.txt')
     f ?= open('try_location_2.txt')
     f ?= try open('try_final_location.txt')
 
 Leverage catch to detect actual errors if truthy false is a valid result:
 
-    f = lookup['value'] catch 0
+    f := lookup['value'] catch 0
 
 Error may be inherited to create new error types. Using error as a method
 (basic constructor) will result in a new error of the base type.
