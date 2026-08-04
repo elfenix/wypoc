@@ -23,7 +23,7 @@ The value of any literal as a statement is the literal.
 
 #### Signed Numbers
 
-Integers leverage standard C semantics: -?\d+ or 0x\[a-fA-F0-9]+
+Integers leverage standard C semantics: -?\d+ or 0x[a-fA-F0-9]+
 
     0xdead
     12345
@@ -37,14 +37,14 @@ Floating point numbers follow standard C semantics:
 
 #### Booleans
 
-Specify true of false
+Specify true or false
 
     true # True
     false # False
 
 #### Nil
 
-`nil` is a keyword for a unset variable.
+`nil` is a keyword for an unset variable.
 
     nil
 
@@ -75,7 +75,7 @@ Multiline strings may be specified using triple double quote:
 Raw strings may be defined using the R prefix with specific token:
 
     R"(Arbitrary Text)"
-    R"extra(WE can noow have (" )extra"
+    R"extra(We can now have (" )extra"
 
 #### Characters
 
@@ -107,28 +107,31 @@ Single element tuple use parens to force the group:
 
     (1,)
 
-Empty tuple may be specified by open-close parens '()'
+Empty tuple may be specified by open-close parens '()'. Tuples
+are constant.
 
-#### Pair / List
+#### List / Array
 
-A list is a sequence of pairs. Wyrm provides the same general
+A list is a sequence of wyrm objects with constant time indexing. A
+list is mutable - individual elements may be assigned.
+
+    [1, 2, 3, 4]
+
+#### Pair List
+
+A pair list is a sequence of pairs. Wyrm provides the same general
 shorthand syntax as Scheme for defining lists, but substitutes
-brackets for parens. An improper list may be define using the
-'$.' operator and empty list is also allowed:
+brackets for parens. The pair list is a low level primitive and
+is critical to the representation of the underlying AST. It may
+be created leveraging the $[ sigil.
 
-    []                # empty list, as in scheme '()
-    ['a]              # single element, as in scheme cons('a, '())
-    [1, 2, 3]         # normal list
-    [1, 2, $. 4]      # improper list
+    $[]                # empty list, as in scheme '()
+    $['a]              # single element, as in scheme cons('a, '())
+    $[1, 2, 3]         # proper pair list
 
-#### Arrays
+To create an improper list, the 'pair' constructor can be used:
 
-Arrays are defined as a set of variables of a single primitive type,
-but that primitive type may be an 'object'. The type of an array
-literal is determined by the least generic non-union type qualifying
-all items. The '$[' sigil defines the type.
-
-    $[1, 2, 3, 4]
+    f := pair('a, 'b)     # SCHEME - '(a . b)
 
 #### Tables or Dictionaries
 
@@ -151,8 +154,8 @@ A type identifier alone may be used as a constraint:
     MyClass
 
 Type identifiers are allowed to have parameters (generic support); the
-parameter is a comma separate list of type identifiers. Additionally,
-may be a list of parameters:
+parameter is a comma-separated list of type identifiers. Additionally,
+a parameter may itself be a list of parameters:
 
     list[int]
     callable[[int, float], int]
@@ -160,6 +163,9 @@ may be a list of parameters:
 Type constraints may represent summation types as well:
 
     int | MyClass
+
+Runtime enforcement of typing is limited; the primary enforcement mechanism
+is at compilation time.
 
 ### Operators
 
@@ -196,7 +202,7 @@ Comparisons:
     a >= b
     a <=> b
     a < b
-    b > b
+    a > b
     a == b
     a != b
 
@@ -221,57 +227,77 @@ terminated by newline, semicolon, or a brace matching the block.
 
 ### Variables
 
-Variables are defined using the 'var' keyword:
+Variables are declared using the 'var' keyword:
 
-    var foo: int = 5   # Canonical definition with type hint
-    var foo = 5        # variable with inferred type
+    var foo: int = 5   # Canonical declaration with type constraint
+    var foo = 5        # Declaration with inferred type
 
-A variable may be forward bound. Primitives will be set to default
-value (0 or false equivalent) and objects set to error:
+The `:=` operator is shorthand for an inferred-type declaration:
 
-    var foo: int      # foo is 0
-    var foo: dict     # foo is error
+    foo := 5           # Equivalent to: var foo = 5
 
-Assignment works as expected:
+A variable may be forward declared. A forward-declared variable is
+bound to the Unset error value, regardless of its type constraint,
+until first assignment:
+
+    var foo: int      # foo is Unset (error)
+    var foo: dict     # foo is Unset (error)
+
+Assignment uses the `=` operator and requires a declared variable:
 
     foo = 5
 
-Attempting to assign an unbound variable is an error.
+Plain `=` multivalue assignment requires all targets to be declared:
 
-Wyrm offers a 'set if unset' operator. Evaluation is short circuited
-if the variable is already defined and not of error type, otherwise
-the evaluation is processed:
+    a, b = b, a        # swap
 
-    foo ?= 5
-    foo_with_type: int ?= 5
+Assigning to an undeclared name is a compile-time error. Declaring a
+name already declared in the same scope is an error. Declaring a name
+visible from an enclosing scope is permitted and shadows it for the
+duration of the inner scope.
 
-A variable may have a type specified prior to assignment:
+Multiple variables may be declared from a multivalue expression. With
+`:=`, all target names must be previously undefined:
 
-    var foo: int
-    if check:
-        foo = 5
-    else:
-        foo = 10
+    a, b := f()        # both freshly declared
 
-The static keyword is used to indicate a variable definition tied to the
-lexical scope itself instead of the current dynamic scope. This is may
-be used to create class variables and function variables. The static
-variable is bound to the given value during creation of the class or
-function.
+Multivalue assignment is also legal with the var form:
+
+    var a: int, b: str = f()
+
+Wyrm offers a 'set if unset' operator. Evaluation is short-circuited
+if the variable's current value is not an error; otherwise the right
+side is evaluated and assigned:
+
+    var foo: int       # foo is Unset
+    foo ?= 5           # foo held an error, becomes 5
+    foo ?= 9           # foo is 5; right side not evaluated
+
+The static keyword declares a variable tied to the lexical scope
+itself instead of the current dynamic scope. This may be used to
+create class variables and function variables. A static variable is
+bound exactly once, when the enclosing class or function is created.
+Without an initializer it is bound to Unset:
+
+    fn call_count():
+        static foo: int
+        foo ?= 0
+        foo = foo + 1
+        return foo
+    # call_count::foo is Unset
+
+Or it may be declared with an initializer, evaluated once at
+creation time:
 
     fn call_count():
         static foo: int = 0
         foo = foo + 1
         return foo
+    # call_count::foo is 0
 
-Or it may be used with an initial assignment:
-
-    fn call_count():
-        static foo: int = 0
-        foo = foo + 1
-        return foo
-
-Functions bodies are evaluated at the time of first call.
+A static variable belongs to the scope that owns it: a function or class
+is a namespace, and its statics are addressable from outside via the
+`::` operator (e.g. `call_count::foo`).
 
 The static keyword may also be used in a class definition to define
 a variable associated with the class:
@@ -279,9 +305,9 @@ a variable associated with the class:
     class MyClass:
          static foo: int = 0
 
-A class body is evaluated when the class is constructed, therefore
-any function calls for foo will happen when the class is created on
-import of the module.
+A class body is evaluated once, when the class definition itself is
+executed (typically at module import). **Any function calls in static
+initializers happen at that time, not per instance construction**.
 
 ### Modules and Imports
 
@@ -347,7 +373,7 @@ The do keyword allows creation of a scope, the equivalent to defining a lambda
 function and immediately calling it. Used in an expression, the value of the
 do statement is the last executed line:
 
-    complex_answer = do:
+    complex_answer := do:
         step_1()
         step_2()
         ...
@@ -359,7 +385,7 @@ do statement is the last executed line:
 ### Basic Functions
 
 Basic functions should look exceedingly familiar to Python users. Most all
- the same rules apply – including no function overloading in parameters.
+the same rules apply – including no function overloading in parameters.
 
 The basic syntax for a function is:
 
@@ -406,7 +432,7 @@ Arguments may have default values:
 Variable length arguments may be collected by the '*' operator:
 
     fn message(*arguments) -> str:
-        greeting, name = arguments
+        greeting, name := arguments
         return greeting + name
 
 And '**' may be used to collect keyword argument into a dict:
@@ -467,7 +493,7 @@ While statement
 
 For statement:
 
-    for var in iterable:
+    for name in iterable:
         statement
         if condition:
             break
@@ -476,6 +502,15 @@ For statement:
 
 The 'in' statement must be an iterable. See special methods for
 the contract.
+
+The loop variable is a declaration: each iteration binds a fresh
+variable scoped to the loop body. A closure capturing the loop
+variable captures that iteration's binding. Within the `else`
+clause, the loop variable remains bound to the value from the
+final iteration, or Unset if the body never executed. After the
+loop statement completes, the loop variable is out of scope; an
+outer variable of the same name is shadowed for the duration of
+the loop and unaffected by it.
 
 Like other statements, `if`/`while`/`for` produce the value of the
 last statement executed in whichever branch or iteration actually
@@ -514,20 +549,20 @@ of whatever statement last executed:
 
 Try statement. If the type of the expression is an error, return immediately:
 
-    file = try open('badfile.txt')
+    file := try open('badfile.txt')
 
 The catch statement may be used instead of try to set a value in case of error:
 
-    file = open('badfile.txt') catch open('goodfile.txt')
+    file := open('badfile.txt') catch open('goodfile.txt')
 
 The try statement may specify the resultant return value using return.
 
-    value = lookup_table['value'] catch return 0
+    value := lookup_table['value'] catch return 0
 
 Defer block. The contents of the block are executed when the dynamic
 scope of the containing block is complete.
 
-    v = resource()
+    v := resource()
     defer:
         v ! release()
 
@@ -535,8 +570,8 @@ Defer with return condition. The block is armed during the dynamic scope
 of the calling block and will trigger if any block within the calling block's
 dynamic scope forces a return with either 'return' or 'try' statements.
 
-    v = resource()
-    defer on error:       # equivalent to defer { if ( defined_return_value is error ) ... }
+    v := resource()
+    defer on error:       # equivalent to defer { if ( return_value is error ) ... }
         v ! release()
 
 ### Messages
@@ -544,9 +579,9 @@ dynamic scope forces a return with either 'return' or 'try' statements.
 A message is a method on a class. Messages may be dispatched utilizing the
 message operator `!`.
 
-In simple cases, a message may utilized just as a method call:
+In simple cases, a message may be utilized just as a method call:
 
-    arr_len = array_object!length();
+    arr_len := array_object!length();
 
 A message may be executed on a tuple for multiple dispatch:
 
@@ -598,14 +633,21 @@ defined externally:
 Multiple dispatch possible by giving multiple classes:
 
     fn [person, job] get_decorated_name() -> str:
-        person_inst, job_inst = this
+        person_inst, job_inst := this
         return job_inst.title + " " + person_inst.last_name
 
-Class attributes and variables can be access with the `.` operator.
+Class attributes and variables can be accessed with the `.` operator.
 The `.` operator looks up the given name and creates an attribute
 ref. Assigning to the attribute ref results in setting a property.
 
     person.first_name = "Sam"
+
+Properties and messages occupy separate namespaces. The `.` operator
+resolves only in the property namespace: reading a name with no
+matching property is an error, even if a message of the same name
+exists. A property and a message may share a name without conflict;
+`.` resolves the property and `!` resolves the message. Messages are
+never reachable through attribute reference.
 
 Methods defined in a class are invoked using the message operator.
 
@@ -615,7 +657,7 @@ The `!` operator creates a closure. The closure may be elided
 in cases where the method is called directly, or it may
 be stored:
 
-    name_func = person!get_full_name
+    name_func := person!get_full_name
     name_func()
 
 The `super` allows classes to call 'up' the inheritance tree in single
@@ -626,13 +668,13 @@ dispatch cases.
         slot z: float;
     }
 
-    fn [coordinate3d] length_squared:
+    fn [coordinate3d] length_squared():
         return super() + (z**2)
 
 Objects are constructed by calling the class as a function. The return type
 of the construct is always the summation of the class type with error.
 
-    person_instance = person()
+    person_instance := person()
 
 The value of the new type is either the object type constructed or error.
 Essentially:
@@ -641,9 +683,10 @@ Essentially:
 
 A class constructor may be specified within the class. The constructor defines
 the default initialized variables for the object and then a block of code
-that executes immediately after. The constructor must be named 'init'. Variables
-without defaults will be set to the default value for the given type.
-For GC types this will be a nil reference, integers 0, or false.
+that executes immediately after. The constructor must be named 'init'. Slots
+without defaults are bound to the Unset error value, consistent with
+forward-declared variables; reading such a slot before assignment yields
+Unset, and the `?=` operator applies to slots in the same way.
 
     class vector:
         slot x: float
@@ -655,7 +698,7 @@ For GC types this will be a nil reference, integers 0, or false.
             this.y = y
             this.len = (x ** 2 + y ** 2) ** 0.5
 
-Errors / RAII - returning an error in init overides the 'new' result:
+Errors / RAII - returning an error in init overrides the 'new' result:
 
     class demo:
         slot result: int
@@ -663,7 +706,7 @@ Errors / RAII - returning an error in init overides the 'new' result:
         fn init(num: int, den: int):
             this.result = try num / den
 
-    x: demo | str = demo(5, 0) catch 'div0'
+    var x: demo | str = demo(5, 0) catch "div0"
 
 
 #### Slots
@@ -693,7 +736,7 @@ The slot creator accepts the following parameters:
 ### Coroutines
 
 Coroutines generally follow the exact same syntax of functions. A basic
-coroutine assume any/any for input and output.
+coroutine assumes any/any for input and output.
 
     co simple():
         yield 1
@@ -710,17 +753,17 @@ Output may be specified:
 Coroutines may also accept values:
 
     co mirror_5x(initial) -> float | sym:
-        a = yield initial
-        b = yield a
-        c = yield b
-        d = yield c
-        e = yield d
+        a := yield initial
+        b := yield a
+        c := yield b
+        d := yield c
+        e := yield d
         yield e
 
 The input type may be specified:
 
     co div2_1x(<- int) -> float:
-        a = yield 0.0
+        a := yield 0.0
         yield a / 2.0
 
 An example with other parameters:
@@ -743,13 +786,13 @@ The 'next' builtin method requests the next value from the coroutine. The
 send builtin method sends a value to the coroutine. A coroutine must be
 started with 'next' before sending.
 
-    cofun = mirror_5x()
+    cofun := mirror_5x()
 
     next(cofun) # returns 'initial, mirror_5x is paused
     next(cofun) # sends nil to mirror_5x, a=nil, yields nil
     send(cofun, 5) # sends 5 to mirror_5x, b=5, yields 5
 
-Cooroutines may be invoked as a message:
+Coroutines may be invoked as a message:
 
     class summation:
         slot total: int = 0
@@ -777,7 +820,7 @@ A coroutine may stop execution at any point, this is done via a return statement
 The return statement from a coroutine is stored in the 'value' attribute. An
 active coroutine will return an error when accessing:
 
-    cofun = do_1x()
+    cofun := do_1x()
     a := next(cofun) # a = 1
     b := cofun.value catch "expected"  # b = "expected"
     c := next(cofun) # c = StopIteration error
@@ -796,7 +839,7 @@ fundamental values where two uniquely created items will satisfy an `is`
 check. Primitive types:
 
   - **nil**: a nil value, use 'nil' global to instantiate
-  - **bool**: a boolean true/alse, use 'true', 'false' to instantiate, bool() call casts
+  - **bool**: a boolean true/false, use 'true', 'false' to instantiate, bool() call casts
   - **float**: single precision floating point, use literal to instantiate, float() call casts
   - **int**: minimum 32bit integer, use literal to instantiate, int() call casts
   - **uint**: minimum 32bit unsigned integer, use literal to instantiate, uint() call casts
@@ -808,9 +851,11 @@ the wyrm source code:
 
   - **bytes**: a byte buffer
   - **str**: a string
+  - **tuple**: an immutable value sequence
+  - **list**: a mutable sequence with constant-time indexing
   - **dict**: dictionary
   - **pair**: a linked list pair
-  - **array**: an array object
+  - **array**: a packed single-type array (reserved; no literal form)
   - **fiber**: thread of execution
   - **closure**: a closure
   - **coroutine**: instantiated coroutine
@@ -825,6 +870,7 @@ Class types inherit from object. These may be further subclassed as desired.
 
 Inherited / Extended predefined class types:
 
+  - **Unset: error** - the value of a declared but unassigned variable
   - **OutOfMemory: error** - out of memory error
   - **StopIteration: error** - stop iteration error
   - **RuntimeError: error** - generic runtime error
@@ -859,11 +905,11 @@ operators may be overloaded:
 
 **This is an internal feature.**
 
-Wyrm is intended to be a 'self-hosted' language using 'C' as it's internal
+Wyrm is intended to be a 'self-hosted' language using 'C' as its internal
 assembly language. The special built-in module 'native' specifies the module
 is intended for compilation:
 
-import native
+    import native
 
 Importing native allows a module to create and use C functions. The import module
 notifies the interpreter that the module is intended as a compiled wyrm extension.
@@ -893,16 +939,16 @@ The following portions of a file are available:
 
 Within a generated function, the block operator may be used to define a chunk of
 C code. This chunk of C code will be inserted directly in the generated function.
-The code chunk is placed within it's own dedicated scope. The list of input variables
+The code chunk is placed within its own dedicated scope. The list of input variables
 is read, the chunk is placed, and the output variables are written.
 
     fn quadratic_formula(a, b, c) -> float, float:
         var x: float
         var y: float
-        native::block('HEADER, ['a, 'b, 'c], ['x, 'y], R"C(
+        native::block('HEADER, $['a, 'b, 'c], $['x, 'y], R"C(
             x = (-b + sqrt(b*b - 4*a*c)) / (2*a)
             y = (-b - sqrt(b*b - 4*a*c)) / (2*a)
-        )C"
+        )C")
         return x, y
 
 Generated C block:
