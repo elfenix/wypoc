@@ -10,8 +10,17 @@ a, b := 1, 2
 arr := [1, 2, 3, 4]
 arr[0] = 99
 
+grown := [1, 2, 3]
+grown!resize(5)
+grown[3] = 4
+grown[4] = 5
+
+pruned := [1, 2, 3]
+pruned!resize(1)
+
 d := ${ "a": 1, "b": 2 }
 d["a"] = 100
+removed := d!remove("b")
 
 grid := [[1, 2], [3, 4]]
 grid[0][1] = 42

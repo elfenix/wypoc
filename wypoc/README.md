@@ -274,7 +274,12 @@ type/signature mismatches plain string assertions would miss.
 `wypoc/corelib/` is a small standard library written in wyrm, demonstrating
 the module system: `shapes.wy` (single-file module), `std/__init__.wy`
 (package marker), `std/io.wy` (a submodule, using the `!`-less plain-`fn`
-form - `println`). It's declared as package data
+form - `println`). `prelude.wy` is the one exception to "reached via
+`import`" - it's parsed once and run into every fresh scope directly by
+`populate_globals` (`wyrm_eval_parse_tree.py`), the same way the
+Python-level builtins (`car`/`cdr`/`substr`/...) are, so its definitions
+(e.g. `co range(begin, end) -> int`) are available with no import, despite
+being real wyrm source rather than Python. It's declared as package data
 (`[tool.setuptools.package-data] wypoc = ["corelib/**/*.wy"]` in
 `pyproject.toml`), so it's included in both editable installs and built
 wheels. The `wyrm` command (installed via this repo's top-level
@@ -358,32 +363,52 @@ Or a single file:
 
 ## Known gaps
 
-Things that are deliberately unimplemented rather than silently wrong (each
-raises `NotImplementedError`/`TypeError` with a clear message at the point
-it'd be needed):
+Things that are deliberately unimplemented (or only partially implemented)
+rather than silently wrong (each raises `NotImplementedError`/`TypeError`
+with a clear message at the point it'd be needed, or is called out below):
 
-- **Coroutines** (`co`) are stored (`Coroutine`) but not drivable - no
-  `yield`-as-suspend, no resumption/`send`.
-- **`init`-based construction** - `new Cls(args)` only works with zero args
-  (slots are filled from their declared defaults); passing constructor args
-  requires running `init()` with `this` bound, which is method-body
-  execution triggered by construction rather than by `!` - not wired up.
-- **Attribute access** (`.`) only reads a `ClassInstance`'s slots
-  (`this.x` / `obj.x`); there's no assignment (`this.x = v`) and no `.` on
-  `Module`/`Class` (use `::` for those, as the spec does).
+- **`super()`** doesn't evaluate - single-dispatch "call up the inheritance
+  tree" isn't wired up yet, unlike the rest of message dispatch.
+- **Multi-value unpack from a single multi-valued expression** isn't
+  supported - `a, b := f()` (or `a, b = f()`) requires `len(targets) ==
+  len(values)`; it can't unpack one call that itself returns a tuple. This
+  affects a few of the spec's own worked examples (e.g.
+  `greeting, name := arguments`).
+- **`do`/`defer`/`with` are basic-use implementations**, not fully
+  conforming (see wyrm_eval_parse_tree.py's `run_scoped_block`/
+  `Scope.defers`): `do:`'s value is only threaded through when its last
+  statement is a bare expression (a block ending in `if`/`while`/`for`
+  evaluates to `nil`, since those don't yet propagate a value themselves -
+  see below); `defer` is tied to whichever block Scope it's lexically
+  written in (an `if`/`while`/`for` body, not only the enclosing function
+  call), so a defer inside a loop body fires once per iteration rather than
+  once per call; `with` declares an immutable binding but doesn't do any
+  of the type-checking the spec's type constraints imply elsewhere either.
+- **`if`/`while`/`for` don't produce a value** the way the spec's "Like
+  other statements... produce the value of the last statement executed"
+  note describes - `eval_stmt` returns a value only for a bare expression
+  statement, not for compound statements. This is what limits `do:`'s value
+  threading above.
 - **Slot `setter`/`getter` options** are parsed (`SlotOption`) but not
   consulted - direct slot access never runs a custom setter/getter.
+- **Properties and messages don't yet occupy separate namespaces** - the
+  spec says `.` should error on a name that's only a message, but
+  `wyrm_eval_parse_tree.py`'s attribute lookup doesn't distinguish the two.
 - Diamond inheritance uses a simple base-classes-first linearization for
   both `all_slots()` and message-dispatch distance, not a real C3 MRO.
 - **`wyrm-lsp` is diagnostics-only** - no hover, go-to-definition, or
   completion. Those need source positions on AST nodes (currently only a
   handful of leaf nodes carry a `pos`, and nothing propagates it through
   most rules) and a real symbol table; the tree-walking evaluator doesn't
-  build one since it just runs code directly against a `dict` scope.
+  build one since it just runs code directly against a `Scope`.
 
 Anything not listed above that you'd expect to work and doesn't is a real
 gap worth filing, not an intentional omission - `eval_expr`/`eval_stmt`'s
-final fallback (`cannot evaluate <NodeType>`) is the tell.
+final fallback (`cannot evaluate <NodeType>`) is the tell. Coroutines are
+fully drivable (`next`/`send`/`yield from`), `init`-based construction
+with real constructor arguments works, and attribute assignment
+(`this.x = v` / `obj.x = v`) works - none of those are gaps, despite what
+older notes here may have implied.
 
 `wyrm --compile` (`compiler_c.py`) has its own, much narrower, set of
 deliberate v1 scope cuts (calls nested inside larger expressions, `float`,

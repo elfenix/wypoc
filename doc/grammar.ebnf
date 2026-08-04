@@ -423,7 +423,8 @@ primary         ::= literal
                    | "this"
                    | "super" , "(" , [ arg_list ] , ")"
                    | "defined" , "(" , symbol_literal , ")"
-                   | lambda_expr ;
+                   | lambda_expr
+                   | do_expr ;
 
 (* No `new` keyword: a class is constructed by calling it like any other
    callable - `MyClass(args)` invokes `init` (if any) with `this` bound to
@@ -470,12 +471,18 @@ message_tuple_expr
 
 lambda_expr     ::= "fn" , "(" , [ param_list ] , ")" , block ;   (* anonymous fn, e.g. slot setter *)
 
+(* `do` opens an anonymous, immediately-executed scope, usable as an
+   expression: its value is that of the last statement executed in its
+   body (see language-spec.md's "do" section). Structurally a block used
+   directly in expression position, the same way lambda_expr's block is. *)
+do_expr         ::= "do" , block ;
+
 
 (* ---------------------------------------------------------------------
    8. Keyword summary (reserved words)
    --------------------------------------------------------------------- *)
 
-(* and, break, catch, class, co, continue, defer, defined, elif, else,
+(* and, break, catch, class, co, continue, defer, defined, do, elif, else,
    false, fn, for, from, getter, if, import, in, is, not, or,
    pass, return, setter, slot, static, super, this, true, try, undefined,
    using, var, while, with, yield

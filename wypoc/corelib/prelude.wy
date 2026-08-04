@@ -1,0 +1,11 @@
+# Always-available coroutines/functions, seeded into every scope by
+# populate_globals (wyrm_eval_parse_tree.py) - no `import` needed, the same
+# way car/cdr/substr/etc (wyrm_builtins.py) need none. Kept as real wyrm
+# source per AGENTS.md's "stdlib written in wyrm, not Python" convention,
+# even though nothing here is loaded through the module/import machinery.
+
+co range(begin, end) -> int:
+    i := begin
+    while i < end:
+        yield i
+        i = i + 1

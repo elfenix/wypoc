@@ -33,6 +33,14 @@ def search_paths(env: dict = None) -> list:
     return paths
 
 
+def prelude_path() -> str:
+    """corelib/prelude.wy - always-available globals (e.g. `co range(...)`)
+    seeded into every scope by populate_globals (wyrm_eval_parse_tree.py),
+    independent of WYRM_PATH/search_paths since it isn't reached through an
+    `import` statement."""
+    return os.path.join(DEFAULT_COREPATH, "prelude.wy")
+
+
 def resolve_module_file(path_segments, roots=None):
     """Find the .wy file for a `mod::sub::leaf` path (path_segments a list
     of names, e.g. ["std", "io"]). Returns (file_path, is_package), or None

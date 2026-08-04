@@ -15,8 +15,7 @@
     { "include": "#function-decl" },
     { "include": "#coroutine-decl" },
     { "include": "#dict-sigil" },
-    { "include": "#array-sigil" },
-    { "include": "#pair-improper-marker" },
+    { "include": "#pair-list-sigil" },
     { "include": "#message-op" },
     { "include": "#scope-op" },
     { "include": "#attribute-access" },
@@ -143,8 +142,16 @@
           "match": "\\b(return|yield|pass)\\b"
         },
         {
+          "name": "keyword.control.exception.wyrm",
+          "match": "\\b(try|catch|defer)\\b"
+        },
+        {
           "name": "keyword.control.import.wyrm",
           "match": "\\b(import|from|using)\\b"
+        },
+        {
+          "name": "keyword.other.var.wyrm",
+          "match": "\\bvar\\b"
         },
         {
           "name": "keyword.other.static.wyrm",
@@ -153,6 +160,10 @@
         {
           "name": "keyword.other.with.wyrm",
           "match": "\\bwith\\b"
+        },
+        {
+          "name": "keyword.other.do.wyrm",
+          "match": "\\bdo\\b"
         },
         {
           "name": "keyword.other.slot.wyrm",
@@ -172,6 +183,16 @@
           "match": "\\bin\\b"
         },
         {
+          "comment": "type-check operator, e.g. a is int | float",
+          "name": "keyword.operator.is.wyrm",
+          "match": "\\bis\\b"
+        },
+        {
+          "comment": "soft keywords, only meaningful right after 'defer' - see defer_stmt",
+          "name": "keyword.other.defer-on-error.wyrm",
+          "match": "(?<=\\bdefer\\s)(on\\s+error)\\b"
+        },
+        {
           "name": "keyword.other.slot-option.wyrm",
           "match": "\\b(setter|getter)\\b(?=\\s*=)"
         }
@@ -181,7 +202,7 @@
       "patterns": [
         {
           "name": "storage.type.wyrm",
-          "match": "\\b(int|float|str|bool|any|pair)\\b"
+          "match": "\\b(int|uint|float|str|bool|sym|any|pair|list|array|tuple|dict|error)\\b"
         }
       ]
     },
@@ -255,20 +276,12 @@
         }
       ]
     },
-    "array-sigil": {
+    "pair-list-sigil": {
       "patterns": [
         {
-          "name": "punctuation.definition.array.wyrm",
+          "comment": "$[ ... ] pair-list literal, e.g. $[1, 2, 3] or $['a] - a low-level cons-list primitive, distinct from a plain [ ... ] list/array literal",
+          "name": "punctuation.definition.pair-list.wyrm",
           "match": "\\$\\["
-        }
-      ]
-    },
-    "pair-improper-marker": {
-      "patterns": [
-        {
-          "comment": "$. improper-list tail separator inside a [...] pair/list literal, e.g. [1, 2, $. 3]",
-          "name": "keyword.operator.pair-dot.wyrm",
-          "match": "\\$\\."
         }
       ]
     },
@@ -318,8 +331,9 @@
     "operators": {
       "patterns": [
         {
-          "name": "keyword.operator.set-if-unset.wyrm",
-          "match": "\\?="
+          "comment": "declaration operators - must be matched before the bare ':' (punctuation) and '=' (assignment) patterns below",
+          "name": "keyword.operator.declare.wyrm",
+          "match": ":=|\\?="
         },
         {
           "name": "keyword.operator.comparison.wyrm",

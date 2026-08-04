@@ -19,8 +19,9 @@ from wypoc.parse import parse
 class Variable:
     """A bound name in a wyrm scope: holds whatever value it currently has."""
 
-    def __init__(self, value=None):
+    def __init__(self, value=None, immutable=False):
         self.value = value
+        self.immutable = immutable
 
     def __repr__(self):
         return f"Variable({self.value!r})"
@@ -47,6 +48,7 @@ class Scope(dict):
     def __init__(self, parent: "Scope | None" = None):
         super().__init__()
         self.parent = parent
+        self.defers: list = []  # (on_error, body) pairs, in declaration order - see run_scoped_block
 
     def child(self) -> "Scope":
         return Scope(self)
@@ -248,7 +250,7 @@ class CoroutineInstance:
     def _run(self) -> None:
         _current_coroutine.instance = self
         try:
-            eval_block(self.node.body, self.local_ctx)
+            run_scoped_block(self.node.body, self.local_ctx)
         except ReturnSignal as ret:
             self._result = ret.value
         except BaseException as exc:  # noqa: BLE001
@@ -453,19 +455,36 @@ def clear_module_cache() -> None:
     _module_cache.clear()
 
 
+_PRELUDE_TREE: "ast.Program | None" = None
+
+
+def _prelude_tree() -> "ast.Program":
+    """corelib/prelude.wy (real wyrm source - e.g. `co range(...)`),
+    parsed once and reused - see populate_globals below."""
+    global _PRELUDE_TREE
+    if _PRELUDE_TREE is None:
+        path = wyrm_modules.prelude_path()
+        with open(path) as f:
+            _PRELUDE_TREE = parse(f.read())
+    return _PRELUDE_TREE
+
+
 def populate_globals(ctx: dict) -> None:
     """Seeds a fresh scope with the globals every piece of wyrm code should
     see, regardless of whether it's the top-level script (see cli.py) or a
-    module loaded via `import` (see import_module below) - currently just
-    the __-prefixed low-level I/O primitives (__open/__read/__write/...
-    and __STDIN/__STDOUT/__STDERR). A module gets its own fresh `ctx` (see
-    import_module), so without calling this for it too, code like
-    corelib/std/io.wy's `__write(__STDOUT, value)` would see `__write` as
-    undefined even though the top-level script's scope has it."""
+    module loaded via `import` (see import_module below): the __-prefixed
+    low-level I/O primitives (__open/__read/__write/... and __STDIN/
+    __STDOUT/__STDERR), the Python-level builtins (car/cdr/substr/...), and
+    corelib/prelude.wy's real-wyrm-source globals (e.g. `co range(...)`).
+    A module gets its own fresh `ctx` (see import_module), so without
+    calling this for it too, code like corelib/std/io.wy's
+    `__write(__STDOUT, value)` would see `__write` as undefined even
+    though the top-level script's scope has it."""
     from wypoc import wyrm_builtins, wyrm_io
 
     wyrm_io.install(ctx)
     wyrm_builtins.install(ctx)
+    eval_program(_prelude_tree(), ctx)
 
 
 def import_module(path_segments, roots=None) -> Module:
@@ -815,10 +834,13 @@ def _bind_params(node, local_ctx: dict, positional, kwargs, display_name: str) -
 
 def _bind_params_and_run(node, local_ctx: dict, positional, kwargs, display_name: str):
     """Shared by call_function and call_overload: binds params (see
-    _bind_params) then runs the body and unwinds ReturnSignal."""
+    _bind_params) then runs the body and unwinds ReturnSignal.
+    run_scoped_block (not plain eval_block) so a `defer` registered
+    directly in the call's own top-level scope fires when the call
+    returns - see doc/language-spec.md's Defer section."""
     _bind_params(node, local_ctx, positional, kwargs, display_name)
     try:
-        eval_block(node.body, local_ctx)
+        run_scoped_block(node.body, local_ctx)
     except ReturnSignal as ret:
         return ret.value
     return None
@@ -1185,6 +1207,8 @@ def assign_target(target, value, ctx: dict) -> None:
                 f"cannot assign to undeclared variable {target.name!r} "
                 f"(declare it first with 'var' or ':=')"
             )
+        if cell.immutable:
+            raise TypeError(f"cannot assign to {target.name!r}: bound with 'with' (immutable)")
         cell.value = value
         return
     if isinstance(target, ast.AttrTarget):
@@ -1261,6 +1285,12 @@ def eval_expr(node, ctx: dict):
             raise NotImplementedError(f"unsupported binary op: {node.op}")
     if isinstance(node, ast.Lambda):
         return Function(None, node, ctx)
+    if isinstance(node, ast.Do):
+        # `do:` - an anonymous, immediately-executed child scope, usable as
+        # an expression: its value is that of the last statement executed
+        # in its body (run_scoped_block also arms any `defer`s registered
+        # directly in it) - see doc/language-spec.md's "do" section.
+        return run_scoped_block(node.body, ctx.child())
     if isinstance(node, ast.Call):
         func = eval_expr(node.func, ctx)
         positional, kwargs = eval_args(node.args, ctx)
@@ -1355,7 +1385,15 @@ def eval_expr(node, ctx: dict):
     raise NotImplementedError(f"cannot evaluate {type(node).__name__}")
 
 
-def eval_stmt(stmt, ctx: dict) -> None:
+def eval_stmt(stmt, ctx: dict) -> "object":
+    """Executes one statement. Returns its value for `ast.ExprStmt` (a bare
+    expression statement) and None for every other statement kind - used by
+    eval_block/run_scoped_block to support `do:`'s "value of the last
+    statement executed" (see doc/language-spec.md's "do" section). This is
+    a POC-level simplification: unlike the spec's fuller "if/while/for also
+    produce the value of the last statement executed" note, only a directly
+    trailing expression statement is threaded through here - a block ending
+    in a compound statement (if/while/for) evaluates to nil."""
     if isinstance(stmt, ast.Import):
         import_module(stmt.path)  # loads the whole chain, caching every prefix along the way
         bind_new(stmt.path[0], _module_cache[stmt.path[0]], ctx)
@@ -1442,8 +1480,7 @@ def eval_stmt(stmt, ctx: dict) -> None:
         ctx[stmt.name] = store[stmt.name]
         return
     if isinstance(stmt, ast.ExprStmt):
-        eval_expr(stmt.value, ctx)
-        return
+        return eval_expr(stmt.value, ctx)
     if isinstance(stmt, ast.Yield):
         # A bare `yield 1` / `yield from sub()` line (yield_stmt, not
         # wrapped in ExprStmt - see wyrm.gram). Same suspension as the
@@ -1461,16 +1498,18 @@ def eval_stmt(stmt, ctx: dict) -> None:
         # Each branch body is its own child scope, so a `var`/`:=` inside
         # one branch never leaks into (or collides with a redeclare error
         # against) another branch or the enclosing scope - see
-        # doc/language-spec.md's Variables section.
+        # doc/language-spec.md's Variables section. run_scoped_block (not
+        # plain eval_block) so a `defer` inside the branch fires when the
+        # branch itself finishes.
         if eval_expr(stmt.cond, ctx):
-            eval_block(stmt.body, ctx.child())
+            run_scoped_block(stmt.body, ctx.child())
             return
         for clause in stmt.elifs:
             if eval_expr(clause.cond, ctx):
-                eval_block(clause.body, ctx.child())
+                run_scoped_block(clause.body, ctx.child())
                 return
         if stmt.orelse is not None:
-            eval_block(stmt.orelse, ctx.child())
+            run_scoped_block(stmt.orelse, ctx.child())
         return
     if isinstance(stmt, ast.Continue):
         raise ContinueSignal()
@@ -1479,10 +1518,12 @@ def eval_stmt(stmt, ctx: dict) -> None:
     if isinstance(stmt, ast.While):
         # A fresh child scope per iteration, matching `for`'s per-iteration
         # scoping below - a `var`/`:=` local declared in the body doesn't
-        # collide with the same declaration on the next iteration.
+        # collide with the same declaration on the next iteration, and a
+        # `defer` inside the body fires at the end of *that* iteration
+        # (see run_scoped_block).
         while eval_expr(stmt.cond, ctx):
             try:
-                eval_block(stmt.body, ctx.child())
+                run_scoped_block(stmt.body, ctx.child())
             except ContinueSignal:
                 continue
             except BreakSignal:
@@ -1494,7 +1535,8 @@ def eval_stmt(stmt, ctx: dict) -> None:
         # iteration captures that iteration's own binding, and the name is
         # entirely out of scope once the loop ends (an outer variable of the
         # same name is shadowed for the loop's duration, unaffected by it) -
-        # see doc/language-spec.md's "for" section.
+        # see doc/language-spec.md's "for" section. A `defer` inside the
+        # body fires at the end of that iteration (see run_scoped_block).
         broke = False
         last_iter_scope = None
         for item in _iter_values(eval_expr(stmt.iter, ctx), ctx):
@@ -1502,7 +1544,7 @@ def eval_stmt(stmt, ctx: dict) -> None:
             iter_scope.declare_new(stmt.var, item)
             last_iter_scope = iter_scope
             try:
-                eval_block(stmt.body, iter_scope)
+                run_scoped_block(stmt.body, iter_scope)
             except ContinueSignal:
                 continue
             except BreakSignal:
@@ -1515,7 +1557,24 @@ def eval_stmt(stmt, ctx: dict) -> None:
             else_scope = last_iter_scope.child() if last_iter_scope is not None else ctx.child()
             if last_iter_scope is None:
                 else_scope.declare_new(stmt.var, UNSET)
-            eval_block(stmt.orelse, else_scope)
+            run_scoped_block(stmt.orelse, else_scope)
+        return
+    if isinstance(stmt, ast.Defer):
+        # Registers a deferred body against the *current* scope - run when
+        # that scope is torn down (see run_scoped_block), in LIFO order
+        # relative to other defers in the same scope. `defer on error` only
+        # runs if the scope is exiting via a `return`ed error value or an
+        # escaping exception - see doc/language-spec.md's Defer section.
+        ctx.defers.append((stmt.on_error, stmt.body))
+        return
+    if isinstance(stmt, (ast.WithSimple, ast.WithBlock)):
+        # `with` declares an immutable binding in the current scope - see
+        # doc/language-spec.md's "immutable bindings". `with_block` is
+        # sugar for several `with_stmt_simple`s in a row.
+        bindings = [stmt] if isinstance(stmt, ast.WithSimple) else stmt.bindings
+        for binding in bindings:
+            cell = ctx.declare_new(binding.name, eval_expr(binding.value, ctx))
+            cell.immutable = True
         return
     if isinstance(stmt, ast.FnDef):
         signature = None if stmt.class_target is None else tuple(
@@ -1552,14 +1611,55 @@ def eval_stmt(stmt, ctx: dict) -> None:
     raise NotImplementedError(f"cannot evaluate statement {type(stmt).__name__}")
 
 
-def eval_block(stmts, ctx: dict) -> None:
+def eval_block(stmts, ctx: dict) -> "object":
     """Runs a list of statements directly in the given scope - `ctx` is
     already whatever scope this block belongs to (a fresh child Scope for
     an if/while/for/fn body - see eval_stmt/call_function/etc - or the
     caller's own scope for a straight-through sequence like a module or
-    function's top-level statements)."""
+    function's top-level statements). Returns the value of the last
+    statement executed (see eval_stmt), for `do:`'s benefit."""
+    value = None
     for stmt in stmts:
-        eval_stmt(stmt, ctx)
+        value = eval_stmt(stmt, ctx)
+    return value
+
+
+def _run_defers(scope: "Scope", is_error_exit: bool) -> None:
+    """Runs `scope`'s own registered `defer` bodies (see eval_stmt's Defer
+    case), most-recently-registered first - see run_scoped_block. `defer on
+    error` bodies only run when `is_error_exit` is true."""
+    for on_error, body in reversed(scope.defers):
+        if on_error and not is_error_exit:
+            continue
+        eval_block(body, scope.child())
+
+
+def run_scoped_block(body, scope: "Scope") -> "object":
+    """Runs `body` in `scope`, then tears `scope` down - running any
+    `defer`s registered directly in it (see doc/language-spec.md's Defer
+    section) regardless of how the block's execution ends: falling off the
+    end, `break`/`continue`, a propagating `return` (ReturnSignal), or a
+    real exception. `defer on error` bodies additionally require the block
+    to be exiting via a returned error value or an exception. Returns
+    whatever eval_block returned, for `do:`'s benefit."""
+    try:
+        value = eval_block(body, scope)
+    except ReturnSignal as ret:
+        if scope.defers:
+            _run_defers(scope, wyrm_builtins.is_error(ret.value))
+        raise
+    except (BreakSignal, ContinueSignal):
+        if scope.defers:
+            _run_defers(scope, False)
+        raise
+    except BaseException:
+        if scope.defers:
+            _run_defers(scope, True)
+        raise
+    else:
+        if scope.defers:
+            _run_defers(scope, False)
+        return value
 
 
 def eval_program(program: ast.Program, ctx: dict) -> dict:
@@ -1572,7 +1672,7 @@ def eval_program(program: ast.Program, ctx: dict) -> dict:
     scope = ctx if isinstance(ctx, Scope) else Scope()
     if scope is not ctx:
         scope.update(ctx)
-    eval_block(program.body, scope)
+    run_scoped_block(program.body, scope)
     if scope is not ctx:
         ctx.update(scope)
     return ctx

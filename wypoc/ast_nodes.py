@@ -339,6 +339,14 @@ class Lambda(Node):
     body: list
 
 
+@dataclass
+class Do(Node):
+    """`do:` block used as an expression - see wyrm_eval_parse_tree.py's
+    eval_expr (runs the body in a fresh child scope, same as any other
+    block, and evaluates to the value of the last statement executed)."""
+    body: list
+
+
 # No NewExpr: constructing a class is an ordinary Call whose func evaluates
 # to a Class value (see wyrm_eval_parse_tree.call_value's Class branch).
 
@@ -461,7 +469,7 @@ class TypeCheck(Node):
 
 Expr = Union[
     Num, Str, Char, Bool, Symbol, Name, ThisRef, SuperCall, Defined, Lambda,
-    Array, Pair, Tuple, Dict, MessageTupleExpr, UnaryOp, BinOp,
+    Do, Array, Pair, Tuple, Dict, MessageTupleExpr, UnaryOp, BinOp,
     SetIfUnset, Call, Index, Attr, Message, Scope, Yield, Try, Catch,
     TypeCheck,
 ]

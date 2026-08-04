@@ -7,7 +7,7 @@ from wypoc.ast_nodes import (
     WithBinding, WithBlock, Import, FromImport, Using, Param,
     VarPositional, VarKeyword, FnDef, CoDef, ClassDef, SlotOption, SlotDef,
     Num, Str, Char, Bool, Symbol, Name, ThisRef, SuperCall, Defined,
-    Lambda, Array, Pair, Tuple, DictEntry, Dict, MessageTupleExpr,
+    Lambda, Do, Array, Pair, Tuple, DictEntry, Dict, MessageTupleExpr,
     Kwarg, SpreadPos, SpreadKw, UnaryOp, BinOp, SetIfUnset, Call, Index,
     Attr, Message, Scope, Defer, Try, Catch, TypeCheck,
 )
@@ -512,6 +512,7 @@ primary[object]:
     | 'super' "(" args=arg_list? ")" { SuperCall(args or []) }
     | 'defined' "(" s=symbol_literal ")" { Defined(s) }
     | lambda_expr
+    | do_expr
     | NAME { Name(name.string) }
 
 literal[object]:
@@ -568,3 +569,10 @@ message_tuple_expr[object]:
 
 lambda_expr[object]:
     | 'fn' "(" params=param_list? ")" body=block { Lambda(params or [], body) }
+
+# `do:` opens an anonymous, immediately-executed scope usable as an
+# expression - see doc/language-spec.md's "do" section and Do
+# (wyrm_eval_parse_tree.py's eval_expr runs the body in a fresh child scope
+# and evaluates to the value of the last statement executed).
+do_expr[object]:
+    | 'do' body=block { Do(body) }

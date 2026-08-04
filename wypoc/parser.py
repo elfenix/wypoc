@@ -17,7 +17,7 @@ from wypoc.ast_nodes import (
     WithBinding, WithBlock, Import, FromImport, Using, Param,
     VarPositional, VarKeyword, FnDef, CoDef, ClassDef, SlotOption, SlotDef,
     Num, Str, Char, Bool, Symbol, Name, ThisRef, SuperCall, Defined,
-    Lambda, Array, Pair, Tuple, DictEntry, Dict, MessageTupleExpr,
+    Lambda, Do, Array, Pair, Tuple, DictEntry, Dict, MessageTupleExpr,
     Kwarg, SpreadPos, SpreadKw, UnaryOp, BinOp, SetIfUnset, Call, Index,
     Attr, Message, Scope, Defer, Try, Catch, TypeCheck,
 )
@@ -1821,7 +1821,7 @@ class GeneratedParser(Parser):
 
     @memoize
     def primary(self) -> Optional[object]:
-        # primary: literal | message_tuple_expr | paren_or_tuple | array_literal | pair_literal | dict_literal | 'this' | 'super' "(" arg_list? ")" | 'defined' "(" symbol_literal ")" | lambda_expr | NAME
+        # primary: literal | message_tuple_expr | paren_or_tuple | array_literal | pair_literal | dict_literal | 'this' | 'super' "(" arg_list? ")" | 'defined' "(" symbol_literal ")" | lambda_expr | do_expr | NAME
         mark = self._mark()
         if (
             (literal := self.literal())
@@ -1884,6 +1884,11 @@ class GeneratedParser(Parser):
             (lambda_expr := self.lambda_expr())
         ):
             return lambda_expr;
+        self._reset(mark)
+        if (
+            (do_expr := self.do_expr())
+        ):
+            return do_expr;
         self._reset(mark)
         if (
             (name := self.name())
@@ -2126,6 +2131,19 @@ class GeneratedParser(Parser):
             (body := self.block())
         ):
             return Lambda ( params or [] , body );
+        self._reset(mark)
+        return None;
+
+    @memoize
+    def do_expr(self) -> Optional[object]:
+        # do_expr: 'do' block
+        mark = self._mark()
+        if (
+            (self.expect('do'))
+            and
+            (body := self.block())
+        ):
+            return Do ( body );
         self._reset(mark)
         return None;
 
@@ -3225,7 +3243,7 @@ class GeneratedParser(Parser):
         self._reset(mark)
         return None;
 
-    KEYWORDS = ('and', 'break', 'catch', 'class', 'co', 'continue', 'defer', 'defined', 'elif', 'else', 'false', 'fn', 'for', 'from', 'getter', 'if', 'import', 'in', 'is', 'not', 'or', 'pass', 'return', 'setter', 'slot', 'static', 'super', 'this', 'true', 'try', 'undefined', 'using', 'var', 'while', 'with', 'yield')
+    KEYWORDS = ('and', 'break', 'catch', 'class', 'co', 'continue', 'defer', 'defined', 'do', 'elif', 'else', 'false', 'fn', 'for', 'from', 'getter', 'if', 'import', 'in', 'is', 'not', 'or', 'pass', 'return', 'setter', 'slot', 'static', 'super', 'this', 'true', 'try', 'undefined', 'using', 'var', 'while', 'with', 'yield')
     SOFT_KEYWORDS = ('error', 'on')
 
 

@@ -1,0 +1,18 @@
+# `range` (corelib/prelude.wy) - always available, no import needed, same
+# general behavior as Python's range(begin, end): yields begin, begin+1,
+# ..., end-1 (exclusive end); empty if begin >= end.
+
+var total: int = 0
+for x in range(0, 5):
+    total = total + x
+
+var count: int = 0
+for x in range(3, 3):
+    count = count + 1
+
+first := next(range(2, 6))
+collected := range(0, 3)
+c1 := next(collected)
+c2 := next(collected)
+c3 := next(collected)
+c4 := next(collected)

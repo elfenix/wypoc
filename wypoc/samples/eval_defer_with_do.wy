@@ -1,0 +1,63 @@
+# Basic-use coverage for `do`, `defer`, and `with` - see doc/language-spec.md's
+# "do" and "Errors / RAII" sections. These are POC-level implementations
+# (see AGENTS.md / README.md): `do` only threads through the value of a
+# directly trailing expression statement, and `defer` is tied to whichever
+# Scope it's lexically written in (fires when *that* block ends, not only
+# when the enclosing function returns).
+
+do_value := do:
+    a := 1
+    b := 2
+    a + b
+
+nested_do := do:
+    inner := do:
+        3 * 3
+    inner + 1
+
+var log: str = ""
+
+fn ordering():
+    defer:
+        log = log + "first-registered-last-run "
+    defer:
+        log = log + "second-registered-first-run "
+    log = log + "body "
+
+ordering()
+ordering_log := log
+
+log = ""
+
+fn per_iteration():
+    i := 0
+    while i < 3:
+        defer:
+            log = log + "iter-cleanup "
+        log = log + "iter "
+        i = i + 1
+
+per_iteration()
+per_iteration_log := log
+
+fn ok_call() -> int:
+    defer on error:
+        log = log + "should-not-run "
+    return 1
+
+fn failing_call():
+    defer on error:
+        log = log + "on-error-ran "
+    return error("boom")
+
+log = ""
+ok_result := ok_call()
+failing_result := failing_call()
+defer_on_error_log := log
+
+with pi_ish: float = 3.14
+with:
+    e_ish = 2.72
+    speed_of_light: float = 299_792_458.0
+
+with_sum := pi_ish + e_ish

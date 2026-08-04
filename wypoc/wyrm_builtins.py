@@ -267,6 +267,42 @@ def substr(s, start: int, count: int) -> str:
     return s[start:start + count]
 
 
+def resize(lst, count: int):
+    """(lst ! resize(count)) -> expands or prunes list `lst` in place to
+    exactly `count` items: items beyond `count` are dropped, and new items
+    (when growing) are the Unset error value - consistent with a
+    forward-declared variable or a slot with no default (see
+    doc/language-spec.md's Variables section). Note that a list's elements
+    are plain values, not Variable cells, so reading a resized-in Unset
+    item back out (`lst[i]`) just hands back the Unset value itself rather
+    than raising the way an unassigned variable's lookup would. A message
+    (`!`), not a plain call, since it's a method on list values - see
+    register_native_method (wyrm_eval_parse_tree.py). Returns `lst`."""
+    from wypoc.wyrm_eval_parse_tree import UNSET
+
+    if not isinstance(lst, list):
+        raise TypeError(f"resize: not a list (got {type(lst).__name__})")
+    if count < 0:
+        raise ValueError(f"resize: count must be >= 0 (got {count})")
+    if count < len(lst):
+        del lst[count:]
+    elif count > len(lst):
+        lst.extend(UNSET for _ in range(count - len(lst)))
+    return lst
+
+
+def remove(d, key):
+    """(d ! remove(key)) -> removes `key` from dict `d` in place and
+    returns the value that was removed. A message (`!`), not a plain call,
+    since it's a method on dict values - see register_native_method
+    (wyrm_eval_parse_tree.py) for how a builtin like this becomes
+    dispatchable that way without a real Class behind it. A missing key
+    raises, same as plain indexing (`d[key]`) already does for dicts."""
+    if not isinstance(d, dict):
+        raise TypeError(f"remove: not a dict (got {type(d).__name__})")
+    return d.pop(key)
+
+
 def print_(*args) -> None:
     """(print a, b, c) -> writes each argument, space-separated, to stdout,
     stringified the same way str() would (e.g. bools as true/false) - with
@@ -283,8 +319,9 @@ def print_(*args) -> None:
 
 def install(ctx: dict) -> None:
     """Expose str/int/float/bool, cons/pair/car/cdr, nil, copy, len, and
-    print as wyrm-visible builtins, plus str's substr as a `!`-callable
-    message. `pair` is `cons` under another name - doc/language-spec.md's
+    print as wyrm-visible builtins, plus str's substr, list's resize, and
+    dict's remove as `!`-callable messages. `pair` is `cons` under another
+    name - doc/language-spec.md's
     spelling for building an improper pair-list cell (`pair('a, 'b)`),
     since the `$[...]` pair-list literal only ever builds proper lists.
 
@@ -311,3 +348,5 @@ def install(ctx: dict) -> None:
         next=next_, send=send_,
     )
     register_native_method("substr", substr, ctx)
+    register_native_method("remove", remove, ctx)
+    register_native_method("resize", resize, ctx)

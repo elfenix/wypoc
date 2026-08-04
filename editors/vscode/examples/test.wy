@@ -11,32 +11,34 @@ with:
     gravitational_constant = 6.6743e-11;
     plancks_constant: float = 6.62607015e-34
 
-foo: int = 5
-foo, bar = 5, 4
-foo: int
-foo ?= 5
-foo_with_type: int ?= 5
+var foo: int = 5
+foo2, bar := 5, 4
+var forward: int
+forward ?= 5
+var foo_with_type: int
+foo_with_type ?= 5
 
-arr = [1, 2, 3, 4]
-lst = '(1, 2, 3, 4, 5)
-improper = '(1, 2, 3, 4, '. 6)
-tup = 1, 2, 3, 4
-single = (1,)
-empty = ()
-dict = '{ "Name": 15 }
-empty_dict = '{}
+arr := [1, 2, 3, 4]
+pairs := $[1, 2, 3, 4, 5]
+single_pair := $['a]
+improper := pair(1, 2)
+tup := 1, 2, 3, 4
+single := (1,)
+empty := ()
+tbl := ${ "Name": 15 }
+empty_dict := ${}
 
-sym = 'name
-hex_val = 0xdead
-raw = R"(Arbitrary Text)"
-raw_tagged = R"extra(WE can noow have (" )extra"
-multi = """This is a string
+sym := 'name
+hex_val := 0xdead
+raw := R"(Arbitrary Text)"
+raw_tagged := R"extra(WE can noow have (" )extra"
+multi := """This is a string
 this is still part of the string.""
 
-a = b <= c
-a2 = b >= c
-a3 = b <=> c
-ok = a and b or not c
+a := b <= c
+a2 := b >= c
+a3 := b <=> c
+ok := a and b or not c
 
 fn message(name: str, greeting: str = "Hello") -> str:
     return greeting + name
@@ -61,11 +63,11 @@ class coordinate3d(coordinate2d) {
     slot z: float;
 }
 
-fn [coordinate3d] length_squared:
+fn [coordinate3d] length_squared():
     return super() + (z**2)
 
-person_instance = person()
-arr_len = array_object!length();
+person_instance := person()
+arr_len := array_object!length();
 (canvas, shape) ! draw();
 
 fn call_count():
@@ -79,7 +81,7 @@ class demo:
     fn init(num: int, den: int):
         this.result = try num / den
 
-x: demo | str = demo(5, 0) catch 'div0
+var x: demo | str = demo(5, 0) catch "div0"
 
 class DetectedHardwareFailure(error) {}
 
@@ -91,3 +93,15 @@ if defined('foo):
     foo = foo + 1
 else:
     foo = 1
+
+fn with_cleanup():
+    resource := acquire()
+    defer:
+        resource!release()
+    defer on error:
+        log("failed")
+    return try resource!use()
+
+complex_answer := do:
+    step_1()
+    step_2()
