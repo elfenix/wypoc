@@ -79,7 +79,7 @@ def test_qualified_type_path(ctx):
 
 
 def test_wyrm_path_override(tmp_path, monkeypatch):
-    (tmp_path / "extra.wy").write_text("value = 123\n")
+    (tmp_path / "extra.wy").write_text("value := 123\n")
     monkeypatch.setenv("WYRM_PATH", str(tmp_path))
 
     paths = wyrm_modules.search_paths()
@@ -89,7 +89,7 @@ def test_wyrm_path_override(tmp_path, monkeypatch):
 
     clear_module_cache()
     ctx2: dict = {}
-    eval_program(parse("import extra\nv = extra::value\n"), ctx2)
+    eval_program(parse("import extra\nv := extra::value\n"), ctx2)
     assert ctx2["v"].value == 123, "a module found via WYRM_PATH imports correctly"
 
     # corelib is still reachable even with WYRM_PATH set (it's a fallback, not a replacement).

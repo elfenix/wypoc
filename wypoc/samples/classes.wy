@@ -25,7 +25,7 @@ person.get_full_name()
 
 person!get_full_name()
 
-name_func = person!get_full_name
+name_func := person!get_full_name
 name_func()
 
 fn [person] get_name():
@@ -42,7 +42,7 @@ class coordinate3d(coordinate2d) {
 fn [coordinate3d] length_squared():
     return super() + (z ** 2)
 
-person_instance = person()
+person_instance := person()
 
 class coordinate2d:
     slot x: float

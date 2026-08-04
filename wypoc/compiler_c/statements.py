@@ -47,9 +47,18 @@ def collect_locals_stmt(ctx: FnContext, s):
     handler(ctx, s)
 
 
-@LOCAL_COLLECT_HANDLERS.register(ast.TypeHint)
-def _collect_type_hint(ctx: FnContext, s: ast.TypeHint):
-    ctx.declare(s.name, s.type)
+@LOCAL_COLLECT_HANDLERS.register(ast.VarDecl)
+def _collect_var_decl(ctx: FnContext, s: ast.VarDecl):
+    # --compile does no type inference, so every `var` (and `:=`, which
+    # desugars to a VarDecl with no type - see actions.make_assignment_stmt)
+    # needs an explicit type to give its C local a concrete representation.
+    for t in s.targets:
+        if t.type is None:
+            err(
+                f"local '{t.name}' needs an explicit type for --compile "
+                f"(e.g. 'var {t.name}: int', not ':=')", s,
+            )
+        ctx.declare(t.name, t.type)
 
 
 @LOCAL_COLLECT_HANDLERS.register(ast.Assign)
@@ -63,16 +72,11 @@ def _collect_assign(ctx: FnContext, s: ast.Assign):
     for t in s.targets:
         if not isinstance(t, ast.NameTarget):
             err("only plain name targets are supported by --compile", s)
-    if s.type is not None:
-        for t in s.targets:
-            ctx.declare(t.name, s.type)
-    else:
-        for t in s.targets:
-            if t.name not in ctx.locals:
-                err(
-                    f"local '{t.name}' assigned before its type is known "
-                    f"(add 'name: type' on first assignment)", s,
-                )
+        if t.name not in ctx.locals:
+            err(
+                f"local '{t.name}' assigned before its type is known "
+                f"(declare it first with 'var {t.name}: type')", s,
+            )
 
 
 @LOCAL_COLLECT_HANDLERS.register(ast.ExprStmt)
@@ -90,7 +94,7 @@ def run_stmts(ctx: FnContext, stmts, block_path, fallthrough):
     falls off the end of `stmts` without an explicit return/break/
     continue/call-split."""
     for i, s in enumerate(stmts):
-        if isinstance(s, (ast.Pass, ast.TypeHint)):
+        if isinstance(s, ast.Pass):
             continue
         if isinstance(s, ast.Continue):
             if ctx.continue_target is None:
@@ -240,22 +244,35 @@ def compile_return(ctx: FnContext, s: ast.Return):
     ctx.emit("return WYRM_EXEC_DONE;")
 
 
+@STATEMENT_HANDLERS.register(ast.VarDecl)
+def _compile_var_decl(ctx: FnContext, s: ast.VarDecl):
+    if s.values is None:
+        return  # forward declaration only - nothing to emit
+    if len(s.targets) != len(s.values):
+        err("declaration target/value count mismatch", s)
+    _compile_targets_and_values(ctx, [t.name for t in s.targets], s.values)
+
+
 @STATEMENT_HANDLERS.register(ast.Assign)
 def _compile_assign(ctx: FnContext, s: ast.Assign):
     if len(s.targets) != len(s.values):
         err("assignment target/value count mismatch", s)
-    if len(s.targets) == 1:
-        ctx.emit_local_assign(s.targets[0].name, compile_expr(ctx, s.values[0]))
+    _compile_targets_and_values(ctx, [t.name for t in s.targets], s.values)
+
+
+def _compile_targets_and_values(ctx: FnContext, names, value_nodes):
+    if len(names) == 1:
+        ctx.emit_local_assign(names[0], compile_expr(ctx, value_nodes[0]))
         return
     # Evaluate every RHS into a temp first so `a, b = b, a` works.
     tmp_names = []
-    for t, v in zip(s.targets, s.values):
-        ctype_, _tag, _field = TYPES[ctx.locals[t.name]]
+    for name, v in zip(names, value_nodes):
+        ctype_, _tag, _field = TYPES[ctx.locals[name]]
         tmp = ctx.new_tmp()
         ctx.emit(f"{ctype_} {tmp} = {compile_expr(ctx, v)};")
         tmp_names.append(tmp)
-    for t, tmp in zip(s.targets, tmp_names):
-        ctx.emit_local_assign(t.name, tmp)
+    for name, tmp in zip(names, tmp_names):
+        ctx.emit_local_assign(name, tmp)
 
 
 @STATEMENT_HANDLERS.register(ast.ExprStmt)

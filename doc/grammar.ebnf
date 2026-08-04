@@ -118,8 +118,8 @@ stmt_sep        ::= NEWLINE | ";" ;
 statement       ::= simple_stmt | compound_stmt ;
 
 simple_stmt     ::= expr_stmt
+                   | var_stmt
                    | assignment_stmt
-                   | type_hint_stmt
                    | static_stmt
                    | with_stmt_simple
                    | import_stmt
@@ -178,25 +178,47 @@ for_stmt        ::= "for" , identifier , "in" , expression , block ,
                      [ "else" , block ] ;
 
 
-(* ---- variable definitions ---------------------------------------------
-   foo: int = 5
-   foo, bar = 5, 4
-   foo: int              (* type hint only, does not define *)
-   foo ?= 5
-   foo_with_type: int ?= 5
+(* ---- variable declarations and assignment ------------------------------
+   Declaration (introduces a fresh binding in the current scope; the name
+   must not already be declared in that same scope, though it may shadow a
+   name visible from an enclosing scope for the duration of the inner one):
+
+       var foo: int = 5      (* canonical: explicit type, initial value *)
+       var foo = 5           (* inferred type *)
+       var foo: int          (* forward declaration: foo is Unset (error)
+                                 until first assignment *)
+       var a: int, b: str = f()   (* multi-target, each with its own type *)
+       foo := 5               (* shorthand for `var foo = 5` *)
+       a, b := f()             (* shorthand multi-declare, inferred types;
+                                   every target must be freshly declared *)
+
+   Assignment (the target(s) must already be declared - assigning to an
+   undeclared name is a compile-time error):
+
+       foo = 5
+       a, b = b, a             (* swap *)
+
+   Set-if-unset: short-circuits (RHS not evaluated) if the target's current
+   value is not an error; otherwise evaluates the RHS and assigns it. The
+   target must already be declared (e.g. via a forward `var`, or `static`).
+
+       foo ?= 5
 *)
 
-assignment_stmt ::= target_list , [ ":" , type_constraint ] , assign_op , expr_list ;
+var_stmt        ::= "var" , var_target , { "," , var_target } , [ "=" , expr_list ] ;
+var_target      ::= identifier , [ ":" , type_constraint ] ;
+
+assignment_stmt ::= target_list , assign_op , expr_list ;
 
 target_list     ::= target , { "," , target } ;
 (* A target may carry trailing `[ expression ]` suffixes - `arr[i] = x`,
    `grid[i][j] = x`, `this.cells[i] = x` - mutating the array/dict in
-   place rather than only ever rebuilding it. *)
+   place rather than only ever rebuilding it. Only a plain identifier
+   target is legal with the `:=` assign_op (it declares a fresh name, so
+   there is nothing to index/attribute into yet). *)
 target          ::= ( identifier | attr_ref ) , { "[" , expression , "]" } ;
 
-assign_op       ::= "=" | "?=" ;
-
-type_hint_stmt  ::= identifier , ":" , type_constraint ;
+assign_op       ::= "=" | "?=" | ":=" ;
 
 (* `static` declares a binding tied to the lexical definition (the
    enclosing fn or class) rather than the current dynamic call/instance -
@@ -420,13 +442,15 @@ literal         ::= int_literal
 
 (* ---- collection literals ----------------------------------------------- *)
 
-array_literal   ::= "$[" , [ expr_list ] , "]" ;
+(* List/Array: a mutable, constant-time-indexable sequence. *)
+array_literal   ::= "[" , [ expr_list ] , "]" ;
 
-(* Pair / list: [a] single pair, [1, 2, 3] list of pairs,
-   [1, 2, 3, $. 6] improper list. *)
-pair_literal    ::= "[" , [ pair_body ] , "]" ;
-pair_body       ::= pair_element , { "," , pair_element } , [ "," , "$." , expression ]
-                   | "$." , expression ;
+(* Pair list: $[] empty, $['a] single pair, $[1, 2, 3] proper pair list.
+   A low-level primitive (critical to the AST's own representation); an
+   improper list is built with the `pair` constructor instead of a literal
+   tail, e.g. `pair('a, 'b)`. *)
+pair_literal    ::= "$[" , [ pair_body ] , "]" ;
+pair_body       ::= pair_element , { "," , pair_element } ;
 pair_element    ::= expression ;
 
 tuple_literal   ::= "(" , ")"                                (* empty tuple *)
@@ -454,7 +478,7 @@ lambda_expr     ::= "fn" , "(" , [ param_list ] , ")" , block ;   (* anonymous f
 (* and, break, catch, class, co, continue, defer, defined, elif, else,
    false, fn, for, from, getter, if, import, in, is, not, or,
    pass, return, setter, slot, static, super, this, true, try, undefined,
-   using, while, with, yield
+   using, var, while, with, yield
 
    Soft keywords (reserved only inside their own construct, still valid as
    ordinary identifiers elsewhere): on, error (see defer_stmt). *)

@@ -1,5 +1,5 @@
-i: int = 0
-seen: int = 0
+var i: int = 0
+var seen: int = 0
 while i < 5:
     i = i + 1
     if i == 3:
@@ -8,16 +8,16 @@ while i < 5:
         break
     seen = seen + i
 
-total: int = 0
-for x in $[1, 2, 3, 4, 5]:
+var total: int = 0
+for x in [1, 2, 3, 4, 5]:
     if x == 4:
         break
     total = total + x
 else:
     total = -1
 
-summed: int = 0
-for x in $[1, 2, 3]:
+var summed: int = 0
+for x in [1, 2, 3]:
     summed = summed + x
 else:
     summed = summed + 100
@@ -28,15 +28,15 @@ fn first_even(items):
             return x
     return -1
 
-found_even = first_even($[1, 3, 4, 5])
+found_even := first_even([1, 3, 4, 5])
 
 co count_to(n):
-    i = 1
+    i := 1
     while i <= n:
         yield i
         i = i + 1
 
-coroutine_total: int = 0
+var coroutine_total: int = 0
 for x in count_to(5):
     coroutine_total = coroutine_total + x
 
@@ -45,15 +45,15 @@ class IntRange:
     slot hi: int = 0
 
 co [IntRange] __iter__() -> int:
-    i = this.lo
+    i := this.lo
     while i < this.hi:
         yield i
         i = i + 1
 
-an_int_range = IntRange()
+an_int_range := IntRange()
 an_int_range.lo = 0
 an_int_range.hi = 5
 
-class_iter_total: int = 0
+var class_iter_total: int = 0
 for x in an_int_range:
     class_iter_total = class_iter_total + x

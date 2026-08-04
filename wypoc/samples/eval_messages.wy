@@ -16,16 +16,16 @@ class Square(Shape):
     fn area() -> float:
         return side * side
 
-c = Circle()
-s = Square()
-plain = Shape()
+c := Circle()
+s := Square()
+plain := Shape()
 
-circle_area = c!area()
-square_area = s!area()
-shape_area = plain!area()
+circle_area := c!area()
+square_area := s!area()
+shape_area := plain!area()
 
-bound = c!area
-bound_area = bound()
+bound := c!area
+bound_area := bound()
 
 fn describe():
     return "generic thing"
@@ -33,8 +33,8 @@ fn describe():
 fn [Circle] describe():
     return "a circle"
 
-circle_desc = c!describe()
-square_desc = s!describe()
+circle_desc := c!describe()
+square_desc := s!describe()
 
 fn collide():
     return "generic collision"
@@ -45,6 +45,6 @@ fn [Circle, Circle] collide():
 fn [Circle, Square] collide():
     return "circle-square collision"
 
-cc = (c, Circle()) ! collide()
-cs = (c, s) ! collide()
-gen = (s, s) ! collide()
+cc := (c, Circle()) ! collide()
+cs := (c, s) ! collide()
+gen := (s, s) ! collide()

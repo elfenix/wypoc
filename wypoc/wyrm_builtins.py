@@ -282,8 +282,11 @@ def print_(*args) -> None:
 
 
 def install(ctx: dict) -> None:
-    """Expose str/int/float/bool, cons/car/cdr, nil, copy, len, and print
-    as wyrm-visible builtins, plus str's substr as a `!`-callable message.
+    """Expose str/int/float/bool, cons/pair/car/cdr, nil, copy, len, and
+    print as wyrm-visible builtins, plus str's substr as a `!`-callable
+    message. `pair` is `cons` under another name - doc/language-spec.md's
+    spelling for building an improper pair-list cell (`pair('a, 'b)`),
+    since the `$[...]` pair-list literal only ever builds proper lists.
 
     `error` is bound to ERROR_CLASS (a real Class), not the `error()`
     Python function directly - calling it (`error("msg")`) goes through
@@ -301,7 +304,7 @@ def install(ctx: dict) -> None:
     )
 
     expose_all(
-        ctx, **PRIMITIVE_TYPES, cons=cons, car=car, cdr=cdr, nil=NIL,
+        ctx, **PRIMITIVE_TYPES, cons=cons, pair=cons, car=car, cdr=cdr, nil=NIL,
         copy=copy, len=length, print=print_, error=ERROR_CLASS,
         OutOfMemory=OUT_OF_MEMORY_CLASS, RuntimeError=RUNTIME_ERROR_CLASS,
         OSError=OS_ERROR_CLASS, StopIteration=STOP_ITERATION_CLASS,

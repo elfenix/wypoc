@@ -41,6 +41,6 @@ def test_index_assignment_rejects_immutable_types():
     from wypoc.parse import parse
     from wypoc.wyrm_eval_parse_tree import eval_program
 
-    for src in ('t = (1, 2)\nt[0] = 9\n', 's = "abc"\ns[0] = "z"\n'):
+    for src in ('t := (1, 2)\nt[0] = 9\n', 's := "abc"\ns[0] = "z"\n'):
         with pytest.raises(TypeError, match="does not support item assignment"):
             eval_program(parse(src), {})

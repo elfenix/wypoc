@@ -1,9 +1,9 @@
 @subheader """
-from wypoc.actions import fold_left, make_tuple, fold_postfix, fold_index_target
+from wypoc.actions import fold_left, make_assignment_stmt, make_tuple, fold_postfix, fold_index_target
 from wypoc.ast_nodes import (
     Program, Pass, ExprStmt, Return, Yield, ElifClause, If, While, For,
     Continue, Break, NameTarget,
-    AttrTarget, Assign, TypeHint, StaticDecl, TypeExpr, WithSimple,
+    AttrTarget, Assign, VarTarget, VarDecl, StaticDecl, TypeExpr, WithSimple,
     WithBinding, WithBlock, Import, FromImport, Using, Param,
     VarPositional, VarKeyword, FnDef, CoDef, ClassDef, SlotOption, SlotDef,
     Num, Str, Char, Bool, Symbol, Name, ThisRef, SuperCall, Defined,
@@ -92,8 +92,8 @@ simple_stmt_line[object]:
 simple_stmt[object]:
     | with_stmt_simple
     | static_stmt
+    | var_stmt
     | assignment_stmt
-    | type_hint_stmt
     | from_import_stmt
     | import_stmt
     | using_stmt
@@ -160,11 +160,25 @@ defer_stmt[object]:
     | 'defer' "on" "error" body=block { Defer(True, body) }
     | 'defer' body=block { Defer(False, body) }
 
-# ---- assignment / bindings ---------------------------------------------
+# ---- variable declarations / assignment ---------------------------------
+#
+# `var` declares fresh binding(s) in the current scope (error if the name
+# is already declared there; shadowing an enclosing scope's name is fine).
+# `:=` is sugar for a `var` declaration with inferred type - see
+# make_assignment_stmt (wypoc/actions.py), which turns an assignment_stmt
+# with op ':=' into a VarDecl rather than an Assign. `=`/`?=` are ordinary
+# assignment to an already-declared target - see doc/language-spec.md's
+# Variables section.
+
+var_stmt[object]:
+    | 'var' first=var_target rest=("," var_target)* vals=("=" expr_list)? {
+          VarDecl([first] + [t for _, t in rest], vals[1] if vals else None) }
+
+var_target[object]:
+    | n=NAME ty=(":" ann_type)? { VarTarget(n.string, ty[1] if ty else None) }
 
 assignment_stmt[object]:
-    | targets=target_list ty=(":" ann_type)? op=assign_op vals=expr_list {
-          Assign(targets, ty[1] if ty else None, op, vals) }
+    | targets=target_list op=assign_op vals=expr_list { make_assignment_stmt(targets, op, vals) }
 
 target_list[object]:
     | first=target rest=("," target)* { [first] + [t for _, t in rest] }
@@ -188,10 +202,8 @@ target_index_suffix[object]:
 
 assign_op[object]:
     | "?=" { '?=' }
+    | ":=" { ':=' }
     | "=" { '=' }
-
-type_hint_stmt[object]:
-    | n=NAME ":" t=ann_type { TypeHint(n.string, t) }
 
 # `static` declares a binding tied to the enclosing fn/class definition
 # rather than the current call/instance (see doc/language-spec.md's
@@ -517,18 +529,19 @@ symbol_literal[object]:
 
 # ---- collection literals ------------------------------------------------
 
+# List/Array: a mutable, constant-time-indexable sequence.
 array_literal[object]:
-    | "$" "[" items=expr_list? "]" { Array(items or []) }
+    | "[" items=expr_list? "]" { Array(items or []) }
 
-# Pair / list: [a] single pair, [1, 2, 3] list of pairs,
-# [1, 2, 3, $. 6] improper list.
+# Pair list: $[] empty, $['a] single pair, $[1, 2, 3] proper pair list - a
+# low-level primitive critical to the AST's own representation (see
+# doc/language-spec.md's "Pair List" section). An improper list is built
+# with the `pair` constructor instead of a literal tail, e.g. `pair('a, 'b)`.
 pair_literal[object]:
-    | "[" body=pair_body? "]" { Pair(body[0], body[1]) if body else Pair([], None) }
+    | "$" "[" body=pair_body? "]" { Pair(body or []) }
 
 pair_body[object]:
-    | first=assign_expr rest=("," assign_expr)* tail=("," "$" "." assign_expr)? {
-          ([first] + [e for _, e in rest], tail[3] if tail else None) }
-    | "$" "." e=assign_expr { ([], e) }
+    | first=assign_expr rest=("," assign_expr)* { [first] + [e for _, e in rest] }
 
 paren_or_tuple[object]:
     | "(" ")" { Tuple([]) }

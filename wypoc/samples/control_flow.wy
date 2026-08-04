@@ -5,14 +5,14 @@ while condition:
     if condition_2:
         break
 
-for var in iterable:
+for item in iterable:
     statement
     if condition:
         break
 else:
     statement_if_no_break
 
-i: int = 0
+var i: int = 0
 while i < 5:
     i = i + 1
     if i == 3:
@@ -20,16 +20,16 @@ while i < 5:
     if i == 5:
         break
 
-total: int = 0
-for x in $[1, 2, 3, 4, 5]:
+var total: int = 0
+for x in [1, 2, 3, 4, 5]:
     if x == 4:
         break
     total = total + x
 else:
     total = -1
 
-not_broken: int = 0
-for x in $[1, 2, 3]:
+var not_broken: int = 0
+for x in [1, 2, 3]:
     not_broken = not_broken + x
 else:
     not_broken = not_broken + 100

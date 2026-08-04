@@ -30,9 +30,10 @@ static wyrm_exec_state __wyrm_forward_result(wyrm_state* state)
 
 
 def split_call_stmt(s):
-    """If `s` is a non-tail call (`f(...)` or `x = f(...)`), return
-    (call, target_name|None); otherwise None. Calls nested inside bigger
-    expressions still aren't supported (CompileError, from compile_expr)."""
+    """If `s` is a non-tail call (`f(...)`, `x = f(...)`, or `var x: t =
+    f(...)`/`x := f(...)`), return (call, target_name|None); otherwise
+    None. Calls nested inside bigger expressions still aren't supported
+    (CompileError, from compile_expr)."""
     if isinstance(s, ast.ExprStmt) and isinstance(s.value, ast.Call) and not is_native_block_call(s.value):
         return s.value, None
     if (
@@ -42,6 +43,15 @@ def split_call_stmt(s):
         and isinstance(s.values[0], ast.Call)
         and not is_native_block_call(s.values[0])
         and isinstance(s.targets[0], ast.NameTarget)
+    ):
+        return s.values[0], s.targets[0].name
+    if (
+        isinstance(s, ast.VarDecl)
+        and s.values is not None
+        and len(s.targets) == 1
+        and len(s.values) == 1
+        and isinstance(s.values[0], ast.Call)
+        and not is_native_block_call(s.values[0])
     ):
         return s.values[0], s.targets[0].name
     return None

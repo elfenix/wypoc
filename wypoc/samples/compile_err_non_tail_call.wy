@@ -4,5 +4,5 @@ fn g() -> int:
     return 1
 
 fn f() -> int:
-    y: int = g() + 1
+    var y: int = g() + 1
     return y

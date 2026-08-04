@@ -7,8 +7,8 @@ fn double(a: int) -> int:
     return a * 2
 
 fn combo(x: int) -> int:
-    y: int = inc(x)
-    z: int = double(y)
+    var y: int = inc(x)
+    var z: int = double(y)
     return z + 1
 
 fn log_and_use(x: int) -> int:

@@ -1,6 +1,6 @@
 display("hello")
 display(1 + 2)
 
-r = add_one(41)
-p = pi
-c = double(3, 4)
+r := add_one(41)
+p := pi
+c := double(3, 4)

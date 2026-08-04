@@ -1,7 +1,7 @@
 import native
 
 fn clamp(x: int, lo: int, hi: int) -> int:
-    result: int = x
+    var result: int = x
     if result < lo:
         result = lo
     elif result > hi:
@@ -9,8 +9,8 @@ fn clamp(x: int, lo: int, hi: int) -> int:
     return result
 
 fn count_up_to(n: int) -> int:
-    i: int = 0
-    total: int = 0
+    var i: int = 0
+    var total: int = 0
     while i < n:
         total = total + i
         i = i + 1

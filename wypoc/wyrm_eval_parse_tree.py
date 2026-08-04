@@ -26,6 +26,69 @@ class Variable:
         return f"Variable({self.value!r})"
 
 
+class Scope(dict):
+    """A lexical scope: this level's own `var`-declared bindings (name ->
+    Variable), plus an optional parent scope to search when a name isn't
+    declared here - see doc/language-spec.md's Variables section ("declaring
+    a name already declared in the same scope is an error; declaring a name
+    visible from an enclosing scope... shadows it for the duration of the
+    inner scope").
+
+    A Scope *is* a dict (its own level's bindings), so `ctx[name]`/
+    `name in ctx`/`ctx.get(name)` elsewhere in this module keep working
+    unchanged, but now transparently walk outward through `parent` for
+    reads while `declare_new` only ever checks/writes this level - see
+    `get_cell`/`declared_here` below. Plain item assignment (`ctx[name] =
+    value`, e.g. bind_new()) still writes to this level only, unconditionally
+    - that's the "always fresh, no declare-checking" escape hatch used for
+    fn/class/import/builtin bindings, which aren't part of the var/:=
+    declaration system."""
+
+    def __init__(self, parent: "Scope | None" = None):
+        super().__init__()
+        self.parent = parent
+
+    def child(self) -> "Scope":
+        return Scope(self)
+
+    def get_cell(self, name: str):
+        """The Variable bound to `name`, searching this scope then each
+        enclosing one in turn - None if `name` isn't declared anywhere in
+        the chain."""
+        s = self
+        while s is not None:
+            cell = dict.get(s, name)
+            if cell is not None:
+                return cell
+            s = s.parent
+        return None
+
+    def declared_here(self, name: str) -> bool:
+        """Whether `name` is declared in *this* scope specifically (not an
+        enclosing one) - the redeclaration check `var`/`:=` need."""
+        return dict.__contains__(self, name)
+
+    def declare_new(self, name: str, value=None) -> "Variable":
+        if self.declared_here(name):
+            raise NameError(f"'{name}' is already declared in this scope")
+        cell = Variable(value)
+        dict.__setitem__(self, name, cell)
+        return cell
+
+    def __contains__(self, name):
+        return self.get_cell(name) is not None
+
+    def __getitem__(self, name):
+        cell = self.get_cell(name)
+        if cell is None:
+            raise KeyError(name)
+        return cell
+
+    def get(self, name, default=None):
+        cell = self.get_cell(name)
+        return default if cell is None else cell
+
+
 class Function:
     """A user-defined fn (or lambda), closing over the scope it was defined in."""
 
@@ -74,7 +137,7 @@ class Class:
                 # scope the class was defined in - a POC simplification,
                 # not full encapsulation.
                 value = eval_expr(member.default, self.closure) if member.default is not None else None
-                bind(member.name, value, self.closure)
+                bind_new(member.name, value, self.closure)
 
     def all_slots(self) -> dict:
         """(slot_def, owning_class) in MRO order - base classes first, so a
@@ -268,7 +331,7 @@ def instantiate_coroutine(node: ast.CoDef, closure: dict, positional, kwargs, th
     scope (same machinery ordinary calls use - see _bind_params) but
     doesn't run the body yet. `this_value` is None for a bare `co(...)`
     call, or the receiver(s) for a message-dispatched `co [Cls] ...`."""
-    local_ctx = dict(closure)
+    local_ctx = closure.child()
     if this_value is not None:
         bind_new("this", this_value, local_ctx)
         if isinstance(this_value, ClassInstance):
@@ -429,7 +492,7 @@ def import_module(path_segments, roots=None) -> Module:
         src = f.read()
     tree = parse(src)
 
-    module_ctx: dict = {}
+    module_ctx = Scope()
     populate_globals(module_ctx)
     mod = Module(key, file_path, module_ctx, is_package)
     _module_cache[key] = mod  # cache before eval so circular imports don't infinite-loop
@@ -451,7 +514,7 @@ def eval_using(stmt: ast.Using, ctx: dict) -> None:
         if len(path) < 2:
             raise ImportError(f"using {stmt.alias} = {'::'.join(path)} needs a module::name path")
         mod = import_module(path[:-1])
-        bind(stmt.alias, lookup(path[-1], mod.ctx), ctx)
+        bind_new(stmt.alias, lookup(path[-1], mod.ctx), ctx)
         return
     try:
         mod = import_module(path)
@@ -459,10 +522,10 @@ def eval_using(stmt: ast.Using, ctx: dict) -> None:
         if len(path) < 2:
             raise
         mod = import_module(path[:-1])
-        bind(path[-1], lookup(path[-1], mod.ctx), ctx)
+        bind_new(path[-1], lookup(path[-1], mod.ctx), ctx)
         return
     for name, var in mod.ctx.items():
-        bind(name, unwrap(var), ctx)
+        bind_new(name, unwrap(var), ctx)
 
 
 class ReturnSignal(Exception):
@@ -645,7 +708,7 @@ def expose(ctx: dict, name: str, value) -> None:
         expose(ctx, "display", display)
         eval_program(parse('display("hi")'), ctx)   # prints hi
     """
-    bind(name, value, ctx)
+    bind_new(name, value, ctx)
 
 
 def expose_all(ctx: dict, **values) -> None:
@@ -762,7 +825,7 @@ def _bind_params_and_run(node, local_ctx: dict, positional, kwargs, display_name
 
 
 def call_function(fn: Function, positional, kwargs):
-    local_ctx = dict(fn.closure)
+    local_ctx = fn.closure.child()
     return _bind_params_and_run(fn.node, local_ctx, positional, kwargs, fn.name or "<lambda>")
 
 
@@ -782,7 +845,7 @@ def call_overload(overload: MethodOverload, receivers: list, positional, kwargs)
         # running a body, exactly like calling a bare `co` does (see
         # instantiate_coroutine/call_value's Coroutine branch).
         return instantiate_coroutine(overload.node, overload.closure, positional, kwargs, this_value)
-    local_ctx = dict(overload.closure)
+    local_ctx = overload.closure.child()
     if len(receivers) == 1 and isinstance(receivers[0], ClassInstance):
         local_ctx.update(receivers[0].attrs)
     bind_new("this", this_value, local_ctx)
@@ -1111,7 +1174,18 @@ def _resolve_target_value(target, ctx: dict):
 
 def assign_target(target, value, ctx: dict) -> None:
     if isinstance(target, ast.NameTarget):
-        bind(target.name, value, ctx)
+        # Plain `=` (and `?=`, via eval_stmt/eval_expr) only ever assigns to
+        # an already-declared name - see doc/language-spec.md's Variables
+        # section ("Assigning to an undeclared name is a compile-time
+        # error"). Declaring a fresh name is `var`/`:=`'s job (VarDecl - see
+        # eval_stmt), not this function's.
+        cell = ctx.get_cell(target.name)
+        if cell is None:
+            raise NameError(
+                f"cannot assign to undeclared variable {target.name!r} "
+                f"(declare it first with 'var' or ':=')"
+            )
+        cell.value = value
         return
     if isinstance(target, ast.AttrTarget):
         obj = lookup("this", ctx) if isinstance(target.base, ast.ThisRef) else lookup(target.base, ctx)
@@ -1161,12 +1235,13 @@ def eval_expr(node, ctx: dict):
     if isinstance(node, ast.Dict):
         return {eval_expr(e.key, ctx): eval_expr(e.value, ctx) for e in node.entries}
     if isinstance(node, ast.Pair):
-        # '(1, 2, 3) -> Pair(1, Pair(2, Pair(3, NIL))); '(1, 2, '. 3) -> an
-        # improper list whose final cdr is 3 instead of NIL. Built right to
-        # left so each element becomes the car of a fresh cons cell around
-        # whatever's already been built (see wyrm_builtins.Pair/cons).
-        tail = eval_expr(node.tail, ctx) if node.tail is not None else wyrm_builtins.NIL
-        result = tail
+        # $[1, 2, 3] -> Pair(1, Pair(2, Pair(3, NIL))) - always a proper
+        # list; an improper one is built with the `pair` constructor
+        # instead (see doc/language-spec.md's "Pair List" section). Built
+        # right to left so each element becomes the car of a fresh cons
+        # cell around whatever's already been built (see
+        # wyrm_builtins.Pair/cons).
+        result = wyrm_builtins.NIL
         for item in reversed(node.elements):
             result = wyrm_builtins.Pair(eval_expr(item, ctx), result)
         return result
@@ -1230,10 +1305,19 @@ def eval_expr(node, ctx: dict):
         return is_defined(node.symbol.name, ctx)
     if isinstance(node, ast.SetIfUnset):
         if isinstance(node.target, ast.Name):
-            if is_defined(node.target.id, ctx):
-                return lookup(node.target.id, ctx)
+            # `?=` operates on an already-declared variable (typically a
+            # forward `var`, or a `static`) - it never implicitly declares
+            # one; see doc/language-spec.md's Variables section.
+            cell = ctx.get_cell(node.target.id)
+            if cell is None:
+                raise NameError(
+                    f"'?=' target {node.target.id!r} is not declared "
+                    f"(declare it first with 'var' or 'static')"
+                )
+            if cell.value is not UNSET and not wyrm_builtins.is_error(cell.value):
+                return cell.value
             value = eval_expr(node.value, ctx)
-            bind(node.target.id, value, ctx)
+            cell.value = value
             return value
         # Best-effort for a non-plain-name target (e.g. `this.x ?= 5`):
         # short-circuit if already a real, non-error value; otherwise just
@@ -1274,32 +1358,64 @@ def eval_expr(node, ctx: dict):
 def eval_stmt(stmt, ctx: dict) -> None:
     if isinstance(stmt, ast.Import):
         import_module(stmt.path)  # loads the whole chain, caching every prefix along the way
-        bind(stmt.path[0], _module_cache[stmt.path[0]], ctx)
+        bind_new(stmt.path[0], _module_cache[stmt.path[0]], ctx)
         return
     if isinstance(stmt, ast.FromImport):
         mod = import_module(stmt.path)
         for name in stmt.names:
-            bind(name, lookup(name, mod.ctx), ctx)
+            bind_new(name, lookup(name, mod.ctx), ctx)
         return
     if isinstance(stmt, ast.Using):
         eval_using(stmt, ctx)
+        return
+    if isinstance(stmt, ast.VarDecl):
+        # `var`, and the `:=` shorthand (see actions.make_assignment_stmt) -
+        # always declares fresh name(s) in the *current* scope; error if any
+        # target is already declared there (shadowing an enclosing scope's
+        # name of the same name is fine - see doc/language-spec.md's
+        # Variables section). No initializer -> each target is Unset.
+        if stmt.values is None:
+            for t in stmt.targets:
+                ctx.declare_new(t.name, UNSET)
+            return
+        values = [eval_expr(v, ctx) for v in stmt.values]
+        if len(stmt.targets) == 1 and len(values) == 1:
+            ctx.declare_new(stmt.targets[0].name, values[0])
+        elif len(stmt.targets) == len(values):
+            for t, v in zip(stmt.targets, values):
+                ctx.declare_new(t.name, v)
+        else:
+            raise ValueError(
+                f"declaration target/value count mismatch: "
+                f"{len(stmt.targets)} targets, {len(values)} values"
+            )
         return
     if isinstance(stmt, ast.Assign):
         targets = stmt.targets
         if stmt.op == "?=":
             # Each target/value pair short-circuits independently: a
-            # NameTarget already defined (and non-error) keeps its value
+            # NameTarget whose current value isn't an error keeps it
             # without evaluating that value expression at all - see
-            # doc/language-spec.md's "set if unset" operator.
+            # doc/language-spec.md's "set if unset" operator. The target
+            # must already be declared (a forward `var`, or `static`).
             if len(targets) != len(stmt.values):
                 raise ValueError(
                     f"assignment target/value count mismatch: "
                     f"{len(targets)} targets, {len(stmt.values)} values"
                 )
             for t, v_node in zip(targets, stmt.values):
-                if isinstance(t, ast.NameTarget) and is_defined(t.name, ctx):
-                    continue
-                assign_target(t, eval_expr(v_node, ctx), ctx)
+                if isinstance(t, ast.NameTarget):
+                    cell = ctx.get_cell(t.name)
+                    if cell is None:
+                        raise NameError(
+                            f"'?=' target {t.name!r} is not declared "
+                            f"(declare it first with 'var' or 'static')"
+                        )
+                    if cell.value is not UNSET and not wyrm_builtins.is_error(cell.value):
+                        continue
+                    cell.value = eval_expr(v_node, ctx)
+                else:
+                    assign_target(t, eval_expr(v_node, ctx), ctx)
             return
         values = [eval_expr(v, ctx) for v in stmt.values]
         if len(targets) == 1 and len(values) == 1:
@@ -1342,42 +1458,64 @@ def eval_stmt(stmt, ctx: dict) -> None:
     if isinstance(stmt, ast.Return):
         raise ReturnSignal(eval_expr(stmt.value, ctx) if stmt.value is not None else None)
     if isinstance(stmt, ast.If):
+        # Each branch body is its own child scope, so a `var`/`:=` inside
+        # one branch never leaks into (or collides with a redeclare error
+        # against) another branch or the enclosing scope - see
+        # doc/language-spec.md's Variables section.
         if eval_expr(stmt.cond, ctx):
-            eval_block(stmt.body, ctx)
+            eval_block(stmt.body, ctx.child())
             return
         for clause in stmt.elifs:
             if eval_expr(clause.cond, ctx):
-                eval_block(clause.body, ctx)
+                eval_block(clause.body, ctx.child())
                 return
         if stmt.orelse is not None:
-            eval_block(stmt.orelse, ctx)
+            eval_block(stmt.orelse, ctx.child())
         return
     if isinstance(stmt, ast.Continue):
         raise ContinueSignal()
     if isinstance(stmt, ast.Break):
         raise BreakSignal()
     if isinstance(stmt, ast.While):
+        # A fresh child scope per iteration, matching `for`'s per-iteration
+        # scoping below - a `var`/`:=` local declared in the body doesn't
+        # collide with the same declaration on the next iteration.
         while eval_expr(stmt.cond, ctx):
             try:
-                eval_block(stmt.body, ctx)
+                eval_block(stmt.body, ctx.child())
             except ContinueSignal:
                 continue
             except BreakSignal:
                 break
         return
     if isinstance(stmt, ast.For):
+        # The loop variable is itself a declaration, fresh per iteration and
+        # scoped to that iteration's body - a closure created in one
+        # iteration captures that iteration's own binding, and the name is
+        # entirely out of scope once the loop ends (an outer variable of the
+        # same name is shadowed for the loop's duration, unaffected by it) -
+        # see doc/language-spec.md's "for" section.
         broke = False
+        last_iter_scope = None
         for item in _iter_values(eval_expr(stmt.iter, ctx), ctx):
-            bind(stmt.var, item, ctx)
+            iter_scope = ctx.child()
+            iter_scope.declare_new(stmt.var, item)
+            last_iter_scope = iter_scope
             try:
-                eval_block(stmt.body, ctx)
+                eval_block(stmt.body, iter_scope)
             except ContinueSignal:
                 continue
             except BreakSignal:
                 broke = True
                 break
         if not broke and stmt.orelse is not None:
-            eval_block(stmt.orelse, ctx)
+            # The loop variable stays visible (bound to the final
+            # iteration's value, or Unset if the body never ran at all) for
+            # the `else` clause specifically - see doc/language-spec.md.
+            else_scope = last_iter_scope.child() if last_iter_scope is not None else ctx.child()
+            if last_iter_scope is None:
+                else_scope.declare_new(stmt.var, UNSET)
+            eval_block(stmt.orelse, else_scope)
         return
     if isinstance(stmt, ast.FnDef):
         signature = None if stmt.class_target is None else tuple(
@@ -1415,13 +1553,26 @@ def eval_stmt(stmt, ctx: dict) -> None:
 
 
 def eval_block(stmts, ctx: dict) -> None:
-    """Runs a list of statements in the given scope directly - wyrm has no
-    block-level scoping, only function-level, so if/elif/else bodies share
-    the enclosing ctx rather than getting a nested one."""
+    """Runs a list of statements directly in the given scope - `ctx` is
+    already whatever scope this block belongs to (a fresh child Scope for
+    an if/while/for/fn body - see eval_stmt/call_function/etc - or the
+    caller's own scope for a straight-through sequence like a module or
+    function's top-level statements)."""
     for stmt in stmts:
         eval_stmt(stmt, ctx)
 
 
 def eval_program(program: ast.Program, ctx: dict) -> dict:
-    eval_block(program.body, ctx)
+    """Runs `program` in scope `ctx`, mutating it in place (returning the
+    same object) - `ctx` may be an ordinary dict (e.g. a fresh `{}` from a
+    caller that hasn't been introduced to Scope, as several tests and
+    cli.py do): wrapped in a real root Scope for the run, then copied back
+    so the caller's own object still reflects the resulting top-level
+    bindings afterward."""
+    scope = ctx if isinstance(ctx, Scope) else Scope()
+    if scope is not ctx:
+        scope.update(ctx)
+    eval_block(program.body, scope)
+    if scope is not ctx:
+        ctx.update(scope)
     return ctx

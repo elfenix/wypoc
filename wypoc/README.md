@@ -121,13 +121,27 @@ prints.
 
 `wyrm_eval_parse_tree.py` is a single-file tree-walking evaluator:
 `eval_program(tree, ctx)` / `eval_stmt(stmt, ctx)` / `eval_expr(node, ctx)`,
-where `ctx` is a plain `dict[str, Variable]` scope, exactly like passing a
-dict to Python's own `exec()`. Key pieces:
+where `ctx` is a `Scope` (a real lexical scope, chained to its parent - see
+below), used exactly like passing a dict to Python's own `exec()`. Key pieces:
 
-- **`Variable`** - what actually lives in `ctx`; a mutable cell holding a
-  value. Reassignment mutates the existing `Variable` in place (so closures
-  see writes to captured names) unless the binding is meant to shadow (e.g.
-  function parameters always get a fresh `Variable`, via `bind_new`).
+- **`Variable`** - what actually lives in a `Scope`; a mutable cell holding
+  a value. Plain `=`/`?=` assignment mutates an existing `Variable` in place
+  (found by walking the scope chain outward - so closures see writes to
+  captured names), and requires the name to already be declared. `var` (and
+  its `:=` shorthand) instead always binds a *fresh* `Variable` into the
+  current scope's own level, erroring if that same scope already declared
+  the name - shadowing a name visible from an enclosing scope is fine. See
+  doc/language-spec.md's Variables section.
+- **`Scope`** - one lexical level: its own declared bindings (`dict[str,
+  Variable]`) plus a `parent` Scope to fall back to on read. A fresh child
+  Scope is created per function/method/coroutine call, per `if`/`elif`/
+  `else` branch taken, per `while` iteration, and per `for` iteration (the
+  loop variable is declared fresh in that iteration's own scope, so a
+  closure created inside the loop captures that iteration's binding, and
+  the name is entirely out of scope once the loop ends). Function
+  parameters (and `this`) always get a fresh `Variable` in the new call
+  frame via `bind_new`, regardless of what an enclosing scope already binds
+  under that name.
 - **`Function`** - a `fn`/lambda closing over the scope it was defined in.
 - **`Class`** - a user-defined class: resolved `bases` (real `Class`
   objects, not names), its own `slots`/`methods`/`coroutines`/`init`, and

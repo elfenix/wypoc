@@ -2,30 +2,30 @@ fn returns_via_try() -> error:
     try error("Hello World")
     return "unreachable"
 
-try_result = returns_via_try()
+try_result := returns_via_try()
 
 fn try_passthrough(x):
-    y = try x
+    y := try x
     return y + 1
 
-passthrough_result = try_passthrough(10)
+passthrough_result := try_passthrough(10)
 
-f = error("Hello") catch 5
+f := error("Hello") catch 5
 
-not_an_error = 10 catch 5
+not_an_error := 10 catch 5
 
 fn returns_via_catch_return():
-    value = error("boom") catch return 0
+    value := error("boom") catch return 0
     return value
 
-catch_return_result = returns_via_catch_return()
+catch_return_result := returns_via_catch_return()
 
 class DetectedHardwareFailure(error) {}
 
 fn hardware_failed() -> int:
     return DetectedHardwareFailure()
 
-hardware_error = hardware_failed()
+hardware_error := hardware_failed()
 
 class demo:
     slot result: int
@@ -33,5 +33,5 @@ class demo:
     fn init(num: int, den: int):
         this.result = try num / den
 
-demo_ok = demo(10, 2) catch 'div0
-demo_div_by_zero = demo(10, 0) catch 'div0
+demo_ok := demo(10, 2) catch 'div0
+demo_div_by_zero := demo(10, 0) catch 'div0

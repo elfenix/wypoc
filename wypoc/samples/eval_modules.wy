@@ -1,16 +1,16 @@
 import shapes
 import std::io
 
-c = shapes::Circle()
-c_area_fn = shapes::Circle
+c := shapes::Circle()
+c_area_fn := shapes::Circle
 
-greeted = std::io::println("hi")
+greeted := std::io::println("hi")
 
 from std::io import println
-direct = println("direct")
+direct := println("direct")
 
 using std::io
-bulk = println("bulk")
+bulk := println("bulk")
 
 using alias_println = std::io::println
-aliased = alias_println("aliased")
+aliased := alias_println("aliased")

@@ -132,16 +132,29 @@ class IndexTarget(Node):
 
 @dataclass
 class Assign(Node):
+    """Plain assignment (`=`) or set-if-unset (`?=`) to already-declared
+    target(s) - see doc/language-spec.md's Variables section. `:=` never
+    produces this node; it's sugar for a `var` declaration (see VarDecl,
+    built by actions.make_assignment_stmt)."""
     targets: list
-    type: Optional["TypeExpr"]
     op: str
     values: list
 
 
 @dataclass
-class TypeHint(Node):
+class VarTarget(Node):
     name: str
-    type: "TypeExpr"
+    type: Optional["TypeExpr"]
+
+
+@dataclass
+class VarDecl(Node):
+    """`var` declaration statement, and the `:=` shorthand (inferred-type,
+    single or multi-target) desugars to this too. `values` is None for a
+    forward declaration (`var foo: int`) - the target(s) are bound to the
+    Unset error value until first assignment."""
+    targets: list  # list[VarTarget]
+    values: Optional[list]
 
 
 @dataclass
@@ -338,7 +351,6 @@ class Array(Node):
 @dataclass
 class Pair(Node):
     elements: list
-    tail: Optional["Expr"]
 
 
 @dataclass

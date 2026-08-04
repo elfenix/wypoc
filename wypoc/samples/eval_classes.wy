@@ -21,10 +21,10 @@ class Square(Rectangle):
     slot width: float = 5.0
     slot height: float = 5.0
 
-c = Circle()
-r = Rectangle()
-s = Square()
-plain = Shape()
+c := Circle()
+r := Rectangle()
+s := Square()
+plain := Shape()
 
 class Counter:
     static total: int = 0
@@ -35,4 +35,4 @@ class Counter:
 Counter()
 Counter()
 Counter()
-counter_total = total
+counter_total := total

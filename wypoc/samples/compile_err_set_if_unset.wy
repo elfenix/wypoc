@@ -1,6 +1,6 @@
 import native
 
 fn f() -> int:
-    x: int = 1
+    var x: int = 1
     x ?= 2
     return x

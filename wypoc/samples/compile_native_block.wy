@@ -1,13 +1,13 @@
 import native
 
-native::block('HEADER, [], [], R"C(
+native::block('HEADER, $[], $[], R"C(
 #include <stdio.h>
 )C")
 
 fn combine(a: int, b: int, c: int) -> int:
-    x: int
-    y: int
-    native::block('BODY, ['a, 'b, 'c], ['x, 'y], R"C(
+    var x: int
+    var y: int
+    native::block('BODY, $['a, 'b, 'c], $['x, 'y], R"C(
         x = a + b;
         y = b - c;
     )C")

@@ -1,7 +1,7 @@
-newline = "\n"
+newline := "\n"
 
 fn println(*content):
-    first = true
+    first := true
     for arg in content:
         if not first:
             __write(__STDOUT, " ")
@@ -28,6 +28,6 @@ class File:
         return __close(handle)
 
 fn open(path, mode="r") -> File:
-    f = File()
+    f := File()
     f.handle = __open(path, mode)
     return f

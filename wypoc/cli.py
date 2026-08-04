@@ -30,7 +30,7 @@ import traceback
 
 from wypoc.compiler_c import CompileError, compile_module
 from wypoc.parse import parse
-from wypoc.wyrm_eval_parse_tree import eval_program, expose, populate_globals
+from wypoc.wyrm_eval_parse_tree import Scope, eval_program, expose, populate_globals
 
 
 def main(argv: list = None) -> int:
@@ -113,7 +113,7 @@ def main(argv: list = None) -> int:
             sys.stdout.write(c_src)
         return 0
 
-    ctx: dict = {}
+    ctx = Scope()
     populate_globals(ctx)
     expose(ctx, "__ARGS", tuple(script_args))
 
