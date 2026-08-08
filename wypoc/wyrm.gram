@@ -1,15 +1,20 @@
 @subheader """
-from wypoc.actions import fold_left, make_assignment_stmt, make_tuple, fold_postfix, fold_index_target
+from wypoc.actions import (
+    fold_left, make_assignment_stmt, make_static_import, make_string_literal,
+    make_tuple, make_type_expr, fold_postfix, fold_index_target, names, spans,
+    tail, tok_pos, with_pos,
+)
 from wypoc.ast_nodes import (
     Program, Pass, ExprStmt, Return, Yield, ElifClause, If, While, For,
     Continue, Break, NameTarget,
     AttrTarget, Assign, VarTarget, VarDecl, StaticDecl, TypeExpr, WithSimple,
-    WithBinding, WithBlock, Import, FromImport, Using, Param,
+    WithBinding, WithBlock, Import, ImportItem, FromImport, Param,
     VarPositional, VarKeyword, FnDef, CoDef, ClassDef, SlotOption, SlotDef,
-    Num, Str, Char, Bool, Symbol, Name, ThisRef, SuperCall, Defined,
+    Num, Str, Char, Bool, Symbol, EllipsisExpr, Name, AstRef, ThisRef,
+    SuperCall, Defined,
     Lambda, Do, Array, Pair, Tuple, DictEntry, Dict, MessageTupleExpr,
     Kwarg, SpreadPos, SpreadKw, UnaryOp, BinOp, SetIfUnset, Call, Index,
-    Attr, Message, Scope, Defer, Try, Catch, TypeCheck,
+    Attr, Message, Scope, Defer, Try, Catch, TypeCheck, Decorator, Decorated,
 )
 """
 
@@ -47,10 +52,40 @@ from wypoc.ast_nodes import (
 #    its one `catch return 0` example are the only constraints given.
 #  * `on` / `error` in `defer on error` are soft keywords (double-quoted),
 #    not reserved words, so plain identifiers like a slot named `on` are
-#    unaffected.
+#    unaffected. So is `ast` in `foo::$ast`.
+#  * A symbol literal (`'name`, `'+`, `'fn`) is one token from the tokenizer
+#    rather than `"'"` + a name here, because a symbol's name may be a
+#    reserved word - `'fn`, `'return`, `'if` are all node kinds in the
+#    s-expression format, and a pegen `NAME` never matches a keyword. It
+#    arrives on the `token.STRING` wire type alongside string and character
+#    literals, told apart by its leading character (see the `literal` rule
+#    and wyrm_tokenizer's `_scan_symbol`).
+#  * A decorator in front of a *simple* statement has no rule of its own -
+#    `expression` already reaches one through `unary_expr`, so spelling it
+#    at statement level too would make `@d 41` ambiguous between the two
+#    paths. `compound_stmt` does have one: a decorated definition's tree
+#    must stay a definition so the rewritten name still binds.
+#
+# Source positions: `LOCATIONS` is pegen's own magic name, expanded by the
+# generator into the enclosing rule's start/end - configured (see
+# tools/generate_parser.py, which is why `python -m pegen` alone no longer
+# regenerates this correctly) to emit a `pos=(line, col, end_line,
+# end_col)` keyword argument, matching ast_nodes.Span. Every action that
+# builds a node passes it. Where a node also stores a bare identifier
+# string, `tok_pos(n)` supplies that one token's own span as `name_pos`,
+# since a jump to a definition should land on the name, not on the whole
+# construct; rules collecting several such names (module_path,
+# class_target, name_list, ...) therefore yield raw NAME tokens, and their
+# consumers split them with `names()`/`spans()`.
 # ===========================================================================
 
-start[object]: p=program ENDMARKER { p }
+# `program` is nullable, so on a file that fails to parse at all it matches
+# having consumed nothing - and pegen's own get_last_non_whitespace_token()
+# raises UnboundLocalError on an empty token slice, which LOCATIONS in a
+# nullable rule's action would walk straight into. `start` always consumes
+# at least the ENDMARKER, so the whole-program span is attached here
+# instead. No other rule in this grammar is both nullable and positioned.
+start[object]: p=program ENDMARKER { with_pos(p, LOCATIONS) }
 
 program[object]: stmts=stmt_item* NEWLINE* { Program([s for group in stmts for s in group]) }
 
@@ -89,6 +124,13 @@ simple_stmt_line[object]:
     | first=simple_stmt NEWLINE { [first] }
     | first=simple_stmt { [first] }
 
+# A decorator in front of a *simple* statement needs no rule of its own: a
+# simple statement that could carry one is an expression statement, and
+# `expression` already reaches the decorator through unary_expr. Spelling it
+# here as well would make `@d 41` ambiguous between the two paths, and would
+# hand the decorator an `'expr_stmt` wrapper the reference implementation
+# never puts there. `@d fn f(): ...` does need the compound_stmt rule below:
+# there the tree must stay a definition so the name survives the rewrite.
 simple_stmt[object]:
     | with_stmt_simple
     | static_stmt
@@ -96,7 +138,6 @@ simple_stmt[object]:
     | assignment_stmt
     | from_import_stmt
     | import_stmt
-    | using_stmt
     | return_stmt
     | yield_stmt
     | pass_stmt
@@ -105,6 +146,7 @@ simple_stmt[object]:
     | expr_stmt
 
 compound_stmt[object]:
+    | dec=decorator s=compound_stmt { Decorated(dec, s, LOCATIONS) }
     | if_stmt
     | while_stmt
     | for_stmt
@@ -114,29 +156,54 @@ compound_stmt[object]:
     | with_block
     | defer_stmt
 
-pass_stmt[object]: 'pass' { Pass() }
-continue_stmt[object]: 'continue' { Continue() }
-break_stmt[object]: 'break' { Break() }
+# ---- decorators ----------------------------------------------------------
+# `@name(args) X` hands `X`'s tree to `name` and uses whatever tree `name`
+# answers in its place - a light-weight macro system leveraging the
+# language's homoiconic AST (see doc/language-spec.md's Decorators section
+# and doc/sexpr-spec.md for the wire format a tree crosses in). The
+# rewrite is performed by wyrm_eval_parse_tree.py's expand_decorated.
+#
+# The name is a single unqualified identifier: it becomes a message
+# *selector* (the decorator is `fn [TreeBase] name(...)`), and a selector
+# is never a path, so `@a::b X` is a syntax error rather than a silent
+# second meaning for `::`.
+#
+# The argument list is optional, but parens written straight after the name
+# are *always* it - so `@d (expr)` reads `(expr)` as the arguments and then
+# looks for an operand after them, and parenthesising an operand means
+# spelling the empty list out first: `@d() (expr)`.
+#
+# A decorator may be followed by NEWLINE (decorator on its own line above a
+# multi-line def); in expression position (see unary_expr) there is none.
+decorator[object]:
+    | '@' n=NAME "(" args=arg_list? ")" NEWLINE? {
+          Decorator(n.string, args or [], True, name_pos=tok_pos(n), LOCATIONS) }
+    | '@' n=NAME NEWLINE? {
+          Decorator(n.string, [], False, name_pos=tok_pos(n), LOCATIONS) }
 
-expr_stmt[object]: e=expression { ExprStmt(e) }
+pass_stmt[object]: 'pass' { Pass(LOCATIONS) }
+continue_stmt[object]: 'continue' { Continue(LOCATIONS) }
+break_stmt[object]: 'break' { Break(LOCATIONS) }
+
+expr_stmt[object]: e=expression { ExprStmt(e, LOCATIONS) }
 
 return_stmt[object]:
-    | 'return' e=expression { Return(e) }
-    | 'return' { Return(None) }
+    | 'return' e=expression { Return(e, LOCATIONS) }
+    | 'return' { Return(None, LOCATIONS) }
 
 yield_stmt[object]:
-    | 'yield' 'from' e=expression { Yield(e, True) }
-    | 'yield' e=expression { Yield(e) }
-    | 'yield' { Yield(None) }
+    | 'yield' 'from' e=expression { Yield(e, True, LOCATIONS) }
+    | 'yield' e=expression { Yield(e, LOCATIONS) }
+    | 'yield' { Yield(None, LOCATIONS) }
 
 # ---- if statement ------------------------------------------------------
 
 if_stmt[object]:
     | 'if' cond=expression body=block elifs=elif_clause* orelse=else_clause? {
-          If(cond, body, elifs, orelse) }
+          If(cond, body, elifs, orelse, LOCATIONS) }
 
 elif_clause[object]:
-    | 'elif' cond=expression body=block { ElifClause(cond, body) }
+    | 'elif' cond=expression body=block { ElifClause(cond, body, LOCATIONS) }
 
 else_clause[object]:
     | 'else' body=block { body }
@@ -146,10 +213,10 @@ else_clause[object]:
 # Python's for/else (see doc/language-spec.md's Control Flow section).
 
 while_stmt[object]:
-    | 'while' cond=expression body=block { While(cond, body) }
+    | 'while' cond=expression body=block { While(cond, body, LOCATIONS) }
 
 for_stmt[object]:
-    | 'for' n=NAME 'in' it=expression body=block orelse=else_clause? { For(n.string, it, body, orelse) }
+    | 'for' n=NAME 'in' it=expression body=block orelse=else_clause? { For(n.string, it, body, orelse, var_pos=tok_pos(n), LOCATIONS) }
 
 # ---- defer statement ------------------------------------------------------
 # `on`/`error` are soft keywords (double-quoted below) rather than reserved
@@ -157,8 +224,8 @@ for_stmt[object]:
 # keeps working - only literal `defer on error` triggers this form.
 
 defer_stmt[object]:
-    | 'defer' "on" "error" body=block { Defer(True, body) }
-    | 'defer' body=block { Defer(False, body) }
+    | 'defer' "on" "error" body=block { Defer(True, body, LOCATIONS) }
+    | 'defer' body=block { Defer(False, body, LOCATIONS) }
 
 # ---- variable declarations / assignment ---------------------------------
 #
@@ -172,16 +239,16 @@ defer_stmt[object]:
 
 var_stmt[object]:
     | 'var' first=var_target rest=("," var_target)* vals=("=" expr_list)? {
-          VarDecl([first] + [t for _, t in rest], vals[1] if vals else None) }
+          VarDecl([first] + tail(rest), vals[1] if vals else None, LOCATIONS) }
 
 var_target[object]:
-    | n=NAME ty=(":" ann_type)? { VarTarget(n.string, ty[1] if ty else None) }
+    | n=NAME ty=(":" ann_type)? { VarTarget(n.string, ty[1] if ty else None, name_pos=tok_pos(n), LOCATIONS) }
 
 assignment_stmt[object]:
-    | targets=target_list op=assign_op vals=expr_list { make_assignment_stmt(targets, op, vals) }
+    | targets=target_list op=assign_op vals=expr_list { make_assignment_stmt(targets, op, vals, LOCATIONS) }
 
 target_list[object]:
-    | first=target rest=("," target)* { [first] + [t for _, t in rest] }
+    | first=target rest=("," target)* { [first] + tail(rest) }
 
 # A target may carry trailing `[expr]` suffixes (`arr[i] = x`,
 # `grid[i][j] = x`, `this.cells[i] = x`), each wrapping the previous
@@ -193,9 +260,13 @@ target[object]:
     | base=target_base idxs=target_index_suffix* { fold_index_target(base, idxs) }
 
 target_base[object]:
-    | 'this' rest=("." NAME)+ { AttrTarget(ThisRef(), [a.string for _, a in rest]) }
-    | n=NAME rest=("." NAME)+ { AttrTarget(n.string, [a.string for _, a in rest]) }
-    | NAME { NameTarget(name.string) }
+    | t='this' rest=("." NAME)+ {
+          AttrTarget(ThisRef(tok_pos(t)), names(tail(rest)),
+                     base_pos=tok_pos(t), attrs_pos=spans(tail(rest)), LOCATIONS) }
+    | n=NAME rest=("." NAME)+ {
+          AttrTarget(n.string, names(tail(rest)),
+                     base_pos=tok_pos(n), attrs_pos=spans(tail(rest)), LOCATIONS) }
+    | NAME { NameTarget(name.string, name_pos=tok_pos(name), LOCATIONS) }
 
 target_index_suffix[object]:
     | "[" e=expression "]" { e }
@@ -211,10 +282,11 @@ assign_op[object]:
 # no special sigil needed at use sites, just NameTarget like any local.
 static_stmt[object]:
     | 'static' n=NAME ty=(":" ann_type)? dflt=("=" assign_expr)? {
-          StaticDecl(n.string, ty[1] if ty else None, dflt[1] if dflt else None) }
+          StaticDecl(n.string, ty[1] if ty else None, dflt[1] if dflt else None,
+                     name_pos=tok_pos(n), LOCATIONS) }
 
 type_expr[object]:
-    | first=NAME rest=("::" NAME)* { TypeExpr([first.string] + [n.string for _, n in rest]) }
+    | first=NAME rest=("::" NAME)* { make_type_expr([first] + tail(rest), LOCATIONS) }
 
 # An annotation position (return type, param/slot/variable type, coroutine
 # input type, ...) accepts a `|`-unioned type per doc/language-spec.md
@@ -232,10 +304,10 @@ ann_type[object]:
 
 with_stmt_simple[object]:
     | 'with' n=NAME ty=(":" ann_type)? "=" e=assign_expr {
-          WithSimple(n.string, ty[1] if ty else None, e) }
+          WithSimple(n.string, ty[1] if ty else None, e, name_pos=tok_pos(n), LOCATIONS) }
 
 with_block[object]:
-    | 'with' ":" NEWLINE INDENT bindings=with_binding_list DEDENT { WithBlock(bindings) }
+    | 'with' ":" NEWLINE INDENT bindings=with_binding_list DEDENT { WithBlock(bindings, LOCATIONS) }
 
 with_binding_list[object]:
     | first=with_binding NEWLINE rest=with_binding_list { [first] + rest }
@@ -243,33 +315,77 @@ with_binding_list[object]:
     | first=with_binding { [first] }
 
 with_binding[object]:
-    | n=NAME ty=(":" ann_type)? "=" e=assign_expr { WithBinding(n.string, ty[1] if ty else None, e) }
+    | n=NAME ty=(":" ann_type)? "=" e=assign_expr { WithBinding(n.string, ty[1] if ty else None, e, name_pos=tok_pos(n), LOCATIONS) }
 
 # ---------------------------------------------------------------------
 # Modules and imports
 # ---------------------------------------------------------------------
 
+# `using` no longer exists as its own keyword - every bulk/aliased/listed
+# import it used to spell is now an `import` form (see doc/language-spec.md's
+# "Modules and Imports"). `as`/`except` are soft keywords (double-quoted,
+# like `on`/`error` in defer_stmt above) - reserved only in these `import`
+# positions, still valid as ordinary identifiers elsewhere. The `except`
+# alternatives must precede the bare `"::" "*"` one: PEG tries alternatives
+# in order and commits to the first match, so trying the wildcard-alone
+# form first would consume `"::" "*"` and leave a trailing `except ...`
+# with nothing to attach it to.
+# `import static a::b` is the same set of forms with one extra promise: the
+# module is run before the importing code that uses it, and its messages
+# join the importing module's message namespace - which is what makes a
+# decorator defined there callable (see doc/language-spec.md's Decorators
+# section, and eval_import). The two spellings share one `import_body` rule
+# so the five forms are written once; `with_pos` then restates the span
+# from the enclosing rule, which is the only thing factoring the `import`
+# keyword out of the body costs.
 import_stmt[object]:
-    | 'import' m=module_path { Import(m) }
+    | 'import' 'static' body=import_body { with_pos(make_static_import(body), LOCATIONS) }
+    | 'import' body=import_body { with_pos(body, LOCATIONS) }
 
-module_path[object]:
-    | first=NAME rest=("::" NAME)* { [first.string] + [n.string for _, n in rest] }
-
-from_import_stmt[object]:
-    | 'from' m=module_path 'import' names=name_list { FromImport(m, names) }
-
-name_list[object]:
-    | first=NAME rest=("," NAME)* { [first.string] + [n.string for _, n in rest] }
+import_body[object]:
+    | m=module_path "::" "*" "except" ex=except_names {
+          Import(names(m), wildcard=True, except_names=names(ex),
+                 path_pos=spans(m), except_names_pos=spans(ex), LOCATIONS) }
+    | m=module_path "::" "*" {
+          Import(names(m), wildcard=True, path_pos=spans(m), LOCATIONS) }
+    | m=module_path "::" "(" items=import_item_list ")" {
+          Import(names(m), items=items, path_pos=spans(m), LOCATIONS) }
+    | m=module_path "as" alias=NAME {
+          Import(names(m), alias=alias.string, path_pos=spans(m),
+                 alias_pos=tok_pos(alias), LOCATIONS) }
+    | m=module_path { Import(names(m), path_pos=spans(m), LOCATIONS) }
 
 # `module_path` is greedily "::"-segmented, so it can't be split back into a
-# "module path" + trailing "::ident" by sequencing alone (the EBNF's
-# `using module_path "::" identifier` form is ambiguous against plain
-# `using module_path` for that reason). Both collapse to one path here;
-# whether the last segment names a module or a single symbol is a binding
-# question for a later pass, not something syntax can decide. (INFERRED)
-using_stmt[object]:
-    | 'using' alias=NAME "=" m=module_path { Using(m, alias.string) }
-    | 'using' m=module_path { Using(m) }
+# "module path" + trailing "::ident" by sequencing alone (a bare
+# `import a::b::c` is ambiguous between "c is a submodule" and "c is a
+# plain symbol exported by a::b" for that same reason). Both collapse to
+# one path here; whether the last segment names a module or a single
+# symbol is a binding question for a later pass (see eval_import), not
+# something syntax can decide. (INFERRED)
+# Yields the raw NAME tokens rather than their text: every consumer wants
+# both the segment names and their individual spans (see names()/spans()).
+module_path[object]:
+    | first=NAME rest=("::" NAME)* { [first] + tail(rest) }
+
+except_names[object]:
+    | "(" ns=name_list ")" { ns }
+    | n=NAME { [n] }
+
+import_item[object]:
+    | n=NAME "as" alias=NAME {
+          ImportItem(n.string, alias.string, name_pos=tok_pos(n),
+                     alias_pos=tok_pos(alias), LOCATIONS) }
+    | n=NAME { ImportItem(n.string, name_pos=tok_pos(n), LOCATIONS) }
+
+import_item_list[object]:
+    | first=import_item rest=("," import_item)* { [first] + tail(rest) }
+
+from_import_stmt[object]:
+    | 'from' m=module_path 'import' ns=name_list {
+          FromImport(names(m), names(ns), path_pos=spans(m), names_pos=spans(ns), LOCATIONS) }
+
+name_list[object]:
+    | first=NAME rest=("," NAME)* { [first] + tail(rest) }
 
 # ---------------------------------------------------------------------
 # Functions
@@ -277,15 +393,17 @@ using_stmt[object]:
 
 fn_def[object]:
     | 'fn' cls=class_target n=NAME "(" params=param_list? ")" ret=("->" ann_type)? body=block {
-          FnDef(cls, n.string, params or [], ret[1] if ret else None, body) }
+          FnDef(names(cls), n.string, params or [], ret[1] if ret else None, body,
+                class_target_pos=spans(cls), name_pos=tok_pos(n), LOCATIONS) }
     | 'fn' n=NAME "(" params=param_list? ")" ret=("->" ann_type)? body=block {
-          FnDef(None, n.string, params or [], ret[1] if ret else None, body) }
+          FnDef(None, n.string, params or [], ret[1] if ret else None, body,
+                name_pos=tok_pos(n), LOCATIONS) }
 
 class_target[object]:
-    | "[" first=NAME rest=("," NAME)* "]" { [first.string] + [n.string for _, n in rest] }
+    | "[" first=NAME rest=("," NAME)* "]" { [first] + tail(rest) }
 
 param_list[object]:
-    | first=param rest=("," param)* { [first] + [p for _, p in rest] }
+    | first=param rest=("," param)* { [first] + tail(rest) }
 
 param[object]:
     | var_positional
@@ -294,10 +412,11 @@ param[object]:
 
 plain_param[object]:
     | n=NAME ty=(":" ann_type)? dflt=("=" assign_expr)? {
-          Param(n.string, ty[1] if ty else None, dflt[1] if dflt else None) }
+          Param(n.string, ty[1] if ty else None, dflt[1] if dflt else None,
+                name_pos=tok_pos(n), LOCATIONS) }
 
-var_positional[object]: "*" n=NAME { VarPositional(n.string) }
-var_keyword[object]: "**" n=NAME { VarKeyword(n.string) }
+var_positional[object]: "*" n=NAME { VarPositional(n.string, name_pos=tok_pos(n), LOCATIONS) }
+var_keyword[object]: "**" n=NAME { VarKeyword(n.string, name_pos=tok_pos(n), LOCATIONS) }
 
 # ---------------------------------------------------------------------
 # Coroutines
@@ -317,9 +436,12 @@ co_params[object]:
 
 co_def[object]:
     | 'co' cls=class_target n=NAME "(" cp=co_params? ")" ret=("->" ann_type)? body=block {
-          CoDef(cls, n.string, cp[1] if cp else [], cp[0] if cp else None, ret[1] if ret else None, body) }
+          CoDef(names(cls), n.string, cp[1] if cp else [], cp[0] if cp else None,
+                ret[1] if ret else None, body,
+                class_target_pos=spans(cls), name_pos=tok_pos(n), LOCATIONS) }
     | 'co' n=NAME "(" cp=co_params? ")" ret=("->" ann_type)? body=block {
-          CoDef(None, n.string, cp[1] if cp else [], cp[0] if cp else None, ret[1] if ret else None, body) }
+          CoDef(None, n.string, cp[1] if cp else [], cp[0] if cp else None,
+                ret[1] if ret else None, body, name_pos=tok_pos(n), LOCATIONS) }
 
 # ---------------------------------------------------------------------
 # Classes
@@ -333,8 +455,9 @@ co_def[object]:
 # so a genuinely empty member list would otherwise make class_def's whole
 # alternative look like a failed match. class_def unwraps with body[0].
 class_def[object]:
-    | 'class' n=NAME "(" bases=arg_list? ")" body=class_block { ClassDef(n.string, bases or [], body[0]) }
-    | 'class' n=NAME body=class_block { ClassDef(n.string, [], body[0]) }
+    | 'class' n=NAME "(" bases=arg_list? ")" body=class_block {
+          ClassDef(n.string, bases or [], body[0], name_pos=tok_pos(n), LOCATIONS) }
+    | 'class' n=NAME body=class_block { ClassDef(n.string, [], body[0], name_pos=tok_pos(n), LOCATIONS) }
 
 class_block[object]:
     | ":" NEWLINE INDENT members=class_member_item* DEDENT { (members,) }
@@ -355,7 +478,8 @@ class_member_item[object]:
 
 slot_def[object]:
     | 'slot' n=NAME ty=(":" ann_type)? dflt=("=" assign_expr)? opts=('with' slot_options)? {
-          SlotDef(n.string, ty[1] if ty else None, dflt[1] if dflt else None, opts[1] if opts else None) }
+          SlotDef(n.string, ty[1] if ty else None, dflt[1] if dflt else None,
+                  opts[1] if opts else None, name_pos=tok_pos(n), LOCATIONS) }
 
 slot_options[object]:
     | ":" NEWLINE INDENT opts=slot_option_list DEDENT { opts }
@@ -370,8 +494,8 @@ slot_option_list[object]:
     | first=slot_option { [first] }
 
 slot_option[object]:
-    | kind=('setter' | 'getter') "=" 'undefined' { SlotOption(kind.string, 'undefined') }
-    | kind=('setter' | 'getter') "=" e=assign_expr { SlotOption(kind.string, e) }
+    | kind=('setter' | 'getter') "=" 'undefined' { SlotOption(kind.string, 'undefined', LOCATIONS) }
+    | kind=('setter' | 'getter') "=" e=assign_expr { SlotOption(kind.string, e, LOCATIONS) }
 
 # No dedicated constructor syntax: `init` is just an ordinary fn_def member
 # (`fn init(...): ...`), promoted to the class's constructor by name alone -
@@ -383,16 +507,16 @@ slot_option[object]:
 # ---------------------------------------------------------------------
 
 expression[object]:
-    | items=expr_list { items[0] if len(items) == 1 else Tuple(items) }
+    | items=expr_list { items[0] if len(items) == 1 else Tuple(items, LOCATIONS) }
 
 expr_list[object]:
-    | first=assign_expr rest=("," assign_expr)* { [first] + [e for _, e in rest] }
+    | first=assign_expr rest=("," assign_expr)* { [first] + tail(rest) }
 
 assign_expr[object]:
-    | 'yield' 'from' e=expression { Yield(e, True) }
-    | 'yield' e=expression { Yield(e) }
-    | 'yield' { Yield(None) }
-    | a=or_expr "?=" b=or_expr { SetIfUnset(a, b) }
+    | 'yield' 'from' e=expression { Yield(e, True, LOCATIONS) }
+    | 'yield' e=expression { Yield(e, LOCATIONS) }
+    | 'yield' { Yield(None, LOCATIONS) }
+    | a=or_expr "?=" b=or_expr { SetIfUnset(a, b, LOCATIONS) }
     | catch_expr
 
 # ---- try / catch ---------------------------------------------------------
@@ -401,16 +525,16 @@ assign_expr[object]:
 # (HANDLER may itself be `return EXPR`). The two compose: `try EXPR catch ...`.
 
 catch_expr[object]:
-    | v=try_operand 'catch' h=catch_handler { Catch(v, h) }
+    | v=try_operand 'catch' h=catch_handler { Catch(v, h, LOCATIONS) }
     | try_operand
 
 try_operand[object]:
-    | 'try' e=or_expr { Try(e) }
+    | 'try' e=or_expr { Try(e, LOCATIONS) }
     | or_expr
 
 catch_handler[object]:
-    | 'return' e=expression { Return(e) }
-    | 'return' { Return(None) }
+    | 'return' e=expression { Return(e, LOCATIONS) }
+    | 'return' { Return(None, LOCATIONS) }
     | or_expr
 
 or_expr[object]:
@@ -420,12 +544,12 @@ and_expr[object]:
     | first=not_expr rest=('and' not_expr)* { fold_left(first, [('and', e) for _, e in rest]) }
 
 not_expr[object]:
-    | 'not' e=not_expr { UnaryOp('not', e) }
+    | 'not' e=not_expr { UnaryOp('not', e, LOCATIONS) }
     | comparison
 
 comparison[object]:
-    | a=bitwise_or_expr 'is' t=type_constraint { TypeCheck(a, t) }
-    | a=bitwise_or_expr op=comp_op b=bitwise_or_expr { BinOp(op, a, b) }
+    | a=bitwise_or_expr 'is' t=type_constraint { TypeCheck(a, t, LOCATIONS) }
+    | a=bitwise_or_expr op=comp_op b=bitwise_or_expr { BinOp(op, a, b, LOCATIONS) }
     | bitwise_or_expr
 
 comp_op[object]:
@@ -440,7 +564,7 @@ comp_op[object]:
 
 # Type constraint: a union of type names, e.g. `int` or `int | float`.
 type_constraint[object]:
-    | first=type_expr rest=("|" type_expr)* { [first] + [t for _, t in rest] }
+    | first=type_expr rest=("|" type_expr)* { [first] + tail(rest) }
 
 bitwise_or_expr[object]:
     | first=bitwise_xor_expr rest=("|" bitwise_xor_expr)* { fold_left(first, [('|', e) for _, e in rest]) }
@@ -457,13 +581,19 @@ additive_expr[object]:
 mult_expr[object]:
     | first=unary_expr rest=(("*" | "/" | "%") unary_expr)* { fold_left(first, [(op.string, e) for op, e in rest]) }
 
+# A decorator in expression position binds exactly as tightly as unary
+# minus does, and nests right-associatively - so `@d f(x) + 1` decorates
+# `f(x)` rather than the sum, and `@a @b x` is `@a (@b x)`. Reaching a
+# looser operator means parenthesising, which in turn means spelling the
+# empty argument list out (see the `decorator` rule): `@d() (a and b)`.
 unary_expr[object]:
-    | "-" e=unary_expr { UnaryOp('neg', e) }
-    | 'not' e=unary_expr { UnaryOp('not', e) }
+    | dec=decorator e=unary_expr { Decorated(dec, e, LOCATIONS) }
+    | "-" e=unary_expr { UnaryOp('neg', e, LOCATIONS) }
+    | 'not' e=unary_expr { UnaryOp('not', e, LOCATIONS) }
     | power_expr
 
 power_expr[object]:
-    | base=postfix_expr "**" exp=unary_expr { BinOp('**', base, exp) }
+    | base=postfix_expr "**" exp=unary_expr { BinOp('**', base, exp, LOCATIONS) }
     | postfix_expr
 
 postfix_expr[object]:
@@ -477,102 +607,120 @@ postfix_op[object]:
     | scope_op
 
 call_op[object]:
-    | "(" args=arg_list? ")" { (lambda node, a=(args or []): Call(node, a)) }
+    | "(" args=arg_list? ")" { (lambda node, a=(args or []): Call(node, a, LOCATIONS)) }
 
 index_op[object]:
-    | "[" e=expression "]" { (lambda node, e=e: Index(node, e)) }
+    | "[" e=expression "]" { (lambda node, e=e: Index(node, e, LOCATIONS)) }
 
 attr_op[object]:
-    | "." n=NAME { (lambda node, name=n.string: Attr(node, name)) }
+    | "." n=NAME { (lambda node, name=n.string, np=tok_pos(n): Attr(node, name, name_pos=np, pos=np)) }
 
 message_op[object]:
-    | "!" n=NAME "(" args=arg_list? ")" { (lambda node, name=n.string, a=(args or []): Message(node, name, a)) }
-    | "!" n=NAME { (lambda node, name=n.string: Message(node, name, None)) }
+    | "!" n=NAME "(" args=arg_list? ")" {
+          (lambda node, name=n.string, a=(args or []), np=tok_pos(n):
+              Message(node, name, a, name_pos=np, LOCATIONS)) }
+    | "!" n=NAME {
+          (lambda node, name=n.string, np=tok_pos(n):
+              Message(node, name, None, name_pos=np, LOCATIONS)) }
 
+# `foo::$ast` is a definition's own tree as a value - `::` because it
+# resolves a name statically in a namespace, where `.` would ask the
+# runtime value (a closure) for an attribute it hasn't got. `$ast` is the
+# first of a reserved `$`-family (`$name`, `$line`, `$doc` are not built),
+# so the token after `$` is matched literally rather than as any NAME:
+# `foo::$whatever` is a syntax error, not a silently different meaning.
 scope_op[object]:
-    | "::" n=NAME { (lambda node, name=n.string: Scope(node, name)) }
+    | "::" "$" "ast" { (lambda node: AstRef(node, "ast", pos=getattr(node, 'pos', None))) }
+    | "::" n=NAME { (lambda node, name=n.string, np=tok_pos(n): Scope(node, name, name_pos=np, pos=np)) }
 
 arg_list[object]:
-    | first=argument rest=("," argument)* { [first] + [a for _, a in rest] }
+    | first=argument rest=("," argument)* { [first] + tail(rest) }
 
 argument[object]:
-    | n=NAME "=" e=assign_expr { Kwarg(n.string, e) }
-    | "**" e=assign_expr { SpreadKw(e) }
-    | "*" e=assign_expr { SpreadPos(e) }
+    | n=NAME "=" e=assign_expr { Kwarg(n.string, e, name_pos=tok_pos(n), LOCATIONS) }
+    | "**" e=assign_expr { SpreadKw(e, LOCATIONS) }
+    | "*" e=assign_expr { SpreadPos(e, LOCATIONS) }
     | e=assign_expr { e }
 
 primary[object]:
     | literal
+    | ellipsis_literal
     | message_tuple_expr
     | paren_or_tuple
     | array_literal
     | pair_literal
     | dict_literal
-    | 'this' { ThisRef() }
-    | 'super' "(" args=arg_list? ")" { SuperCall(args or []) }
-    | 'defined' "(" s=symbol_literal ")" { Defined(s) }
+    | 'this' { ThisRef(LOCATIONS) }
+    | 'super' "(" args=arg_list? ")" { SuperCall(args or [], LOCATIONS) }
+    # `defined('foo)`'s operand is a symbol; it goes through the shared
+    # `literal` rule (symbols no longer have one of their own - see above)
+    # and eval_expr rejects any other literal kind there.
+    | 'defined' "(" s=literal ")" { Defined(s, LOCATIONS) }
     | lambda_expr
     | do_expr
-    | NAME { Name(name.string) }
+    | NAME { Name(name.string, LOCATIONS) }
 
 literal[object]:
-    | NUMBER { Num(number.string) }
-    # A char literal (\a, \newline, ...) and a plain string share the STRING
-    # wire type (see wyrm_tokenizer.py's _scan_char) and are told apart here
-    # by their leading character.
-    | STRING { Char(string.string) if string.string[0] == '\\' else Str(string.string) }
-    | 'true' { Bool(True) }
-    | 'false' { Bool(False) }
-    | symbol_literal
+    | NUMBER { Num(number.string, LOCATIONS) }
+    # Three literal kinds share the STRING wire type - a symbol (`'name`,
+    # `'+`), a character (`\a`, `\newline`) and a plain string - and are
+    # told apart by their leading character. See wyrm_tokenizer.py's
+    # _scan_symbol/_scan_char for why, and actions.make_string_literal for
+    # the split itself.
+    | STRING { make_string_literal(string.string, LOCATIONS) }
+    | 'true' { Bool(True, LOCATIONS) }
+    | 'false' { Bool(False, LOCATIONS) }
 
-symbol_literal[object]:
-    | "'" n=NAME { Symbol(n.string) }
+# `...` - the placeholder. Its own token (see wyrm_tokenizer's MULTI_OPS),
+# so it never has to be reassembled out of three attribute-access dots.
+ellipsis_literal[object]:
+    | "..." { EllipsisExpr(LOCATIONS) }
 
 # ---- collection literals ------------------------------------------------
 
 # List/Array: a mutable, constant-time-indexable sequence.
 array_literal[object]:
-    | "[" items=expr_list? "]" { Array(items or []) }
+    | "[" items=expr_list? "]" { Array(items or [], LOCATIONS) }
 
 # Pair list: $[] empty, $['a] single pair, $[1, 2, 3] proper pair list - a
 # low-level primitive critical to the AST's own representation (see
 # doc/language-spec.md's "Pair List" section). An improper list is built
 # with the `pair` constructor instead of a literal tail, e.g. `pair('a, 'b)`.
 pair_literal[object]:
-    | "$" "[" body=pair_body? "]" { Pair(body or []) }
+    | "$" "[" body=pair_body? "]" { Pair(body or [], LOCATIONS) }
 
 pair_body[object]:
-    | first=assign_expr rest=("," assign_expr)* { [first] + [e for _, e in rest] }
+    | first=assign_expr rest=("," assign_expr)* { [first] + tail(rest) }
 
 paren_or_tuple[object]:
-    | "(" ")" { Tuple([]) }
-    | "(" first=assign_expr "," ")" { make_tuple(first, [], ",") }
+    | "(" ")" { Tuple([], LOCATIONS) }
+    | "(" first=assign_expr "," ")" { make_tuple(first, [], ",", LOCATIONS) }
     | "(" first=assign_expr rest=("," assign_expr)+ trailing=","? ")" {
-          make_tuple(first, [e for _, e in rest], trailing) }
+          make_tuple(first, tail(rest), trailing, LOCATIONS) }
     | "(" e=assign_expr ")" { e }
 
 dict_literal[object]:
-    | "$" "{" body=dict_body? "}" { Dict(body or []) }
+    | "{" body=dict_body? "}" { Dict(body or [], LOCATIONS) }
 
 dict_body[object]:
-    | first=dict_pair rest=("," dict_pair)* { [first] + [p for _, p in rest] }
+    | first=dict_pair rest=("," dict_pair)* { [first] + tail(rest) }
 
 dict_pair[object]:
-    | k=assign_expr ":" v=assign_expr { DictEntry(k, v) }
+    | k=assign_expr ":" v=assign_expr { DictEntry(k, v, LOCATIONS) }
 
 # (canvas, shape) ! draw();  -- message dispatch against a tuple
 message_tuple_expr[object]:
     | "(" items=expr_list ")" "!" n=NAME "(" args=arg_list? ")" {
-          MessageTupleExpr(items, n.string, args or []) }
+          MessageTupleExpr(items, n.string, args or [], name_pos=tok_pos(n), LOCATIONS) }
     | "(" items=expr_list ")" "!" n=NAME {
-          MessageTupleExpr(items, n.string, None) }
+          MessageTupleExpr(items, n.string, None, name_pos=tok_pos(n), LOCATIONS) }
 
 lambda_expr[object]:
-    | 'fn' "(" params=param_list? ")" body=block { Lambda(params or [], body) }
+    | 'fn' "(" params=param_list? ")" body=block { Lambda(params or [], body, LOCATIONS) }
 
 # `do:` opens an anonymous, immediately-executed scope usable as an
 # expression - see doc/language-spec.md's "do" section and Do
 # (wyrm_eval_parse_tree.py's eval_expr runs the body in a fresh child scope
 # and evaluates to the value of the last statement executed).
 do_expr[object]:
-    | 'do' body=block { Do(body) }
+    | 'do' body=block { Do(body, LOCATIONS) }

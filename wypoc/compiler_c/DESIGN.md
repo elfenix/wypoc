@@ -1,195 +1,214 @@
 # `wypoc/compiler_c` design
 
-`wyrm --compile` translates a parsed Wyrm module into C targeting the real
-wyrm VM's calling convention. This is a narrow v1 slice, not a general
-compiler — see each section below for exactly what's supported today, and
-`wypoc/README.md`'s "Known gaps" for how this fits the project's "fail loud,
-not silently wrong" convention (unsupported input raises `CompileError`,
-never silently-wrong C).
+`wyrm --compile` translates a parsed wyrm module into C. This document tracks
+*design state*, not API reference — read the module docstrings for that.
+Update the relevant section here when a submodule's scope changes, especially
+when closing a gap against `wyrm_eval_parse_tree.py` (the PoC interpreter)
+toward feature parity.
 
-This document tracks *design state*, not API reference — read the module
-docstrings for that. Update the relevant section here when a submodule's
-scope changes, especially when closing a gap against
-`wyrm_eval_parse_tree.py` (the POC interpreter) toward feature parity.
+It is a narrow slice, not a general compiler. Unsupported input raises
+`CompileError` naming the construct — never silently-wrong C. That's the same
+"fail loud, not silently wrong" convention the interpreter's own known gaps
+follow (see `wypoc/README.md`).
+
+## Calling convention
+
+A compiled `fn` is **one ordinary C function** in the target interpreter's
+native calling convention — the same shape its own builtins have:
+
+```c
+bool w_{module}_{fn}(wyrm_lang_vm* vm, wyrm_value* args,
+                     wyrm_uword argc, wyrm_value* out);
+```
+
+`false` out means it failed, with the error already recorded on the `vm`;
+otherwise the result goes through `*out`. A module ends with a
+`{MODULE}_BUILTINS[]` table naming each compiled function with its arity, so a
+host installs the module by walking one array rather than keeping a list of
+names in step by hand.
+
+Inside a function body a wyrm local is an **ordinary C variable** of its
+declared type. Boxing into `wyrm_value` happens only at the three boundaries —
+parameters in, call arguments out, the result — so arithmetic compiles to
+arithmetic. Parameters arrive dynamically typed, which is the one place
+compiled code meets values it did not produce, so the prologue checks the
+argument count and each argument's type tag before unboxing.
+
+### What this replaced, and what it bought
+
+The previous target was the raw object-system VM's *resumable* convention
+(`wyrm_exec_fn` + `wyrm_state*`), where a function could not hold a C stack
+frame across a call. Everything expensive about the old design followed from
+that one constraint:
+
+| Old (resumable `wyrm_exec_fn`) | Now |
+|---|---|
+| a graph of `static` chunks per `fn`, one per basic block, with a tree-coordinate naming scheme | one C function |
+| locals in fixed value-stack slots, addressed by index from every chunk | plain C variables |
+| `if`/`while` as `wyrm_state_set_pending` jumps between chunks | C's own `if`/`while` |
+| a non-tail call splits its block in two; a tail call needs a shared `__wyrm_forward_result` continuation | an ordinary C call |
+| a call only where a whole statement or a bare `return` could go | a call anywhere in an expression |
+| no `float` (the old target had no float tag) | `float` alongside `int`/`uint`/`bool` |
+| slot defaults impossible (the old slot API took a type, not a value) | a slot carries a constant default |
+
+The generated C is also readable, which matters more than it sounds: a
+compiler whose output nobody can follow is a compiler whose bugs nobody
+finds. `test_compiler_c.py` runs every fixture through a C compiler with
+`-Wall -Werror` for the same reason.
 
 ## Package layout
 
 | File | Owns | Depends on |
 |---|---|---|
 | `errors.py` | `CompileError`, the `err()` raise helper | nothing |
-| `wtypes.py` | supported-type table (`TYPES`), operator table (`BINOPS`), `ctype()`, `c_ident()`, `is_float_literal()` | `errors` |
-| `handlers.py` | dispatch registries (`STATEMENT_HANDLERS`, `EXPR_HANDLERS`, `LOCAL_COLLECT_HANDLERS`, `TOPLEVEL_HANDLERS`) | nothing at runtime (only `TYPE_CHECKING` imports) |
-| `context.py` | `FnContext` — per-`fn` compiler state + chunk/local bookkeeping | `errors`, `wtypes` |
-| `expressions.py` | `compile_expr()` + one `EXPR_HANDLERS` entry per expression kind | `context`, `errors`, `handlers`, `wtypes` |
-| `native_blocks.py` | `native::block(...)` detection/parsing/splicing (top-level and in-body) | `context`, `errors`, `wtypes` |
-| `calls.py` | callee resolution, args-array construction, non-tail call split, tail-call forwarding | `context`, `errors`, `expressions`, `native_blocks`, `wtypes` |
-| `statements.py` | the chunk-compilation engine (`run_stmts`), `if`/`while`/`return`/`break`/`continue`, plus `STATEMENT_HANDLERS`/`LOCAL_COLLECT_HANDLERS` entries for `Assign`/`ExprStmt` | `calls`, `context`, `errors`, `expressions`, `handlers`, `native_blocks`, `wtypes` |
-| `functions.py` | `compile_fn()` — pass 1 (collect locals) + pass 2 (emit) for one `fn` | `context`, `errors`, `statements`, `wtypes` |
-| `classes.py` | `compile_class()` — one `class` def to its `wyrm_class*` builder function | `errors`, `wtypes` |
-| `module.py` | `compile_module()` — top-level statement walk + final C-source assembly | `calls`, `classes`, `errors`, `functions`, `native_blocks`, `wtypes` |
+| `wtypes.py` | the supported-type table (`TYPES`, each a `WType` knowing its C type, tag, payload field, boxing constructor and zero), the operator tables, `wtype()`, `c_ident()` | `errors` |
+| `handlers.py` | dispatch registries (`STATEMENT_HANDLERS`, `EXPR_HANDLERS`, `LOCAL_COLLECT_HANDLERS`, `TOPLEVEL_HANDLERS`) | nothing at runtime |
+| `context.py` | `FnContext` — one `fn`'s locals, emit buffer, and temp counter | `errors`, `wtypes` |
+| `expressions.py` | `compile_expr()` → a `Value` (C text + wyrm type), one `EXPR_HANDLERS` entry per expression kind, and the short-circuit lowering | `context`, `errors`, `handlers`, `wtypes` |
+| `native_blocks.py` | `native::block(...)` detection/parsing/splicing | `context`, `errors` |
+| `calls.py` | callee resolution and the one call shape (registers the `Call` expression handler) | `context`, `errors`, `expressions`, `handlers`, `native_blocks`, `wtypes` |
+| `statements.py` | the two passes (`collect_locals`, `run_stmts`), control flow, and the `Assign`/`VarDecl`/`ExprStmt` handlers | `calls`, `context`, `errors`, `expressions`, `handlers`, `native_blocks` |
+| `functions.py` | `compile_fn()` — one `fn`'s prologue plus body | `context`, `errors`, `statements`, `wtypes` |
+| `classes.py` | `compile_class()` — one `class` to its builder function | `errors`, `expressions`, `wtypes`, `context` |
+| `module.py` | `compile_module()` — top-level walk, assembly, registration table | `classes`, `errors`, `functions`, `native_blocks`, `wtypes` |
 | `__init__.py` | re-exports `CompileError`, `compile_module` | `errors`, `module` |
 
-The dependency column is deliberately close to a DAG rooted at `errors.py`
-and `wtypes.py` (pure data/helpers) and `handlers.py` (pure dispatch
-mechanism, zero runtime deps) — nothing imports "sideways" except where
-noted below.
+The dependency column is a DAG rooted at `errors.py`/`wtypes.py` (pure
+data/helpers) and `handlers.py` (pure dispatch, zero runtime deps). **Nothing
+imports sideways.** The old design had one deliberate cycle-break —
+`calls.py` needed to recurse back into `statements.run_stmts` to continue a
+block after a call split, and got it passed in as a parameter. Ordinary C
+calls removed the need, so that exception is gone; if a second one appears,
+it's a signal to redraw responsibilities rather than to reintroduce the
+pattern.
 
 ## Dispatch
 
 Four registries live in `handlers.py`, keyed by concrete `wypoc.ast_nodes`
 type:
 
-- `EXPR_HANDLERS` (`expressions.py` owns lookup) — every supported
-  expression kind. This is where feature-parity work will concentrate:
-  each new literal/operator the interpreter supports (strings, arrays,
-  dicts, attribute access, ...) is one more registered handler here, with
-  no change needed to any caller of `compile_expr()`.
-- `LOCAL_COLLECT_HANDLERS` (`statements.py` owns lookup, via
-  `collect_locals_stmt`) — pass-1 "does this statement introduce a typed
-  local" check, for statement kinds that aren't structural control flow.
-- `STATEMENT_HANDLERS` (`statements.py` owns lookup, via `run_stmts`) —
-  pass-2 "plain" statement emission (no chunk-splitting needed).
-- `TOPLEVEL_HANDLERS` — reserved for module-level statement kinds beyond
-  the four `module.py` currently special-cases inline (`import`, `fn`,
-  `class`, top-level `native::block()`). Not populated yet; a future
-  top-level form (e.g. `using`) can self-register here instead of growing
-  `module.py`'s dispatch by hand.
+- `EXPR_HANDLERS` (`expressions.py` owns lookup) — every supported expression
+  kind. This is where feature-parity work concentrates: each new
+  literal/operator is one more registered handler, with no change to any
+  caller of `compile_expr()`. `calls.py` registers `Call` here, which is what
+  keeps expressions.py from having to know about calls at all.
+- `LOCAL_COLLECT_HANDLERS` (`statements.py`, via `collect_locals_stmt`) —
+  pass-1 "does this statement introduce a typed local".
+- `STATEMENT_HANDLERS` (`statements.py`, via `run_stmts`) — pass-2 emission
+  for statements that don't recurse into a nested block.
+- `TOPLEVEL_HANDLERS` — reserved for a module-level statement kind beyond the
+  three `module.py` handles inline (`import`, `fn`/`class`, top-level
+  `native::block()`). Not populated yet.
 
-**Not** dispatch-based, on purpose: `if`/`while`/`return`/`break`/
-`continue`, and non-tail call splitting, are all handled directly inside
-`statements.py`'s `run_stmts`/`collect_locals_stmt`. Each needs plumbing a
-plain `(ctx, node)` handler signature can't carry — `block_path`,
-`remaining_stmts`, `fallthrough` — and this set of control-flow forms is
-expected to stay small and central, unlike expression/statement kinds
-which will grow a lot chasing interpreter parity. Forcing them through the
-registry would mean widening every handler's signature for a case that
-five functions need and the rest never will.
+**Not** dispatch-based, on purpose: `if`/`while`/`return`/`break`/`continue`
+stay inside `run_stmts`. Each recurses into `run_stmts` for its own body,
+which a plain `(ctx, node)` handler signature cannot express, and this set is
+expected to stay small and central unlike the expression and statement kinds
+that grow chasing interpreter parity.
 
-**Breaking the import DAG on purpose:** `calls.compile_call_split` needs to
-recurse back into `statements.run_stmts` once its call-split chunk is
-closed, but `statements.py` is the one that calls *into* `calls.py` (to
-compile a call it finds mid-block) — a direct import either way would be a
-cycle. `run_stmts` is passed in as a plain parameter instead. This is the
-one place the compiler leans on "pass the function you need" rather than
-"import the module you need"; if a second case like this shows up, it's a
-signal `calls.py`'s and `statements.py`'s responsibilities should be
-redrawn rather than adding a second such parameter.
+## Two passes, and why there are still two
 
-## Chunk model (`context.py`, `statements.py`, `functions.py`)
+`collect_locals` walks a body before anything is emitted, so every local's C
+declaration lands at the top of the function. C wants a declaration before
+use, and a `var` inside a loop body must not be redeclared on each iteration.
 
-Every `fn` body is compiled as a graph of small `wyrm_exec_fn` "chunks"
-rather than one C function - one non-static entry point, `w_{module}_
-{fn}`, plus a `static` chunk per basic block: every `if`/`elif`/`else` and
-`while` body is its own chunk, and every non-tail call site splits its
-enclosing block into a chunk before the call and one after. Chunks are
-named `{module}_{fn}_chunk_b{p0}_b{p1}..._{n}`, where the `b*` segments are
-a tree-coordinate path down through nested blocks (empty for the
-function's own top-level block) and `n` is a sequence number among chunks
-sharing that path. This is intentionally not optimized - every block gets
-a real C function and a real state-machine transition, even ones with no
-call in them - in exchange for one uniform code path that already
-generalizes to arbitrary nesting.
+The pass exists only because `--compile` does no type inference: a local needs
+a declared type to have a C representation at all, which is why `x := 1` is
+refused and `var x: int = 1` is not. Inference would let the declaration be
+emitted where the wyrm code puts it, and would retire the pass.
 
-Two kinds of transition connect chunks, both ending in `return
-WYRM_EXEC_CONTINUE;`:
+## Statement-hoisting, and the two places it needs care
 
-- A **same-activation jump** (`wyrm_state_set_pending`) - used for
-  `if`/`elif`/`else` branch dispatch, entering/looping a `while`, and
-  `break`/`continue`. It only swaps which `wyrm_exec_fn` runs next; it
-  never touches the value stack, so looping this way costs nothing per
-  iteration (this is *not* `WYRM_EXEC_TAIL_CALL` + `wyrm_stack_
-  replace_frame_f`, the "proper" trampoline `fiber.c` supports - there's
-  still no worked example of that path to verify frame/stack mechanics
-  against; `set_pending` gets the same "no stack growth" property for
-  same-function control flow via the demonstrated API surface instead).
-- A **real call** (`wyrm_state_call_continue`) - used for an actual call
-  into another compiled `fn`. It pushes a fresh frame for the callee, so
-  the caller's locals must already live *on* the value stack (not in C
-  variables) to survive it: every local gets one fixed slot, established
-  once by the entry chunk and addressed via `wyrm_state_value_n(state,
-  slot)` from every chunk of the function for its entire lifetime,
-  restored to exactly that many slots (`wyrm_state_pop_to_value_count`)
-  right after each call's return value is copied out.
+`compile_expr` may **emit statements before** returning its expression. That's
+what lets a call appear anywhere: the call becomes a statement assigning a
+temporary, and the temporary is the expression. Two constructs are not
+indifferent to when those statements run:
 
-Tail calls (`return f(...)`) compile to `wyrm_state_call_continue` plus a
-shared forwarding continuation (`__wyrm_forward_result`, `calls.py`) that
-relays the callee's result stack-for-stack back to whatever called *this*
-function, so a tail call doesn't grow the caller's own footprint the way
-an ordinary call's "read result, pop back down" sequence does.
+- **Short-circuiting.** `a and f(b)` must not call `f` when `a` is false.
+  `expressions._logical_op` compiles the right operand, notices whether
+  anything got hoisted, and if so rewrites the whole thing as a `bool`
+  temporary plus an `if` — recovering the short circuit that C's `&&` would
+  have given for free on a pure operand.
+- **Loop conditions.** A `while` condition is re-evaluated every iteration, so
+  anything hoisted out of it has to be re-run every iteration:
+  `statements.compile_while_stmt` emits `for (;;) { <hoisted> if (!cond)
+  break; ... }` when there is a hoist, and the plain `while (cond)` when there
+  isn't.
 
-`FnContext` (`context.py`) is the mutable state this whole model shares —
-locals/types, the current chunk's buffered lines/indent, chunk-name
-bookkeeping, and the current loop's break/continue targets — threaded as
-an explicit first argument through every handler instead of living on a
-compiler object's `self`.
+An `elif` is a third case, handled structurally: the chain nests as `else { if
+(...) }` rather than flattening to `else if`, so a later condition's hoisted
+statements can't run before the earlier branch was ruled out. That's also
+exactly what an `elif` means.
 
 ## Classes (`classes.py`)
 
-`class` defs compile to a plain C function (not a `wyrm_exec_fn`, no chunk
-model involved — construction is one-shot, not called from the VM's
-dispatch loop): `w_{module}_{class}(wyrm_context* context, wyrm_class**
-out)`, following the same `w_{module}_{name}` naming `fn` entries use.
-Body is a straight-line `wyrm_class_new` + one `wyrm_machine_insert_symbol`
-+ `wyrm_class_add_slot_f` pair per slot.
+A `class` compiles to a plain builder function (not a compiled `fn` — class
+construction is one-shot):
 
-Supported today: bare typed slots (`int`/`bool`, same `wtypes.TYPES` table
-`fn` locals use — both map to `WYRM_TYPE_TAG_WORD`, since the underlying
-`wyrm_type_tag` enum has no separate bool tag either). **Not** supported
-(raises `CompileError`): base classes/inheritance, slot defaults, slot
-options (setter/getter/etc.), `init` (constructors), and methods declared
-inside the class body (`fn [ClassName] ...` methods are a separate
-top-level construct already rejected by `functions.compile_fn`'s
-`class_target` check — they aren't part of a class's own body syntax).
+```c
+bool w_{module}_{class}(wyrm_lang_vm* vm, wyrm_patch_class** out);
+```
 
-Closing this gap toward interpreter parity means: constructors (an actual
-`w_{module}_{class}_new` that populates slot values, presumably taking the
-slot values as params once defaults are figured out), inheritance (walking
-`super` to inherit slots, matching `wyrm_class`'s `super` field), and slot
-defaults/options (need an evaluated-at-construction-time story, since
-`--compile` today only evaluates expressions inside a `fn` body's
-execution, not at class-definition time).
+Straight-line: allocate the class, intern its name, give it a method
+dictionary, then one interned symbol plus `add_slot` per `slot`. The slot API
+takes a default **value**, so a declared default compiles; a slot with none
+gets its type's zero value, matching the interpreter's own `_zero_value`.
+
+A default must be a *constant*. It is evaluated when the class is built, with
+no function body around it, so there is nowhere for a name or a call to
+resolve — both are refused by name.
+
+**Not** supported: base classes/inheritance, slot options (setter/getter), and
+methods declared in the class body. A method is a message, and message
+definitions (`fn [Cls] ...`) are a separate gap.
 
 ## `native::block(...)` (`native_blocks.py`)
 
 The escape hatch from `doc/language-spec.md`'s "Native Code" section:
-`native::block(portion, inputs, outputs, code)` where all four arguments
-must be literals. Two call sites, both routed through
-`parse_native_block_args`:
+`native::block(portion, inputs, outputs, code)`, all four arguments literals.
+Two call sites:
 
 - **Top-level** (`module.py`): appends `code` verbatim into one of the
-  module's `HEADER`/`TYPES`/`CONSTANTS`/`PROTOS`/`FUNCTIONS` sections.
-  Must have empty `inputs`/`outputs` lists.
-- **In a `fn` body** (`compile_native_block`, dispatched from
-  `statements._compile_expr_stmt`): splices `code` into the current chunk
-  inside a private nested C scope, copying named `inputs` in and named
-  `outputs` back out to their slots so the spliced code can use bare
-  symbol names.
+  module's `HEADER`/`TYPES`/`CONSTANTS`/`PROTOS`/`FUNCTIONS` sections. Must
+  have empty `inputs`/`outputs`.
+- **In a `fn` body** (`compile_native_block`): splices `code` into the body
+  inside a scope of its own. Under this convention a wyrm local *is* a C local
+  of the same name, so there is no copy-in/copy-out marshalling — the declared
+  `inputs`/`outputs` are checked (naming an unknown local is an error rather
+  than C the compiler would reject far from its cause) and then emitted as a
+  comment recording what the block touches.
 
 ## Known gaps / where parity work lands
 
-Tracking against `wyrm_eval_parse_tree.py` (the POC interpreter), in
-roughly the order a "closes the most ground" heuristic would suggest:
+Tracking against `wyrm_eval_parse_tree.py`, roughly in "closes the most
+ground" order:
 
-- **Expressions** (`expressions.py`): only `Num`/`Bool`/`Name`/`UnaryOp`/
-  `BinOp` are registered. Missing: `Str`, `Char`, `Symbol`, `Array`,
-  `Pair`, `Tuple`, `Dict`, `Attr`, `Index`, `Message`, `Scope`,
-  `Defined`, `Lambda`, `SetIfUnset`, float literals (blocked on the VM
-  having no `WYRM_TYPE_TAG_FLOAT` yet, not a compiler gap). Each is one
-  `EXPR_HANDLERS.register(...)` entry away.
-- **Statements**: `For` loops, `Using`, `With`/`WithBlock` are entirely
-  unhandled (`run_stmts`/`collect_locals_stmt` raise `CompileError` on
-  anything without a case). `For` in particular will need an iteration
-  protocol decision before it can lower to the chunk model.
-- **Types**: only `int`/`bool` (`wtypes.TYPES`). `str` support depends on
-  `wyrm_string`/GC-object handling in generated C, which the chunk model's
-  "locals live in fixed value-stack slots" scheme hasn't been extended to
-  yet (`wyrm_value` slots today only carry a `wyrm_word`).
-- **Classes** (`classes.py`): see above — constructors, inheritance, slot
-  defaults/options.
-- **Calls** (`calls.py`): no support for calling into an *uncompiled*
-  function (e.g. a corelib/interpreted one), keyword/spread args, or
-  multi-value returns.
-- **Modules**: `--compile` only ever compiles a single file (`import
-  native` opt-in, no other imports); the interpreter's multi-file
-  `mod::sub::leaf` resolution (`wyrm_modules.py`) has no compiled
-  counterpart.
+- **Installation needs one hook on the other side.** The generated
+  `{MODULE}_BUILTINS[]` table is the interpreter's own builtin-row type, but
+  the interpreter has no public way to *append* to its builtin table — that's
+  a change in its repository, not this one. It is the only part of the output
+  that needs anything the interpreter doesn't already expose; everything else
+  compiles against what is there.
+- **Expressions**: `Num` (int and float), `Bool`, `Name`, `UnaryOp`, `BinOp`,
+  `Call` are registered. Missing: `Str`, `Char`, `Symbol`, `Array`, `Pair`,
+  `Tuple`, `Dict`, `Attr`, `Index`, `Message`, `Scope`, `Defined`, `Lambda`,
+  `SetIfUnset`. The collection and string kinds all need the same thing first:
+  a story for GC-managed values in generated code, since a `wyrm_value`
+  holding a heap object has to be reachable by the collector. The scalar-only
+  types sidestep that entirely, which is why they came first.
+- **Statements**: `For`, `WithBlock`/`WithSimple`, `Defer`, `Try`/`Catch`, and
+  `StaticDecl` are unhandled. `For` needs an iteration-protocol decision;
+  `Defer` maps naturally onto a C cleanup label, `Try`/`Catch` onto the
+  `false`-returning convention this backend already has, so those two are the
+  cheapest of the set.
+- **Types**: `int`/`uint`/`bool`/`float`. `str` needs the GC story above.
+- **Calls**: only to another compiled function in the same module. Calling
+  *into* the interpreter (an uncompiled or corelib function) would need a
+  by-name lookup at call time; keyword/spread arguments and multi-value
+  returns are separate gaps.
+- **Messages**: `fn [Cls] name(...)` is rejected outright. A message is a
+  generic function with overload resolution, so compiling one means either
+  emitting the resolution or registering an overload with the interpreter's
+  message table — a design decision, not just more handlers.
+- **Modules**: one file at a time (`import native` only). The interpreter's
+  `mod::sub::leaf` resolution has no compiled counterpart.

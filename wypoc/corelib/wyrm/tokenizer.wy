@@ -4,7 +4,7 @@
 # 'ENDMARKER, 'CHAR, 'ERROR) rather than an imported constant table, the way
 # 'EOF below is already used as this file's own end-of-input sentinel.
 import std::io;
-using std::io;
+import std::io::*;
 
 
 SINGLE_OPS := (\(, \), \[, \], \{, \}, \., \,, \:, \+, \-, \*, \/, \%, \&, \|, \^, \<, \>, \=, \!, \$, \')

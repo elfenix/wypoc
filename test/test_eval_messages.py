@@ -5,7 +5,7 @@ most-specific-wins overload resolution (samples/eval_messages.wy)."""
 import pytest
 
 from conftest import eval_sample
-from wypoc.wyrm_eval_parse_tree import BoundMessage, Method, dispatch_message
+from wypoc.wyrm_eval_parse_tree import BoundMessage, Method, dispatch_message, message_table
 
 
 @pytest.fixture(scope="module")
@@ -14,10 +14,11 @@ def ctx():
 
 
 def test_area_overloads_registered(ctx):
-    area = ctx["area"].value
+    area = message_table(ctx)["area"]
     assert isinstance(area, Method) and len(area.overloads) == 3, (
         "class-body area() methods register a 3-overload 'area' Method at module scope"
     )
+    assert "area" not in ctx, "messages live in their own namespace, never as a plain ctx binding"
 
 
 def test_area_dispatch(ctx):
@@ -30,9 +31,13 @@ def test_area_dispatch(ctx):
 
 
 def test_describe_promotion(ctx):
-    describe = ctx["describe"].value
+    describe = message_table(ctx)["describe"]
     assert isinstance(describe, Method) and len(describe.overloads) == 2, (
         "a plain fn + a later fn [Circle] promotes 'describe' into a 2-overload Method"
+    )
+    assert isinstance(ctx["describe"].value, Method) is False, (
+        "promotion copies the plain fn into the message's wildcard overload; "
+        "the original 'describe' variable binding is untouched, in its own namespace"
     )
     assert ctx["circle_desc"].value == "a circle", "c!describe() prefers the Circle-specific overload"
     assert ctx["square_desc"].value == "generic thing", (

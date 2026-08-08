@@ -39,8 +39,13 @@ fi
 # root license in rather than duplicating it (this copy is gitignored).
 cp ../../LICENSE ./LICENSE
 
+# NOT --no-dependencies: `out/extension.js` requires vscode-languageclient at
+# load time, so it has to ship inside the .vsix. Without it the extension
+# fails to activate with MODULE_NOT_FOUND and every command it contributes
+# reports "command not found" - the manifest lists them, but the module that
+# registers them never loaded.
 echo "==> packaging (npm run compile + vsce package)"
-npx --yes @vscode/vsce package --no-dependencies --allow-missing-repository
+npx --yes @vscode/vsce package --allow-missing-repository
 
 vsix=$(ls -t wyrm-lang-*.vsix | head -1)
 echo "==> built $vsix"

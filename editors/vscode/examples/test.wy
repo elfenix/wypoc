@@ -2,8 +2,8 @@
 
 import mod::baz::bar
 from math import sin
-using math
-using sin = math::sin;
+import math::*
+import math::sin as sin;
 
 with speed_of_light: float = 299_792_458.0;
 
@@ -25,8 +25,8 @@ improper := pair(1, 2)
 tup := 1, 2, 3, 4
 single := (1,)
 empty := ()
-tbl := ${ "Name": 15 }
-empty_dict := ${}
+tbl := { "Name": 15 }
+empty_dict := {}
 
 sym := 'name
 hex_val := 0xdead

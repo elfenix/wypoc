@@ -1,13 +1,13 @@
 """native::block(...) escape hatch from doc/language-spec.md's "Native Code"
 section: splices raw C into a module's HEADER/TYPES/CONSTANTS/PROTOS/
-FUNCTIONS sections at the top level, or inline into a function body (with
-copy-in/copy-out locals) as a statement."""
+FUNCTIONS sections at the top level, or inline into a function body - where
+it reads and writes the enclosing function's locals by name - as a
+statement."""
 from wypoc import ast_nodes as ast
 from wypoc.wyrm_eval_parse_tree import eval_string_literal
 
 from .context import FnContext
 from .errors import err
-from .wtypes import TYPES
 
 NATIVE_PORTIONS = ("HEADER", "TYPES", "CONSTANTS", "PROTOS", "FUNCTIONS")
 
@@ -42,26 +42,29 @@ def parse_native_block_args(call: ast.Call):
 
 
 def compile_native_block(ctx: FnContext, call: ast.Call):
-    """Splice a `native::block(...)` call into the currently-open chunk.
-    Copy-in/copy-out through a private nested scope, so the spliced C can
-    use the bare symbol names (matching the spec's worked example)."""
+    """Splice a `native::block(...)` call into the function body.
+
+    The spliced C reads and writes the named locals by their bare names,
+    which is what the spec's worked example does. Under this calling
+    convention a wyrm local *is* a C local of the same name, so that needs no
+    copy-in/copy-out marshalling at all - the declared input/output lists are
+    checked (naming an unknown local is an error rather than C the compiler
+    would reject far from its cause) and then serve as documentation of what
+    the block touches. The block still gets a scope of its own, so a
+    temporary it declares can't collide with anything around it."""
     _portion, inputs, outputs, body = parse_native_block_args(call)
     for name in inputs + outputs:
         if name not in ctx.locals:
             err(f"native::block() references unknown local/param '{name}'", call)
 
+    if inputs or outputs:
+        ctx.emit(f"/* native: reads {_names(inputs)}, writes {_names(outputs)} */")
     ctx.emit("{")
     ctx.indent += 1
-    for name in inputs:
-        ctype_, _tag, field_ = TYPES[ctx.locals[name]]
-        idx = ctx.local_index[name]
-        ctx.emit(f"{ctype_} {name} = ({ctype_})wyrm_state_value_n(state, {idx})->data.{field_};")
-    for name in outputs:
-        ctype_, _tag, _field = TYPES[ctx.locals[name]]
-        ctx.emit(f"{ctype_} {name};")
-    for line in body.splitlines():
-        ctx.emit(line)
-    for name in outputs:
-        ctx.emit_local_assign(name, name)
+    ctx.emit_block(body)
     ctx.indent -= 1
     ctx.emit("}")
+
+
+def _names(names) -> str:
+    return ", ".join(names) if names else "nothing"

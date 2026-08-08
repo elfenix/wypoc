@@ -1,6 +1,8 @@
 (* ==========================================================================
    Wyrm Language Grammar (EBNF)
-   Derived from doc/language-spec.md.
+   Derived from doc/language-spec.md. Design rationale for the
+   less-obvious choices here lives in doc/grammar-notes.md - keep this
+   file itself terse; that's the point of it.
 
    Notation: ISO-ish EBNF.
      ::=   defines
@@ -11,29 +13,10 @@
      "x"       literal terminal
      A - B     A excluding B
 
-   Several spec sections are marked FIXME/TODO/ugly in language-spec.md
-   (constructor syntax, several block forms). Rules for those areas are
-   marked (INFERRED) below where the grammar fills a gap not made fully
-   explicit by the prose, and should be revisited as the spec firms up.
-
-   Layout: Wyrm follows Haskell's layout rule (like Python's off-side
-   rule) for indentation-delimited blocks, but also allows explicit
-   braces as an alternative block delimiter. As is conventional for such
-   grammars, the lexer is assumed to inject synthetic INDENT / DEDENT
-   tokens and to treat NEWLINE as a statement separator; grammar rules
-   below consume these virtual tokens directly rather than re-deriving
-   indentation from raw whitespace.
-
-   Status: this file is the intended PRODUCTION grammar - the target for
-   a future real tokenizer/parser. wypoc/wyrm.gram (the pegen PEG grammar
-   actually driving this proof-of-concept's hand-rolled tokenizer) is
-   derived from it but is not required to match it exactly on every edge
-   case; the POC's job is to bootstrap toward this grammar, not to be a
-   byte-for-byte implementation of it. Where the two diverge, that's
-   acceptable as long as the annotated samples under wypoc/samples/
-   (test/test_grammar.py) still parse as intended - divergences worth
-   preserving should be noted in wyrm.gram's own "deviations" header, but
-   the EBNF here is not obligated to track every POC tokenizer quirk.
+   Status: intended PRODUCTION grammar. wypoc/wyrm.gram (pegen) derives
+   from it but may diverge on tokenizer-level edge cases; the
+   compatibility bar is wypoc/samples/*.wy still parsing, not
+   line-for-line equivalence.
    ========================================================================= *)
 
 
@@ -57,14 +40,28 @@ float_literal   ::= [ "-" ] , digit , { digit | "_" } , "." , digit , { digit | 
                      ( "e" | "E" ) , [ "+" | "-" ] , digit , { digit } ;
 
 bool_literal    ::= "true" | "false" ;
+nil_literal     ::= "nil" ;
 
 identifier      ::= letter , { letter | digit } ;
 
-symbol_literal  ::= "'" , identifier ;
-                  (* Implementations must recognize at least 31 significant
-                     characters of the identifier; excess may be ignored. *)
+symbol_literal  ::= "'" , ( identifier | operator_symbol ) ;
+                  (* At least 31 significant characters recognized.
+                     A symbol's name may be a reserved word ('fn, 'return,
+                     'if): they are node kinds in the canonical s-expression
+                     format, so the literal is lexed whole rather than as
+                     "'" followed by a name. *)
 
-(* Strings: normal, multiline (triple-quoted), and raw (C++-style delimited). *)
+(* An operator, written as a symbol. The s-expression format spells a
+   binop's operator as one, so a tree cannot be built from scratch without
+   these; nothing else in the grammar puts an operator after a quote, so
+   there is no ambiguity to trade for it. *)
+operator_symbol ::= "+" | "-" | "*" | "/" | "%" | "**"
+                   | "&" | "|" | "^"
+                   | "==" | "!=" | "<" | ">" | "<=" | ">=" | "<=>" ;
+
+ellipsis_literal
+                ::= "..." ;                (* the placeholder / template hole *)
+
 string_literal  ::= normal_string | multiline_string | raw_string ;
 
 normal_string   ::= '"' , { string_char } , '"' ;
@@ -72,10 +69,7 @@ string_char     ::= any_char - ( '"' | "\" | newline ) | escape_sequence ;
 escape_sequence ::= "\" , any_char ;
 
 multiline_string
-                ::= '"""' , { any_char } , '""' ;
-                  (* Opens with three double quotes, closes with two;
-                     per spec example the string body may itself embed a
-                     bare double quote. *)
+                ::= '"""' , { any_char } , '"""' ;
 
 raw_string      ::= 'R"(' , { any_char } , ')"'
                    | 'R"' , delim_tag , "(" , { any_char } , ")" , delim_tag , '"' ;
@@ -94,153 +88,79 @@ DEDENT          ::= (* virtual token: fall in layout column *) ;
 program         ::= { top_level_stmt } ;
 
 top_level_stmt  ::= import_stmt
-                   | using_stmt
-                   | statement ;
+                   | stmt_line ;
 
 
 (* ---------------------------------------------------------------------
    2. Blocks and statements
    --------------------------------------------------------------------- *)
 
-(* A block is either an indentation-delimited suite, a brace-delimited
-   suite, or (for one-line forms) a single simple statement. Statements
-   within a block are separated by NEWLINE or ";", consistent with:
-       "Statements may be terminated by newline, semicolon, or a brace
-        matching the block." *)
-
 block           ::= ":" , NEWLINE , INDENT , stmt_list , DEDENT
-                   | ":" , simple_stmt                       (* one-liner, e.g. `pass` *)
+                   | ":" , stmt_line                          (* one-liner *)
                    | "{" , stmt_list , "}" ;
 
-stmt_list       ::= statement , { stmt_sep , statement } , [ stmt_sep ] ;
+stmt_list       ::= stmt_line , { stmt_sep , stmt_line } , [ stmt_sep ] ;
 stmt_sep        ::= NEWLINE | ";" ;
 
-statement       ::= simple_stmt | compound_stmt ;
+(* Everything is an expression - see doc/grammar-notes.md. *)
+(* A decorator in front of an expression statement is part of the
+   expression (see unary_expr), not of the statement; only a definition
+   needs the statement-level form, where the tree must stay a definition so
+   the rewritten name still binds. *)
+stmt_line       ::= { decorator } ,
+                     ( expr_stmt
+                     | var_stmt
+                     | assignment_stmt
+                     | static_stmt
+                     | with_stmt_simple
+                     | import_stmt
+                     | with_block
+                     | defer_stmt
+                     | fn_def
+                     | co_def
+                     | class_def
+                     | slot_def ) ;
 
-simple_stmt     ::= expr_stmt
-                   | var_stmt
-                   | assignment_stmt
-                   | static_stmt
-                   | with_stmt_simple
-                   | import_stmt
-                   | using_stmt
-                   | return_stmt
-                   | yield_stmt
-                   | pass_stmt
-                   | continue_stmt
-                   | break_stmt ;
+(* `@name(args) X` hands X's tree to `name` and compiles whatever tree
+   `name` answers instead - see doc/decorators.md and doc/sexpr-spec.md.
 
-compound_stmt   ::= if_stmt
-                   | while_stmt
-                   | for_stmt
-                   | fn_def
-                   | co_def
-                   | class_def
-                   | with_block
-                   | defer_stmt ;
+   The name is a single *unqualified* identifier: it becomes a message
+   selector (the decorator is `fn [TreeBase] name(...)`), and a selector is
+   never a path, so `@a::b X` is a syntax error rather than a second meaning
+   for `::`.
 
-pass_stmt       ::= "pass" ;
+   The argument list is optional, but parens written straight after the name
+   are always it - `@d (expr)` reads `(expr)` as the arguments and then
+   finds no operand, so parenthesising one means spelling the empty list
+   out: `@d() (expr)`. *)
+decorator       ::= "@" , identifier , [ "(" , [ arg_list ] , ")" ] , [ NEWLINE ] ;
 
 expr_stmt       ::= expression ;
 
-return_stmt     ::= "return" , [ expression ] ;
-
-yield_stmt      ::= "yield" , "from" , expression
-                   | "yield" , [ expression ] ;
-
-continue_stmt   ::= "continue" ;
-
-break_stmt      ::= "break" ;
-
-
-(* ---- defer statement ----------------------------------------------------
-   `on` / `error` are only reserved as part of this literal construct - they
-   remain ordinary identifiers everywhere else (e.g. a slot named `on`). *)
-
-defer_stmt      ::= "defer" , [ "on" , "error" ] , block ;
-
-
-(* ---- if statement ----------------------------------------------------- *)
+defer_stmt      ::= "defer" , [ "on" , type_constraint ] , block ;
 
 if_stmt         ::= "if" , expression , block ,
                      { "elif" , expression , block } ,
                      [ "else" , block ] ;
-
-
-(* ---- while / for statements --------------------------------------------
-   while: `continue`/`break` inside the body, per spec example.
-   for: Python-style for/else - the `else` block runs only if the loop
-   completes without hitting `break`. *)
 
 while_stmt      ::= "while" , expression , block ;
 
 for_stmt        ::= "for" , identifier , "in" , expression , block ,
                      [ "else" , block ] ;
 
-
-(* ---- variable declarations and assignment ------------------------------
-   Declaration (introduces a fresh binding in the current scope; the name
-   must not already be declared in that same scope, though it may shadow a
-   name visible from an enclosing scope for the duration of the inner one):
-
-       var foo: int = 5      (* canonical: explicit type, initial value *)
-       var foo = 5           (* inferred type *)
-       var foo: int          (* forward declaration: foo is Unset (error)
-                                 until first assignment *)
-       var a: int, b: str = f()   (* multi-target, each with its own type *)
-       foo := 5               (* shorthand for `var foo = 5` *)
-       a, b := f()             (* shorthand multi-declare, inferred types;
-                                   every target must be freshly declared *)
-
-   Assignment (the target(s) must already be declared - assigning to an
-   undeclared name is a compile-time error):
-
-       foo = 5
-       a, b = b, a             (* swap *)
-
-   Set-if-unset: short-circuits (RHS not evaluated) if the target's current
-   value is not an error; otherwise evaluates the RHS and assigns it. The
-   target must already be declared (e.g. via a forward `var`, or `static`).
-
-       foo ?= 5
-*)
-
 var_stmt        ::= "var" , var_target , { "," , var_target } , [ "=" , expr_list ] ;
 var_target      ::= identifier , [ ":" , type_constraint ] ;
 
 assignment_stmt ::= target_list , assign_op , expr_list ;
-
 target_list     ::= target , { "," , target } ;
-(* A target may carry trailing `[ expression ]` suffixes - `arr[i] = x`,
-   `grid[i][j] = x`, `this.cells[i] = x` - mutating the array/dict in
-   place rather than only ever rebuilding it. Only a plain identifier
-   target is legal with the `:=` assign_op (it declares a fresh name, so
-   there is nothing to index/attribute into yet). *)
 target          ::= ( identifier | attr_ref ) , { "[" , expression , "]" } ;
-
 assign_op       ::= "=" | "?=" | ":=" ;
 
-(* `static` declares a binding tied to the lexical definition (the
-   enclosing fn or class) rather than the current dynamic call/instance -
-   see language-spec.md's "Variables" section. Usable as a statement
-   inside a fn body (lazily initialized on first call) or directly inside
-   a class body (eagerly initialized when the class is defined). After
-   declaration the name is referenced/assigned like any ordinary target -
-   no special sigil or target form is needed at the use site. *)
 static_stmt     ::= "static" , identifier , [ ":" , type_constraint ] , [ "=" , expression ] ;
 
 type_expr       ::= identifier , { "::" , identifier } ;   (* e.g. mod::Type *)
 
-
-(* ---- immutable bindings ------------------------------------------------
-   with speed_of_light: float = 299_792_458.0;
-   with:
-       speed_of_light: float = 299_792_458.0;
-       gravitational_constant = 6.6743e-11;
-*)
-
-with_stmt_simple
-                ::= "with" , identifier , [ ":" , type_constraint ] , "=" , expression ;
+with_stmt_simple ::= "with" , with_binding ;
 
 with_block      ::= "with" , ":" , NEWLINE , INDENT ,
                      { with_binding , stmt_sep } ,
@@ -252,18 +172,28 @@ with_binding    ::= identifier , [ ":" , type_constraint ] , "=" , expression ;
    3. Modules and imports
    --------------------------------------------------------------------- *)
 
-import_stmt     ::= "import" , module_path ;
+(* `import static a::b` promises the module is run before the importing
+   code that uses it, and its messages join the importing module's message
+   namespace - which is what makes a decorator defined there callable, since
+   a decorator is reached as a selector rather than through the module
+   binding. It combines with every form below. *)
+import_stmt     ::= "import" , [ "static" ] , import_body ;
+
+import_body     ::= module_path , [ "as" , identifier ]
+                   | module_path , "::" , "(" , import_item_list , ")"
+                   | module_path , "::" , "*" , [ "except" , except_names ] ;
+
+import_item_list
+                ::= import_item , { "," , import_item } ;
+
+import_item     ::= identifier , [ "as" , identifier ] ;
+
+except_names    ::= identifier
+                   | "(" , name_list , ")" ;
 
 module_path     ::= identifier , { "::" , identifier } ;
 
-from_import_stmt
-                ::= "from" , module_path , "import" , name_list ;
-
 name_list       ::= identifier , { "," , identifier } ;
-
-using_stmt      ::= "using" , module_path
-                   | "using" , module_path , "::" , identifier
-                   | "using" , identifier , "=" , module_path , "::" , identifier ;
 
 
 (* ---------------------------------------------------------------------
@@ -273,21 +203,13 @@ using_stmt      ::= "using" , module_path
 fn_def          ::= "fn" , [ class_target ] , identifier , "(" , [ param_list ] , ")" ,
                      [ "->" , type_constraint ] , block ;
 
-(* `fn [type1, type2, ...] name(...)`: defines a message/method external to
-   a class body, dispatched on a tuple of that many receivers - see the
-   Messages section of language-spec.md for multi-dispatch semantics. *)
-class_target    ::= "[" , identifier , { "," , identifier } , "]" ;
+class_target    ::= "[" , identifier , { "," , identifier } , "]" ;   (* multi-dispatch receivers *)
 
 param_list      ::= param , { "," , param } ;
-
-param           ::= var_positional
-                   | var_keyword
-                   | plain_param ;
-
+param           ::= var_positional | var_keyword | plain_param ;
 plain_param     ::= identifier , [ ":" , type_constraint ] , [ "=" , expression ] ;
-
-var_positional  ::= "*" , identifier ;          (* collects extra positional args *)
-var_keyword     ::= "**" , identifier ;         (* collects extra keyword args into dict *)
+var_positional  ::= "*" , identifier ;
+var_keyword     ::= "**" , identifier ;
 
 
 (* ---------------------------------------------------------------------
@@ -297,12 +219,7 @@ var_keyword     ::= "**" , identifier ;         (* collects extra keyword args i
 co_def          ::= "co" , [ class_target ] , identifier , "(" , [ co_param_list ] , ")" ,
                      [ "->" , type_constraint ] , block ;
 
-(* The coroutine input type, if given, is a leading marker in the parameter
-   list rather than a trailing arrow after the parens - e.g.
-   `co f(<- str, x: int, y: int) -> int:`. It is not itself a bindable
-   parameter (no name, never supplied by the caller), only the type of
-   whatever value is sent in through each `yield` expression. *)
-co_param_list   ::= "<-" , type_constraint , [ "," , param_list ]
+co_param_list   ::= "<-" , type_constraint , [ "," , param_list ]   (* send-type, not a param *)
                    | param_list ;
 
 
@@ -310,15 +227,7 @@ co_param_list   ::= "<-" , type_constraint , [ "," , param_list ]
    6. Classes
    --------------------------------------------------------------------- *)
 
-class_def       ::= "class" , identifier , [ "(" , [ arg_list ] , ")" ] , class_block ;
-
-class_block     ::= ":" , NEWLINE , INDENT , { class_member } , DEDENT
-                   | "{" , { class_member , [ ";" ] } , "}" ;
-
-class_member    ::= slot_def
-                   | static_stmt
-                   | fn_def
-                   | co_def ;
+class_def       ::= "class" , identifier , [ "(" , [ arg_list ] , ")" ] , block ;
 
 slot_def        ::= "slot" , identifier , [ ":" , type_constraint ] ,
                      [ "=" , expression ] , [ "with" , slot_options ] ;
@@ -328,50 +237,27 @@ slot_options    ::= ":" , NEWLINE , INDENT , { slot_option , stmt_sep } , DEDENT
 
 slot_option     ::= ( "setter" | "getter" ) , "=" , ( expression | "undefined" ) ;
 
-(* No dedicated constructor syntax: the constructor is simply a method
-   named `init`, defined with ordinary fn_def syntax (`fn init(...): ...`)
-   inside the class body. Slots without an explicit default are
-   zero-valued (nil ref / 0 / false, per type) before `init` runs - see
-   language-spec.md's "Basic Classes" section. *)
-
 
 (* ---------------------------------------------------------------------
    7. Expressions
    --------------------------------------------------------------------- *)
 
-(* Precedence, loosest to tightest (per "Numerical operators follow same
-   rules as C/C++/Python" plus the documented tuple/boolean/comparison
-   layering): *)
-
 expression      ::= tuple_expr ;
-
 expr_list       ::= expression , { "," , expression } ;
+tuple_expr      ::= assign_expr , { "," , assign_expr } ;        (* comma = tuple *)
 
-tuple_expr      ::= assign_expr , { "," , assign_expr } ;   (* comma = tuple, lowest precedence *)
-
-assign_expr     ::= set_if_unset_expr                       (* "?=" also usable in expr position *)
-                   | catch_expr ;
-
+assign_expr     ::= set_if_unset_expr | catch_expr ;
 set_if_unset_expr
                 ::= or_expr , [ "?=" , or_expr ] ;
 
-(* ---- try / catch --------------------------------------------------------
-   `try EXPR` returns immediately from the enclosing function if EXPR's
-   value is an error. `EXPR catch HANDLER` substitutes HANDLER's value
-   instead when EXPR is an error; HANDLER may itself be `return EXPR`. The
-   two compose: `try EXPR catch HANDLER`. *)
-
-catch_expr      ::= try_operand , [ "catch" , catch_handler ] ;
+catch_expr      ::= try_operand , [ "catch" , or_expr ] ;
 try_operand     ::= [ "try" ] , or_expr ;
-catch_handler   ::= "return" , [ expression ]
-                   | or_expr ;
 
 or_expr         ::= and_expr , { "or" , and_expr } ;
 and_expr        ::= not_expr , { "and" , not_expr } ;
 not_expr        ::= "not" , not_expr
                    | comparison ;
 
-(* `a is int` / `b is int | float` - type checking, see type_constraint. *)
 comparison      ::= bitwise_or_expr , "is" , type_constraint
                    | bitwise_or_expr , [ comp_op , bitwise_or_expr ] ;
 comp_op         ::= "<=" | ">=" | "<=>" | "<" | ">" | "==" | "!=" | "in" ;
@@ -385,24 +271,30 @@ bitwise_and_expr ::= additive_expr , { "&" , additive_expr } ;
 additive_expr   ::= mult_expr , { ( "+" | "-" ) , mult_expr } ;
 mult_expr       ::= unary_expr , { ( "*" | "/" | "%" ) , unary_expr } ;
 
-unary_expr      ::= ( "-" | "not" ) , unary_expr
+(* A decorator in expression position binds exactly as tightly as unary
+   minus, and nests right-associatively: `@d f(x) + 1` decorates `f(x)`, and
+   `@a @b x` is `@a (@b x)`. *)
+unary_expr      ::= decorator , unary_expr
+                   | ( "-" | "not" ) , unary_expr
                    | power_expr ;
 
-power_expr      ::= postfix_expr , [ "**" , unary_expr ] ;  (* right-assoc, per C convention *)
+power_expr      ::= postfix_expr , [ "**" , unary_expr ] ;       (* right-assoc *)
 
 postfix_expr    ::= primary , { postfix_op } ;
-
-postfix_op      ::= call_op
-                   | index_op
-                   | attr_op
-                   | message_op
-                   | scope_op ;
+postfix_op      ::= call_op | index_op | attr_op | message_op | scope_op ;
 
 call_op         ::= "(" , [ arg_list ] , ")" ;
 index_op        ::= "[" , expression , "]" ;
 attr_op         ::= "." , identifier ;
 message_op      ::= "!" , identifier , [ "(" , [ arg_list ] , ")" ] ;
-scope_op        ::= "::" , identifier ;
+(* `foo::$ast` is a definition's own tree as a value - `::` because it
+   resolves a name statically in a namespace, where `.` would ask the
+   runtime value (a closure) for an attribute it hasn't got. `$ast` is the
+   first of a reserved `$`-family (`$name`, `$line`, `$doc` are not built),
+   so the word after `$` is matched literally: `foo::$whatever` is a syntax
+   error, not a silently different meaning. *)
+scope_op        ::= "::" , identifier
+                   | "::" , "$" , "ast" ;
 
 attr_ref        ::= postfix_expr , "." , identifier ;
 
@@ -422,59 +314,49 @@ primary         ::= literal
                    | message_tuple_expr
                    | "this"
                    | "super" , "(" , [ arg_list ] , ")"
-                   | "defined" , "(" , symbol_literal , ")"
+                   | "return" , [ expression ]
+                   | "yield" , "from" , expression
+                   | "yield" , [ expression ]
+                   | "break"
+                   | "continue"
+                   | "pass"
+                   | if_stmt
+                   | while_stmt
+                   | for_stmt
                    | lambda_expr
+                   | co_lambda_expr
+                   | class_expr
                    | do_expr ;
 
-(* No `new` keyword: a class is constructed by calling it like any other
-   callable - `MyClass(args)` invokes `init` (if any) with `this` bound to
-   a fresh, zero-valued instance and yields `MyClass | error` (an error
-   returned from `init` overrides the constructed instance - RAII, see
-   language-spec.md). This falls out of ordinary call_op / postfix_expr
-   applied to an identifier naming a class; no dedicated primary form
-   is needed. *)
-
-literal         ::= int_literal
+literal         ::= nil_literal
+                   | int_literal
                    | float_literal
                    | bool_literal
                    | string_literal
-                   | symbol_literal ;
+                   | symbol_literal
+                   | ellipsis_literal ;
 
-
-(* ---- collection literals ----------------------------------------------- *)
-
-(* List/Array: a mutable, constant-time-indexable sequence. *)
 array_literal   ::= "[" , [ expr_list ] , "]" ;
 
-(* Pair list: $[] empty, $['a] single pair, $[1, 2, 3] proper pair list.
-   A low-level primitive (critical to the AST's own representation); an
-   improper list is built with the `pair` constructor instead of a literal
-   tail, e.g. `pair('a, 'b)`. *)
-pair_literal    ::= "$[" , [ pair_body ] , "]" ;
+pair_literal    ::= "$[" , [ pair_body ] , "]" ;             (* cons-list primitive *)
 pair_body       ::= pair_element , { "," , pair_element } ;
 pair_element    ::= expression ;
 
 tuple_literal   ::= "(" , ")"                                (* empty tuple *)
                    | "(" , expression , "," , ")"             (* single-element tuple *)
-                   | "(" , expr_list , ")" ;                  (* n>=2 handled by tuple_expr already;
-                                                                   parens here only force grouping *)
+                   | "(" , expr_list , ")" ;
 
-dict_literal    ::= "${" , [ dict_body ] , "}" ;
+dict_literal    ::= "{" , [ dict_body ] , "}" ;
 dict_body       ::= dict_pair , { "," , dict_pair } ;
 dict_pair       ::= expression , ":" , expression ;
 
-(* (canvas, shape) ! draw();  -- message dispatch against a tuple, also
-   how multiple dispatch is invoked (see fn_def's class_target, which may
-   name more than one type). *)
 message_tuple_expr
                 ::= "(" , expr_list , ")" , "!" , identifier , [ "(" , [ arg_list ] , ")" ] ;
 
-lambda_expr     ::= "fn" , "(" , [ param_list ] , ")" , block ;   (* anonymous fn, e.g. slot setter *)
+lambda_expr     ::= "fn" , "(" , [ param_list ] , ")" , [ "->" , type_constraint ] , block ;
+co_lambda_expr  ::= "co" , "(" , [ co_param_list ] , ")" , [ "->" , type_constraint ] , block ;
+class_expr      ::= "class" , [ "(" , [ arg_list ] , ")" ] , block ;
 
-(* `do` opens an anonymous, immediately-executed scope, usable as an
-   expression: its value is that of the last statement executed in its
-   body (see language-spec.md's "do" section). Structurally a block used
-   directly in expression position, the same way lambda_expr's block is. *)
 do_expr         ::= "do" , block ;
 
 
@@ -482,10 +364,11 @@ do_expr         ::= "do" , block ;
    8. Keyword summary (reserved words)
    --------------------------------------------------------------------- *)
 
-(* and, break, catch, class, co, continue, defer, defined, do, elif, else,
-   false, fn, for, from, getter, if, import, in, is, not, or,
+(* and, break, catch, class, co, continue, defer, do, elif, else,
+   false, fn, for, from, getter, if, import, in, is, nil, not, or,
    pass, return, setter, slot, static, super, this, true, try, undefined,
-   using, var, while, with, yield
+   var, while, with, yield
 
    Soft keywords (reserved only inside their own construct, still valid as
-   ordinary identifiers elsewhere): on, error (see defer_stmt). *)
+   ordinary identifiers elsewhere): on (see defer_stmt); as, except
+   (see import_stmt). *)

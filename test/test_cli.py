@@ -13,17 +13,30 @@ import pytest
 
 from conftest import REPO_ROOT, sample_path
 
-WYRM = shutil.which("wyrm") or os.path.join(REPO_ROOT, ".venv", "bin", "wyrm")
+# Prefer this repo's own venv script over whatever `wyrm` a bare `which`
+# would find on PATH - a dev machine may have an unrelated `wyrm` binary
+# (e.g. a different project's own script engine) earlier on PATH, which
+# would make these tests exercise the wrong program entirely.
+_VENV_WYRM = os.path.join(REPO_ROOT, ".venv", "bin", "wyrm")
+WYRM = _VENV_WYRM if os.path.isfile(_VENV_WYRM) else shutil.which("wyrm")
 SAMPLE = sample_path("eval_args.wy")
 
 pytestmark = pytest.mark.skipif(
-    not os.path.isfile(WYRM),
+    not WYRM or not os.path.isfile(WYRM),
     reason=f"wyrm console script not found at {WYRM!r} - run `pip install -e .` first",
 )
 
 
-def run(*args):
-    return subprocess.run([WYRM, *args], capture_output=True, text=True)
+def run(*args, stdin: str = ""):
+    # Strip WYRM_PATH so a shell-level override (e.g. pointing at a
+    # different project's stdlib) can't change what these scripts import -
+    # mirrors conftest.py's _clean_wyrm_path fixture for in-process tests.
+    # stdin is always fed (empty by default) rather than inherited: with no
+    # script argument `wyrm` is an interactive REPL, and one reading the
+    # test runner's own stdin would hang instead of seeing end of input.
+    env = {**os.environ, "WYRM_PATH": ""}
+    return subprocess.run([WYRM, *args], capture_output=True, text=True, env=env,
+                          input=stdin)
 
 
 def test_script_args_packed_into_args_in_order():
@@ -42,9 +55,30 @@ def test_help_flag():
     assert r.returncode == 0 and "Usage" in r.stdout
 
 
-def test_no_script_path():
-    r = run()
-    assert r.returncode == 2 and "Usage" in r.stderr
+def test_no_script_path_starts_the_repl():
+    r = run(stdin="1 + 2\n:quit\n")
+    assert r.returncode == 0, f"stderr={r.stderr!r}"
+    assert "3" in r.stdout
+
+
+def test_repl_keeps_reading_while_an_entry_is_unfinished():
+    # The `fn` body only runs once the empty line closes the block, and the
+    # function it defines is still there for the entry after it.
+    r = run(stdin="fn double(a):\n    return a * 2\n\ndouble(21)\n:quit\n")
+    assert r.returncode == 0, f"stderr={r.stderr!r}"
+    assert "42" in r.stdout
+
+
+def test_tui_off_a_terminal_falls_back_to_the_readline_repl():
+    r = run("--tui", stdin="1 + 2\n:quit\n")
+    assert r.returncode == 0, f"stderr={r.stderr!r}"
+    assert "--tui unavailable" in r.stderr
+    assert "3" in r.stdout
+
+
+def test_tui_with_a_script_is_a_usage_error():
+    r = run("--tui", SAMPLE)
+    assert r.returncode == 2 and "takes no script" in r.stderr
 
 
 def test_missing_script_file():

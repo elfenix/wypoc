@@ -1,0 +1,144 @@
+# Decorators, written in wyrm, for samples/decorators.wy.
+#
+# A decorator is a message on TreeBase: it receives the tree of whatever it
+# decorates and answers the tree to compile instead. The module importing it
+# has to reach it through `import static` - a static import runs the module
+# and adopts its messages, and a decorator whose module has not run cannot be
+# called.
+#
+# `sexpr(x)` is the canonical s-expression of a tree (see wypoc/sexpr.py's
+# module docstring for the format).
+
+import std::io::*
+
+fn nth(node, n) -> TreeBase:
+    i := 0
+    while i < n:
+        node = cdr(node)
+        i = i + 1
+    return car(node)
+
+# A `fn` node is
+# $['fn, name, results, rest, kwargs, params, dispatch, body].
+_FN_BODY := 7
+
+fn rebuild_fn(s, body):
+    return $['fn, nth(s, 1), nth(s, 2), nth(s, 3), nth(s, 4), nth(s, 5), nth(s, 6), body]
+
+# Answers what it was given, still boxed - the other half of the return
+# contract, which takes an s-expression or a TreeBase.
+fn [TreeBase] unchanged():
+    return this
+
+# Prepends a `println` to a definition's body.
+fn [TreeBase] traced(label):
+    s := sexpr(this)
+    announce := $['expr_stmt, $['call, $['name, 'println], [$['str, label]]]]
+    out := [announce]
+    for stmt in nth(s, _FN_BODY):
+        out ! append(stmt)
+    return rebuild_fn(s, out)
+
+# Replaces a definition's body outright, ignoring what was written.
+fn [TreeBase] constant(value):
+    return rebuild_fn(sexpr(this), [$['return, $['int, value]]])
+
+# An expression decorator: `@scaled(3) x` becomes `x * 3`.
+fn [TreeBase] scaled(factor):
+    return $['binop, '*, sexpr(this), $['int, factor]]
+
+# Reads the signature it was handed rather than rewriting it: answers a
+# function returning its own parameter count.
+fn [TreeBase] arity():
+    s := sexpr(this)
+    n := len(nth(s, 5))
+    return rebuild_fn(s, [$['return, $['int, n]]])
+
+# Reads the *types* in a signature. Types are carried by the format and
+# enforced by nothing, which is exactly what makes them a decorator's to
+# read: this one answers the declared parameter type names as a list.
+fn [TreeBase] param_types():
+    s := sexpr(this)
+    out := []
+    for param in nth(s, 5):
+        ty := nth(param, 2)
+        if ty == nil:
+            out ! append($['str, "?"])
+        else:
+            out ! append($['str, str(nth(ty, 1))])
+    return rebuild_fn(s, [$['return, $['list, out]]])
+
+# --- templates ------------------------------------------------------------
+#
+# A template is an ordinary function. `name::$ast` is its tree, so the
+# pattern is written in wyrm rather than assembled node by node, and `...`
+# marks where the decorated body goes.
+
+fn is_hole(stmt) -> bool:
+    if car(stmt) != 'expr_stmt:
+        return false
+    return car(nth(stmt, 1)) == 'ellipsis
+
+# Splices `body` into `template` at its `...`.
+fn expand_template(template, body) -> list:
+    out := []
+    for stmt in nth(sexpr(template), _FN_BODY):
+        if is_hole(stmt):
+            for inner in body:
+                out ! append(inner)
+        else:
+            out ! append(stmt)
+    return out
+
+# Anything after the hole is only reached if the body falls off the end - a
+# spliced `return` leaves it unreachable, exactly as writing it out would.
+# `defer` is how a template runs something on the way out regardless.
+fn _framed():
+    defer:
+        println("template: leaving")
+    println("template: entering")
+    ...
+
+fn [TreeBase] framed():
+    s := sexpr(this)
+    return rebuild_fn(s, expand_template(_framed::$ast, nth(s, _FN_BODY)))
+
+# The same, with the template named by the caller: a `$ast` is as available
+# at decoration time as a literal is, so it can be a decorator argument.
+fn [TreeBase] using_template(template):
+    s := sexpr(this)
+    return rebuild_fn(s, expand_template(template, nth(s, _FN_BODY)))
+
+# --- the `__sexpr` hook ---------------------------------------------------
+#
+# `sexpr(x)` asks a class before it does anything else, so a class can say
+# what its own s-expression is. That is what lets one decorator source serve
+# both worlds: here a tree already *is* an s-expression once unboxed, while
+# against a class-based tree each node converts itself.
+
+class Literal:
+    slot n: int = 0
+
+    fn init(n: int):
+        this.n = n
+
+    fn __sexpr():
+        return $['int, this.n]
+
+# The hook may also be given from outside the class body, which is the
+# message-table path rather than a class-body method, and it is inherited.
+class Boxed:
+    slot n: int = 0
+
+    fn init(n: int):
+        this.n = n
+
+class SubBoxed(Boxed) {}
+
+fn [Boxed] __sexpr():
+    return $['int, this.n * 2]
+
+# A decorator may answer such an object: the return contract normalizes
+# whatever comes back exactly as `sexpr()` would.
+fn [TreeBase] as_literal(value):
+    return Literal(value)

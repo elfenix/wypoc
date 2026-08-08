@@ -3,9 +3,16 @@
 TextMate grammar (syntax highlighting) for `.wy` / `.wyrm` files, derived
 from `doc/language-spec.md` (formal grammar tracked in `doc/grammar.ebnf`),
 plus an LSP client that spawns `wyrm-lsp` (from `wypoc/`, this repo's
-Python proof-of-concept - see `wypoc/README.md`) for live syntax
-diagnostics: parse errors are reported as red squiggles as you type, using
-wypoc's own tokenizer/parser as the sole source of truth.
+Python proof-of-concept - see `wypoc/README.md`), which uses wypoc's own
+tokenizer/parser as the sole source of truth for:
+
+- **diagnostics** - parse errors as red squiggles while you type;
+- **outline** (`documentSymbol`) - classes, methods, slots, functions;
+- **go-to-definition**, following `import` statements across files;
+- **hover** - a declaration's signature and where it came from;
+- **completion**, triggered on `.` (slots), `::` (module members), `!` and
+  `@` (message selectors), or while typing a plain name (locals, then
+  module level, then imports, then builtins and keywords).
 
 ## Try it locally
 
@@ -51,31 +58,85 @@ current `src/` live (no packaging needed there).
 ## Files
 
 - `package.json` — extension manifest: registers the `wyrm` language, the
-  `wyrm-lang` grammar, the `wyrm.lsp.*` settings, and the
+  `wyrm-lang` grammar, the `wyrm.*` settings and commands, and the
   `vscode-languageclient` dependency.
 - `language-configuration.json` — comments, brackets, auto-closing pairs.
 - `syntaxes/wyrm.tmLanguage.json` — TextMate grammar (tokenization rules).
-- `src/extension.ts` — activation entry point: resolves and spawns
-  `wyrm-lsp`, wires it up via `vscode-languageclient`.
+- `src/extension.ts` — activation entry point: server lifecycle (start,
+  restart on a settings change, stop), command registration, "run this file".
+- `src/config.ts` — every `wyrm.*` setting read/write, and the resolution
+  rules that turn them into an executable to spawn and an environment to
+  spawn it in. Both the server and the run terminal go through here.
+- `src/interpreter.ts` — interpreter discovery, the picker, the status bar item.
+- `src/modulePath.ts` — the `WYRM_PATH` folder dialog and list editor.
 - `tsconfig.json` — compiles `src/*.ts` to `out/*.js` (the `main` package.json
   points at); both `node_modules/` and `out/` are gitignored, build them
   locally per "Try it locally" above.
 
+## Settings
+
+All settings are written to the **workspace** when a folder is open (a
+search path and an interpreter are properties of the project, not of you),
+and to user settings otherwise. Anywhere a path is accepted,
+`${workspaceFolder}` and a leading `~` are expanded, and a path with a
+separator in it resolves against the first workspace folder — the extension
+does that substitution itself, since VS Code only does it for free in
+built-in contexts like `launch.json`.
+
+| Setting | What it does |
+| --- | --- |
+| `wyrm.interpreterPath` | The `wyrm` to run files with. Empty = auto-detect (`${workspaceFolder}/.venv/bin/wyrm`, then `PATH`). |
+| `wyrm.modulePath` | Directories searched for `import`ed modules, in order — passed to both the interpreter and the language server as `WYRM_PATH`. |
+| `wyrm.modulePathInheritEnvironment` | Append the `WYRM_PATH` VS Code was launched with to `wyrm.modulePath` rather than replacing it (default `true`). |
+| `wyrm.lsp.serverPath` | The `wyrm-lsp` to spawn. Empty = auto-detect (see below). |
+| `wyrm.lsp.enable` | `false` disables the language server entirely (syntax highlighting still works via the grammar alone). |
+
+## Commands
+
+- **Wyrm: Select Interpreter** — a quick-pick over every `wyrm` found in
+  the workspace `.venv`, `$VIRTUAL_ENV` and `PATH`, plus **Browse…** for a
+  file dialog and a way back to auto-detection. Also reachable by clicking
+  the status bar item, which shows the interpreter in effect and the
+  `WYRM_PATH` it will run with while a `.wy` file is open.
+- **Wyrm: Add Folder to Module Search Path (WYRM_PATH)** — folder dialog,
+  appends what you pick. Also on the explorer's folder context menu.
+- **Wyrm: Edit Module Search Path (WYRM_PATH)** — lists the entries with
+  the location each resolves to, with per-entry buttons to remove one or
+  move it earlier in the search order, plus rows to add a folder or open
+  the raw settings UI.
+- **Wyrm: Run Current File** — saves and runs the active file with the
+  selected interpreter in a terminal carrying `WYRM_PATH`. Also the ▷ button
+  in the editor title bar.
+- **Wyrm: Restart Language Server**.
+
+Changing any of the settings above restarts the server automatically: it
+reads `WYRM_PATH` from its environment at spawn time (via
+`wypoc/wyrm_modules.py`, exactly as the interpreter does), so a jump the
+editor offers is a jump the interpreter would make — but only a restart
+re-reads it.
+
 ## Language server
 
-`src/extension.ts` looks for the `wyrm-lsp` executable in this order:
+`src/config.ts` looks for the `wyrm-lsp` executable in this order:
 
 1. the `wyrm.lsp.serverPath` setting, if set;
-2. `${workspaceFolder}/.venv/bin/wyrm-lsp` — this repo's own dev layout
+2. the `wyrm-lsp` sitting next to `wyrm.interpreterPath` — picking an
+   interpreter out of a venv should get you that venv's server;
+3. `${workspaceFolder}/.venv/bin/wyrm-lsp` — this repo's own dev layout
    (what `pip install -e ".[lsp]"` from the repo root produces);
-3. `wyrm-lsp` on `PATH`.
+4. `wyrm-lsp` on `PATH`.
 
-Set `wyrm.lsp.enable` to `false` to disable the language server entirely
-(syntax highlighting still works via the grammar alone). The server itself
-(`wypoc/lsp.py`) is diagnostics-only right now: no hover, go-to-definition,
-or completion — see `wypoc/README.md`'s "Known gaps" for why (mainly:
-`ast_nodes.py` doesn't track source positions on most nodes yet, so there's
-no symbol table to answer those questions from).
+The client declares no capabilities of its own, so the feature set is
+whatever the server advertises - including which characters trigger
+completion. What the server still lacks is **references** and **rename**;
+see `wypoc/README.md`'s "Known gaps" for why (they need a reverse index over
+the whole workspace, not just the files reachable through imports).
+
+Completion answers from the last version of a document that parsed, so it
+keeps working mid-identifier - which is exactly when the file is invalid and
+when you want it. Slot completion after `.` offers every slot it knows about
+rather than one class's: there is no type inference, so narrowing would mean
+guessing. Each candidate's detail names the class it came from.
 
 ## Known gaps
 

@@ -34,3 +34,16 @@ def test_raw_string_multiline_resumes_tokenizing_after_close():
 def test_raw_string_unterminated_multiline_raises():
     with pytest.raises(TokenizeError):
         list(generate_tokens('x = R"C(\nno closer here\n'))
+
+
+def _number_tokens(src: str):
+    return [t.string for t in generate_tokens(src) if t.type == token.NUMBER]
+
+
+def test_binary_literal():
+    assert _number_tokens("0b1010_0000\n") == ["0b1010_0000"]
+    assert _number_tokens("0B11\n") == ["0B11"]
+
+
+def test_exponent_digits_allow_underscore_separator():
+    assert _number_tokens("1e1_0\n") == ["1e1_0"]

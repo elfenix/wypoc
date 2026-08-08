@@ -1,7 +1,7 @@
 {
   "name": "wyrm-lang",
   "displayName": "Wyrm",
-  "description": "Syntax highlighting and diagnostics (via wyrm-lsp) for the Wyrm scripting language",
+  "description": "Syntax highlighting, diagnostics, navigation and completion (via wyrm-lsp) for the Wyrm scripting language",
   "version": "0.1.0",
   "publisher": "amarach",
   "repository": {
@@ -36,17 +36,83 @@
     "configuration": {
       "title": "Wyrm",
       "properties": {
+        "wyrm.interpreterPath": {
+          "type": "string",
+          "default": "",
+          "scope": "machine-overridable",
+          "markdownDescription": "Path to the `wyrm` interpreter used to run files. Leave empty to auto-detect: tries `${workspaceFolder}/.venv/bin/wyrm`, then `wyrm` on `PATH`. Use the **Wyrm: Select Interpreter** command (or the status bar item) to pick one. Supports `${workspaceFolder}` and `~`."
+        },
+        "wyrm.modulePath": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": [],
+          "scope": "resource",
+          "markdownDescription": "Directories to search for `import`ed modules, in order — passed to the interpreter and the language server as `WYRM_PATH`. Each entry supports `${workspaceFolder}` and `~`; relative paths resolve against the first workspace folder. Edit with the **Wyrm: Edit Module Search Path** and **Wyrm: Add Folder to Module Search Path** commands."
+        },
+        "wyrm.modulePathInheritEnvironment": {
+          "type": "boolean",
+          "default": true,
+          "scope": "resource",
+          "markdownDescription": "Append any `WYRM_PATH` inherited from the environment VS Code was launched in to `#wyrm.modulePath#`, instead of replacing it."
+        },
         "wyrm.lsp.serverPath": {
           "type": "string",
           "default": "",
-          "markdownDescription": "Path to the `wyrm-lsp` executable. Leave empty to auto-detect: tries `${workspaceFolder}/.venv/bin/wyrm-lsp` (this repo's own dev layout), then `wyrm-lsp` on `PATH`."
+          "scope": "machine-overridable",
+          "markdownDescription": "Path to the `wyrm-lsp` executable. Leave empty to auto-detect: the `wyrm-lsp` next to `#wyrm.interpreterPath#`, then `${workspaceFolder}/.venv/bin/wyrm-lsp` (this repo's own dev layout), then `wyrm-lsp` on `PATH`."
         },
         "wyrm.lsp.enable": {
           "type": "boolean",
           "default": true,
-          "description": "Enable the wyrm-lsp language server (syntax diagnostics)."
+          "description": "Enable the wyrm-lsp language server (diagnostics, outline, go-to-definition, hover, completion)."
         }
       }
+    },
+    "commands": [
+      {
+        "command": "wyrm.selectInterpreter",
+        "title": "Select Interpreter",
+        "category": "Wyrm"
+      },
+      {
+        "command": "wyrm.editModulePath",
+        "title": "Edit Module Search Path (WYRM_PATH)",
+        "category": "Wyrm"
+      },
+      {
+        "command": "wyrm.addModulePathFolder",
+        "title": "Add Folder to Module Search Path (WYRM_PATH)",
+        "category": "Wyrm"
+      },
+      {
+        "command": "wyrm.runFile",
+        "title": "Run Current File",
+        "category": "Wyrm",
+        "icon": "$(play)"
+      },
+      {
+        "command": "wyrm.restartServer",
+        "title": "Restart Language Server",
+        "category": "Wyrm"
+      }
+    ],
+    "menus": {
+      "editor/title/run": [
+        {
+          "command": "wyrm.runFile",
+          "when": "resourceLangId == wyrm",
+          "group": "navigation"
+        }
+      ],
+      "explorer/context": [
+        {
+          "command": "wyrm.addModulePathFolder",
+          "when": "explorerResourceIsFolder",
+          "group": "7_modification"
+        }
+      ]
     }
   },
   "scripts": {

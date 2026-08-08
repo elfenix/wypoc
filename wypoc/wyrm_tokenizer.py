@@ -18,24 +18,40 @@ KEYWORDS = {
     "and", "break", "catch", "class", "co", "continue", "defer", "defined",
     "do", "elif", "else", "false", "fn", "for", "from", "getter", "if", "import",
     "in", "is", "not", "or", "pass", "return", "setter",
-    "slot", "static", "super", "this", "true", "try", "undefined", "using",
+    "slot", "static", "super", "this", "true", "try", "undefined",
     "var", "while", "with", "yield",
 }
 # Not included above: "init" is no longer a reserved word - a class
 # constructor is just an ordinary method named `init` (see wyrm.gram's
 # class_member_item/fn_def). "new" was dropped entirely: classes are
 # constructed by calling them like any other value (`MyClass(args)`).
-# Not included above: "on" / "error" are soft keywords, reserved only in the
-# `defer on error` construct (see wyrm.gram) - they remain valid identifiers
+# "using" was dropped too: every bulk/aliased/listed import it used to
+# spell is now a form of `import` (see wyrm.gram's import_stmt).
+# Not included above: "on" / "error" / "as" / "except" are soft keywords,
+# reserved only in their own construct (`defer on error`; `import`'s
+# `as`/`except` forms - see wyrm.gram) - they remain valid identifiers
 # elsewhere (e.g. `slot on: bool`).
 
 # Multi-character operators, longest first so scanning is maximal-munch.
+# `...` is one token rather than three `.`s: it's the placeholder literal
+# (a template's hole - see wyrm.gram's ellipsis_literal), and lexing it
+# whole keeps it from ever colliding with attribute access's `.`.
 MULTI_OPS = sorted(
-    ["**", "->", "<-", "<=", ">=", "==", "!=", "::", "?=", ":="],
+    ["...", "**", "->", "<-", "<=", ">=", "==", "!=", "::", "?=", ":="],
     key=len, reverse=True,
 )
 
-SINGLE_OPS = set("()[]{}.,:+-*/%&|^<>=!$'")
+SINGLE_OPS = set("()[]{}.,:+-*/%&|^<>=!$'@")
+
+# The operators a symbol literal may name - `'+`, `'<=>`, ... The canonical
+# s-expression format spells a binop's operator as a symbol, so building a
+# tree from scratch is impossible without these (see doc/sexpr-spec.md's
+# "Operators"). Longest first, same maximal-munch rule MULTI_OPS uses.
+SYMBOL_OPERATORS = sorted(
+    ["<=>", "**", "==", "!=", "<=", ">=", "+", "-", "*", "/", "%",
+     "&", "|", "^", "<", ">"],
+    key=len, reverse=True,
+)
 
 OPEN_BRACKETS = "(["
 CLOSE_BRACKETS = ")]"
@@ -175,6 +191,15 @@ class _Lexer:
             if c == "\\":
                 yield self._scan_char(start)
                 continue
+            if c == "'":
+                symbol = self._scan_symbol(start)
+                if symbol is not None:
+                    yield symbol
+                    continue
+                # A bare `'` naming neither a name nor an operator: fall
+                # through and emit it as the plain OP it lexically is, so
+                # the parser reports the syntax error at the right place
+                # rather than the tokenizer guessing at intent.
             if (c == "R" or c == "r") and self.peekc(1) == '"':
                 yield self._scan_raw_string(start)
                 continue
@@ -246,6 +271,13 @@ class _Lexer:
             text = line[i:j]
             self.col = j
             return TokenInfo(token.NUMBER, text, start, (self.lineno + 1, j), line)
+        if line.startswith("0b", i) or line.startswith("0B", i):
+            j = i + 2
+            while j < len(line) and (line[j] in "01_"):
+                j += 1
+            text = line[i:j]
+            self.col = j
+            return TokenInfo(token.NUMBER, text, start, (self.lineno + 1, j), line)
         j = i
         while j < len(line) and (line[j].isdigit() or line[j] == "_"):
             j += 1
@@ -262,7 +294,7 @@ class _Lexer:
             if k < len(line) and line[k].isdigit():
                 is_float = True
                 j = k
-                while j < len(line) and line[j].isdigit():
+                while j < len(line) and (line[j].isdigit() or line[j] == "_"):
                     j += 1
         text = line[i:j]
         self.col = j
@@ -297,6 +329,38 @@ class _Lexer:
             # Not a name (a digit, punctuation, even a space) - always a
             # single literal character, e.g. \(, \5, \\, \ .
             k = j + 1
+        text = line[i:k]
+        self.col = k
+        return TokenInfo(token.STRING, text, start, (self.lineno + 1, k), line)
+
+    def _scan_symbol(self, start) -> "TokenInfo | None":
+        """A symbol literal: `'name`, or `'+`/`'<=>` naming an operator.
+        Returns None if the `'` names neither, leaving the caller to emit it
+        as a plain operator token.
+
+        Scanned as one token, rather than left to the parser as `'` + NAME,
+        because a symbol's name may be a reserved word - `'fn`, `'return`,
+        `'if` and `'while` are all node kinds in the canonical s-expression
+        format (doc/sexpr-spec.md), and a pegen `NAME` never matches a
+        keyword. Wire type is token.STRING for the same reason a character
+        literal uses it (see _scan_char): the three are told apart in
+        wyrm.gram's `literal` rule by their leading character - `'` here,
+        `\\` for a char, `"` for a string - rather than by adding a token
+        kind the vendored pegen generator would have to learn."""
+        line = self.line
+        i = self.col  # at the quote
+        j = i + 1
+        if j < len(line) and _is_ident_start(line[j]):
+            k = j + 1
+            while k < len(line) and _is_ident_cont(line[k]):
+                k += 1
+        else:
+            for op in SYMBOL_OPERATORS:
+                if line.startswith(op, j):
+                    k = j + len(op)
+                    break
+            else:
+                return None
         text = line[i:k]
         self.col = k
         return TokenInfo(token.STRING, text, start, (self.lineno + 1, k), line)

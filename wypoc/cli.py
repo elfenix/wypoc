@@ -1,13 +1,18 @@
 """wyrm: run a wyrm source file, the way `python script.py args...` runs a
-Python one.
+Python one - or, given no script at all, start the interactive REPL, the
+way plain `python` does.
 
 Usage:
+    wyrm                                    (interactive REPL)
+    wyrm --tui                              (interactive REPL, full screen)
     wyrm [interpreter options] script.wy [script args...]
     wyrm [interpreter options] -c "code" [args...]
     wyrm --compile [-o out.c] module.wy
 
 Interpreter options (must come before the script path):
     -c code         eval `code` directly, instead of reading a script file
+    -t, --tui       start the REPL in its full-screen Textual UI rather
+                     than the default readline prompt
     --compile       translate `module.wy` (must `import native`) to C source
                      targeting the real wyrm VM calling convention, instead
                      of running it; prints to stdout unless -o is given
@@ -28,9 +33,40 @@ import os
 import sys
 import traceback
 
+from wypoc import wyrm_modules
 from wypoc.compiler_c import CompileError, compile_module
 from wypoc.parse import parse
 from wypoc.wyrm_eval_parse_tree import Scope, eval_program, expose, populate_globals
+
+
+def run_repl(tui: bool) -> int:
+    """Starts an interactive session. The full-screen UI needs both a real
+    terminal and `textual`, so `--tui` falls back to the readline prompt
+    (with a note saying why) rather than failing outright - the REPL still
+    works in a pipe, over a dumb terminal, or with only the `rich` half of
+    the optional dependencies installed."""
+    try:
+        from wypoc.repl import Session, run_readline
+    except ImportError as e:
+        print(f"wyrm: the REPL needs the 'repl' extra installed "
+              f"(pip install 'wypoc[repl]'): {e}", file=sys.stderr)
+        return 2
+
+    session = Session()
+    if tui:
+        reason = None
+        if not (sys.stdin.isatty() and sys.stdout.isatty()):
+            reason = "not running on a terminal"
+        else:
+            try:
+                from wypoc.repl_tui import run_tui
+            except ImportError as e:
+                reason = f"textual is not available ({e})"
+        if reason is None:
+            return run_tui(session)
+        print(f"wyrm: --tui unavailable ({reason}); using the readline REPL",
+              file=sys.stderr)
+    return run_readline(session)
 
 
 def main(argv: list = None) -> int:
@@ -40,6 +76,7 @@ def main(argv: list = None) -> int:
     verbose = False
     code = None
     compile_mode = False
+    tui = False
     output_path = None
     i = 0
     while i < len(argv) and argv[i].startswith("-") and argv[i] != "-":
@@ -51,6 +88,8 @@ def main(argv: list = None) -> int:
             verbose = True
         elif opt == "--compile":
             compile_mode = True
+        elif opt in ("-t", "--tui"):
+            tui = True
         elif opt == "-o":
             if i + 1 >= len(argv):
                 print("wyrm: -o requires a path argument", file=sys.stderr)
@@ -72,6 +111,16 @@ def main(argv: list = None) -> int:
     if compile_mode and code is not None:
         print("wyrm: --compile cannot be used with -c", file=sys.stderr)
         return 2
+
+    if tui and (compile_mode or code is not None or i < len(argv)):
+        print("wyrm: --tui starts the interactive REPL; it takes no script",
+              file=sys.stderr)
+        return 2
+
+    # No script and no -c: this is an interactive session, not a usage
+    # error - `wyrm` alone means the REPL, like `python` alone does.
+    if code is None and not compile_mode and i >= len(argv):
+        return run_repl(tui)
 
     if code is not None:
         src = code
@@ -112,6 +161,11 @@ def main(argv: list = None) -> int:
         else:
             sys.stdout.write(c_src)
         return 0
+
+    # A script's own directory is a search root, so a module sitting next to
+    # it - a decorator library, say - is importable with no WYRM_PATH set.
+    if code is None:
+        wyrm_modules.set_script_root(os.path.dirname(os.path.abspath(filename)))
 
     ctx = Scope()
     populate_globals(ctx)

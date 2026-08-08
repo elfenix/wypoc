@@ -1,6 +1,7 @@
 """Exercises the wyrm module/import system: WYRM_PATH-based resolution
 (default corelib/), package __init__.wy loading, `::`-qualified access,
-from-import, and using (bulk + aliased single-name)."""
+from-import, and import's wildcard/aliased-single-name forms (the old
+`using` keyword's replacement)."""
 import io
 import os
 import sys

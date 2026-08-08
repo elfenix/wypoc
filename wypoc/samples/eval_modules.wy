@@ -9,8 +9,8 @@ greeted := std::io::println("hi")
 from std::io import println
 direct := println("direct")
 
-using std::io
+import std::io::*
 bulk := println("bulk")
 
-using alias_println = std::io::println
+import std::io::println as alias_println
 aliased := alias_println("aliased")

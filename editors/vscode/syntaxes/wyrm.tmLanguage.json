@@ -9,12 +9,14 @@
     { "include": "#characters" },
     { "include": "#numbers" },
     { "include": "#symbols" },
-    { "include": "#keywords" },
-    { "include": "#storage-types" },
+    { "include": "#constants" },
     { "include": "#class-decl" },
     { "include": "#function-decl" },
     { "include": "#coroutine-decl" },
-    { "include": "#dict-sigil" },
+    { "include": "#decorators" },
+    { "include": "#keywords" },
+    { "include": "#builtin-functions" },
+    { "include": "#builtin-types" },
     { "include": "#pair-list-sigil" },
     { "include": "#message-op" },
     { "include": "#scope-op" },
@@ -28,16 +30,27 @@
       "patterns": [
         {
           "name": "comment.line.number-sign.wyrm",
-          "match": "#.*$"
+          "begin": "#",
+          "beginCaptures": {
+            "0": { "name": "punctuation.definition.comment.wyrm" }
+          },
+          "end": "$"
         }
       ]
     },
     "strings": {
       "patterns": [
         {
+          "comment": "triple-quoted string: opens with three quotes, closes with two (see doc/grammar.ebnf, multiline_string)",
           "name": "string.quoted.triple.wyrm",
           "begin": "\"\"\"",
+          "beginCaptures": {
+            "0": { "name": "punctuation.definition.string.begin.wyrm" }
+          },
           "end": "\"\"",
+          "endCaptures": {
+            "0": { "name": "punctuation.definition.string.end.wyrm" }
+          },
           "patterns": [
             { "name": "constant.character.escape.wyrm", "match": "\\\\." }
           ]
@@ -46,6 +59,7 @@
           "name": "string.quoted.raw.wyrm",
           "begin": "R\"([A-Za-z0-9_]*)\\(",
           "beginCaptures": {
+            "0": { "name": "punctuation.definition.string.begin.wyrm" },
             "1": { "name": "punctuation.definition.string.raw.tag.wyrm" }
           },
           "end": "\\)\\1\"",
@@ -57,7 +71,13 @@
         {
           "name": "string.quoted.double.wyrm",
           "begin": "\"",
-          "end": "\"",
+          "beginCaptures": {
+            "0": { "name": "punctuation.definition.string.begin.wyrm" }
+          },
+          "end": "\"|(?<!\\\\)$",
+          "endCaptures": {
+            "0": { "name": "punctuation.definition.string.end.wyrm" }
+          },
           "patterns": [
             { "name": "constant.character.escape.wyrm", "match": "\\\\." }
           ]
@@ -65,10 +85,11 @@
       ]
     },
     "characters": {
+      "comment": "Clojure-style char literals. Scoped under `string.` on purpose: that is what tells VS Code these are literal text, so `\\[`, `\\(` and `\\\"` neither auto-close nor register as bracket pairs.",
       "patterns": [
         {
-          "comment": "Clojure-style char literal, named form: \\newline, \\space, ...",
-          "name": "constant.character.wyrm",
+          "comment": "named form: \\newline, \\space, ...",
+          "name": "string.other.character.wyrm",
           "match": "\\\\(newline|space|tab|return|backspace|formfeed|null)\\b"
         },
         {
@@ -77,13 +98,14 @@
           "match": "\\\\[A-Za-z_][A-Za-z0-9_]+"
         },
         {
-          "comment": "single-char form: \\a, \\5, \\(, \\\\, ...",
-          "name": "constant.character.wyrm",
-          "match": "\\\\."
+          "comment": "single-char form: \\a, \\5, \\(, \\\\, ...  the trailing alternative catches a lone backslash mid-edit, so the character being typed after it is already inside a string-ish token",
+          "name": "string.other.character.wyrm",
+          "match": "\\\\.|\\\\"
         }
       ]
     },
     "numbers": {
+      "comment": "A leading '-' is the arithmetic operator, not part of the literal - matching it here would swallow the minus in `a-1`.",
       "patterns": [
         {
           "name": "constant.numeric.hex.wyrm",
@@ -91,11 +113,11 @@
         },
         {
           "name": "constant.numeric.float.wyrm",
-          "match": "-?\\b\\d[\\d_]*\\.\\d[\\d_]*([eE][+-]?\\d+)?\\b|-?\\b\\d[\\d_]*[eE][+-]?\\d+\\b"
+          "match": "\\b\\d[\\d_]*\\.\\d[\\d_]*([eE][+-]?\\d+)?\\b|\\b\\d[\\d_]*[eE][+-]?\\d+\\b"
         },
         {
           "name": "constant.numeric.integer.wyrm",
-          "match": "-?\\b\\d[\\d_]*\\b"
+          "match": "\\b\\d[\\d_]*\\b"
         }
       ]
     },
@@ -103,23 +125,27 @@
       "patterns": [
         {
           "name": "constant.other.symbol.wyrm",
-          "match": "'[A-Za-z_][A-Za-z0-9_]*"
+          "match": "(')[A-Za-z_][A-Za-z0-9_]*",
+          "captures": {
+            "1": { "name": "punctuation.definition.symbol.wyrm" }
+          }
         }
       ]
     },
-    "keywords": {
+    "constants": {
+      "comment": "literal values - kept in one family so themes render them uniformly",
       "patterns": [
         {
           "name": "constant.language.boolean.wyrm",
           "match": "\\b(true|false)\\b"
         },
         {
-          "name": "constant.language.undefined.wyrm",
-          "match": "\\bundefined\\b"
+          "name": "constant.language.null.wyrm",
+          "match": "\\bnil\\b"
         },
         {
-          "name": "constant.language.nil.wyrm",
-          "match": "\\bnil\\b"
+          "name": "constant.language.undefined.wyrm",
+          "match": "\\bundefined\\b"
         },
         {
           "name": "variable.language.this.wyrm",
@@ -128,7 +154,11 @@
         {
           "name": "variable.language.super.wyrm",
           "match": "\\bsuper\\b"
-        },
+        }
+      ]
+    },
+    "keywords": {
+      "patterns": [
         {
           "name": "keyword.control.conditional.wyrm",
           "match": "\\b(if|elif|else)\\b"
@@ -146,32 +176,46 @@
           "match": "\\b(try|catch|defer)\\b"
         },
         {
+          "comment": "soft keywords, only meaningful right after 'defer' - see defer_stmt",
+          "name": "keyword.control.exception.wyrm",
+          "match": "(?<=\\bdefer\\s)(on\\s+error)\\b"
+        },
+        {
           "name": "keyword.control.import.wyrm",
-          "match": "\\b(import|from|using)\\b"
+          "match": "\\b(import|from|as|except)\\b"
         },
         {
-          "name": "keyword.other.var.wyrm",
-          "match": "\\bvar\\b"
-        },
-        {
-          "name": "keyword.other.static.wyrm",
-          "match": "\\bstatic\\b"
-        },
-        {
-          "name": "keyword.other.with.wyrm",
-          "match": "\\bwith\\b"
-        },
-        {
-          "name": "keyword.other.do.wyrm",
+          "name": "keyword.control.do.wyrm",
           "match": "\\bdo\\b"
         },
         {
-          "name": "keyword.other.slot.wyrm",
+          "comment": "binding forms - storage.* is the conventional family for declaration keywords",
+          "name": "storage.type.var.wyrm",
+          "match": "\\bvar\\b"
+        },
+        {
+          "name": "storage.type.slot.wyrm",
           "match": "\\bslot\\b"
         },
         {
-          "name": "support.function.builtin.wyrm",
-          "match": "\\bdefined\\b"
+          "name": "storage.modifier.static.wyrm",
+          "match": "\\bstatic\\b"
+        },
+        {
+          "name": "storage.modifier.with.wyrm",
+          "match": "\\bwith\\b"
+        },
+        {
+          "name": "storage.type.function.wyrm",
+          "match": "\\bfn\\b"
+        },
+        {
+          "name": "storage.type.coroutine.wyrm",
+          "match": "\\bco\\b"
+        },
+        {
+          "name": "storage.type.class.wyrm",
+          "match": "\\bclass\\b"
         },
         {
           "name": "keyword.operator.logical.wyrm",
@@ -188,31 +232,52 @@
           "match": "\\bis\\b"
         },
         {
-          "comment": "soft keywords, only meaningful right after 'defer' - see defer_stmt",
-          "name": "keyword.other.defer-on-error.wyrm",
-          "match": "(?<=\\bdefer\\s)(on\\s+error)\\b"
-        },
-        {
           "name": "keyword.other.slot-option.wyrm",
           "match": "\\b(setter|getter)\\b(?=\\s*=)"
         }
       ]
     },
-    "storage-types": {
+    "builtin-types": {
+      "comment": "fundamental type names from doc/language-spec.md's Fundamental Types. They are ordinary identifiers, not reserved words, so they get support.type rather than storage.type.",
       "patterns": [
         {
-          "name": "storage.type.wyrm",
-          "match": "\\b(int|uint|float|str|bool|sym|any|pair|list|array|tuple|dict|error)\\b"
+          "name": "support.type.builtin.wyrm",
+          "match": "\\b(bool|int|uint|float|sym|bytes|str|tuple|list|dict|pair|array|fiber|closure|coroutine|message|object|error|file)\\b"
+        },
+        {
+          "comment": "predefined error classes",
+          "name": "support.class.builtin.wyrm",
+          "match": "\\b(Unset|NotFound|OutOfMemory|StopIteration|RuntimeError|OSError)\\b"
+        }
+      ]
+    },
+    "builtin-functions": {
+      "comment": "globals from wyrm_builtins.py, plus the `defined` operator. Only in call position, so `pair`/`error` still read as types when used as type constraints.",
+      "patterns": [
+        {
+          "name": "support.function.builtin.wyrm",
+          "match": "\\b(defined|print|len|copy|cons|pair|car|cdr|next|send)\\b(?=\\s*\\()"
+        },
+        {
+          "comment": "native methods registered on builtin values",
+          "match": "(\\.)\\s*(substr|remove|resize|expand|append)\\b(?=\\s*\\()",
+          "captures": {
+            "1": { "name": "punctuation.accessor.wyrm" },
+            "2": { "name": "support.function.builtin.wyrm" }
+          }
         }
       ]
     },
     "class-decl": {
       "patterns": [
         {
-          "match": "\\b(class)\\s+([A-Za-z_][A-Za-z0-9_]*)",
+          "comment": "class Name  /  class Name(Parent)",
+          "match": "\\b(class)\\s+([A-Za-z_][A-Za-z0-9_]*)(?:\\s*(\\()\\s*([A-Za-z_][A-Za-z0-9_]*)?)?",
           "captures": {
-            "1": { "name": "keyword.other.class.wyrm" },
-            "2": { "name": "entity.name.class.wyrm" }
+            "1": { "name": "storage.type.class.wyrm" },
+            "2": { "name": "entity.name.class.wyrm" },
+            "3": { "name": "punctuation.section.parens.wyrm" },
+            "4": { "name": "entity.other.inherited-class.wyrm" }
           }
         }
       ]
@@ -220,59 +285,90 @@
     "function-decl": {
       "patterns": [
         {
-          "comment": "fn [Type] name(...)  -- external method definition",
-          "match": "\\b(fn)\\s*(\\[)\\s*([A-Za-z_][A-Za-z0-9_]*)\\s*(\\])\\s*([A-Za-z_][A-Za-z0-9_]*)",
-          "captures": {
-            "1": { "name": "keyword.other.fn.wyrm" },
-            "2": { "name": "punctuation.definition.class-target.begin.wyrm" },
-            "3": { "name": "entity.name.class.wyrm" },
-            "4": { "name": "punctuation.definition.class-target.end.wyrm" },
-            "5": { "name": "entity.name.function.wyrm" }
-          }
+          "comment": "fn [Type, ...] name(...)  -- external method definition, one receiver type per dispatch position",
+          "begin": "\\b(fn)\\s*(\\[)",
+          "beginCaptures": {
+            "1": { "name": "storage.type.function.wyrm" },
+            "2": { "name": "punctuation.definition.class-target.begin.wyrm" }
+          },
+          "end": "(\\])\\s*([A-Za-z_][A-Za-z0-9_]*)?",
+          "endCaptures": {
+            "1": { "name": "punctuation.definition.class-target.end.wyrm" },
+            "2": { "name": "entity.name.function.wyrm" }
+          },
+          "patterns": [
+            { "include": "#comments" },
+            {
+              "name": "entity.name.class.wyrm",
+              "match": "[A-Za-z_][A-Za-z0-9_]*"
+            },
+            {
+              "name": "punctuation.separator.comma.wyrm",
+              "match": ","
+            }
+          ]
         },
         {
           "comment": "fn name(...)",
           "match": "\\b(fn)\\s+([A-Za-z_][A-Za-z0-9_]*)",
           "captures": {
-            "1": { "name": "keyword.other.fn.wyrm" },
+            "1": { "name": "storage.type.function.wyrm" },
             "2": { "name": "entity.name.function.wyrm" }
           }
         },
         {
           "comment": "anonymous fn(...)  -- lambda, no name follows",
-          "match": "\\b(fn)\\b(?=\\s*\\()",
-          "name": "keyword.other.fn.wyrm"
+          "name": "storage.type.function.wyrm",
+          "match": "\\b(fn)\\b(?=\\s*\\()"
         }
       ]
     },
     "coroutine-decl": {
       "patterns": [
         {
-          "comment": "co [Type] name(...)",
-          "match": "\\b(co)\\s*(\\[)\\s*([A-Za-z_][A-Za-z0-9_]*)\\s*(\\])\\s*([A-Za-z_][A-Za-z0-9_]*)",
-          "captures": {
-            "1": { "name": "keyword.other.co.wyrm" },
-            "2": { "name": "punctuation.definition.class-target.begin.wyrm" },
-            "3": { "name": "entity.name.class.wyrm" },
-            "4": { "name": "punctuation.definition.class-target.end.wyrm" },
-            "5": { "name": "entity.name.function.wyrm" }
-          }
+          "comment": "co [Type, ...] name(...)",
+          "begin": "\\b(co)\\s*(\\[)",
+          "beginCaptures": {
+            "1": { "name": "storage.type.coroutine.wyrm" },
+            "2": { "name": "punctuation.definition.class-target.begin.wyrm" }
+          },
+          "end": "(\\])\\s*([A-Za-z_][A-Za-z0-9_]*)?",
+          "endCaptures": {
+            "1": { "name": "punctuation.definition.class-target.end.wyrm" },
+            "2": { "name": "entity.name.function.wyrm" }
+          },
+          "patterns": [
+            { "include": "#comments" },
+            {
+              "name": "entity.name.class.wyrm",
+              "match": "[A-Za-z_][A-Za-z0-9_]*"
+            },
+            {
+              "name": "punctuation.separator.comma.wyrm",
+              "match": ","
+            }
+          ]
         },
         {
           "comment": "co name(...)",
           "match": "\\b(co)\\s+([A-Za-z_][A-Za-z0-9_]*)",
           "captures": {
-            "1": { "name": "keyword.other.co.wyrm" },
+            "1": { "name": "storage.type.coroutine.wyrm" },
             "2": { "name": "entity.name.function.wyrm" }
           }
         }
       ]
     },
-    "dict-sigil": {
+    "decorators": {
       "patterns": [
         {
-          "name": "punctuation.definition.dict.wyrm",
-          "match": "\\$\\{"
+          "comment": "@name(...) / @mod::name(...) - compile-time AST-rewriting decorator, see doc/language-spec.md's Decorators section. Only the qualified-name part is highlighted here; its call args are ordinary expressions handled by the rest of the grammar.",
+          "match": "(@)\\s*((?:[A-Za-z_][A-Za-z0-9_]*\\s*(?:::)\\s*)*)([A-Za-z_][A-Za-z0-9_]*)(?=\\s*\\()",
+          "captures": {
+            "1": { "name": "punctuation.definition.decorator.wyrm" },
+            "2": { "name": "entity.name.namespace.wyrm" },
+            "3": { "name": "entity.name.function.decorator.wyrm" }
+          }
         }
       ]
     },
@@ -300,17 +396,58 @@
     "scope-op": {
       "patterns": [
         {
-          "comment": "mod::name namespace access",
+          "comment": "the segment left of a `::` is a namespace, e.g. std in std::io::open",
+          "match": "\\b([A-Za-z_][A-Za-z0-9_]*)(?=::)",
+          "name": "entity.name.namespace.wyrm"
+        },
+        {
+          "comment": "an interior path segment, e.g. io in std::io::open",
+          "match": "(::)\\s*([A-Za-z_][A-Za-z0-9_]*)(?=\\s*::)",
+          "captures": {
+            "1": { "name": "keyword.operator.scope.wyrm" },
+            "2": { "name": "entity.name.namespace.wyrm" }
+          }
+        },
+        {
+          "comment": "import mod::*",
+          "match": "(::)\\s*(\\*)",
+          "captures": {
+            "1": { "name": "keyword.operator.scope.wyrm" },
+            "2": { "name": "keyword.operator.wildcard.wyrm" }
+          }
+        },
+        {
+          "comment": "mod::name(...) - a call through a namespace",
+          "match": "(::)\\s*([A-Za-z_][A-Za-z0-9_]*)(?=\\s*\\()",
+          "captures": {
+            "1": { "name": "keyword.operator.scope.wyrm" },
+            "2": { "name": "entity.name.function.call.wyrm" }
+          }
+        },
+        {
+          "comment": "mod::name - plain namespace access",
           "match": "(::)\\s*([A-Za-z_][A-Za-z0-9_]*)",
           "captures": {
             "1": { "name": "keyword.operator.scope.wyrm" },
-            "2": { "name": "entity.name.function.wyrm" }
+            "2": { "name": "variable.other.member.wyrm" }
           }
+        },
+        {
+          "comment": "import mod::* ",
+          "name": "keyword.operator.scope.wyrm",
+          "match": "::"
         }
       ]
     },
     "attribute-access": {
       "patterns": [
+        {
+          "match": "(\\.)\\s*([A-Za-z_][A-Za-z0-9_]*)\\s*(?=\\()",
+          "captures": {
+            "1": { "name": "punctuation.accessor.wyrm" },
+            "2": { "name": "entity.name.function.call.wyrm" }
+          }
+        },
         {
           "match": "(\\.)\\s*([A-Za-z_][A-Za-z0-9_]*)",
           "captures": {
@@ -336,12 +473,18 @@
           "match": ":=|\\?="
         },
         {
+          "comment": "arrows before the comparison operators, which would otherwise claim the '<' of '<-'",
+          "name": "keyword.operator.arrow.wyrm",
+          "match": "->|<-"
+        },
+        {
           "name": "keyword.operator.comparison.wyrm",
           "match": "<=>|==|!=|<=|>=|<|>"
         },
         {
-          "name": "keyword.operator.arrow.wyrm",
-          "match": "->|<-"
+          "comment": "varargs / spread sigils - before the arithmetic '*' and '**', which would otherwise consume them",
+          "name": "keyword.operator.varargs.wyrm",
+          "match": "(\\*\\*|\\*)(?=[A-Za-z_])"
         },
         {
           "name": "keyword.operator.assignment.wyrm",
@@ -354,10 +497,6 @@
         {
           "name": "keyword.operator.bitwise.wyrm",
           "match": "&|\\||\\^"
-        },
-        {
-          "name": "keyword.operator.varargs.wyrm",
-          "match": "\\*\\*|\\*(?=[A-Za-z_])"
         }
       ]
     },

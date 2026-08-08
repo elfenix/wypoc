@@ -1,3 +1,12 @@
+# Buffered file IO over the __open/__read/__write/__lseek/__close/__flush
+# primitives the interpreter exposes (wypoc: wypoc/wyrm_io.py; the C
+# interpreter in ../wyrm-vibe: src/lang/builtins.c). Handles are small
+# integers, POSIX-style, with __STDIN/__STDOUT/__STDERR pre-bound.
+#
+# Written in the subset both interpreters accept, so the same file backs
+# either one: no default parameter values, and slots are reached through an
+# explicit `this.`.
+
 newline := "\n"
 
 fn println(*content):
@@ -9,25 +18,55 @@ fn println(*content):
         __write(__STDOUT, str(arg))
     __write(__STDOUT, "\n")
 
+fn eprintln(*content):
+    first := true
+    for arg in content:
+        if not first:
+            __write(__STDERR, " ")
+        first = false
+        __write(__STDERR, str(arg))
+    __write(__STDERR, "\n")
+
 class File:
     slot handle: int = -1
 
-    fn read(size=-1) -> str:
-        return __read(handle, size)
+    fn read(size) -> str:
+        return __read(this.handle, size)
 
     fn readall() -> str:
-        return __read(handle, -1)
+        return __read(this.handle, -1)
 
     fn write(data) -> int:
-        return __write(handle, data)
+        return __write(this.handle, data)
 
-    fn seek(offset, whence=0) -> int:
-        return __lseek(handle, offset, whence)
+    fn seek(offset, whence) -> int:
+        return __lseek(this.handle, offset, whence)
+
+    fn tell() -> int:
+        return __lseek(this.handle, 0, 1)
+
+    fn flush() -> int:
+        return __flush(this.handle)
 
     fn close() -> int:
-        return __close(handle)
+        return __close(this.handle)
 
-fn open(path, mode="r") -> File:
+# `mode` is an open()-style mode string ("r", "w", "a", "rb", ...), not
+# POSIX O_* flags. The handle is an error value when the open fails, so
+# `f := try open(path, "r")` propagates it.
+fn open(path, mode) -> File:
     f := File()
-    f.handle = __open(path, mode)
+    f.handle = try __open(path, mode)
     return f
+
+fn read_file(path) -> str:
+    f := try open(path, "r")
+    defer:
+        f!close()
+    return f!readall()
+
+fn write_file(path, data) -> int:
+    f := try open(path, "w")
+    defer:
+        f!close()
+    return f!write(data)

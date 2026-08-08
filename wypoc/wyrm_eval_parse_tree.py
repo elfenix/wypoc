@@ -11,6 +11,7 @@ import operator
 import threading
 
 from wypoc import ast_nodes as ast
+from wypoc import sexpr
 from wypoc import wyrm_builtins
 from wypoc import wyrm_modules
 from wypoc.parse import parse
@@ -102,6 +103,12 @@ class Function:
     def __repr__(self):
         return f"Function({self.name!r})"
 
+    def __str__(self):
+        # What `str(f)` shows wyrm code, as against the debugging repr above:
+        # the language's own spelling of the thing. wyrm_builtins._format
+        # falls back to str() for values it has no case of its own for.
+        return f"<fn {self.name}>" if self.name else "<fn>"
+
 
 class Class:
     """A user-defined class/type: parent classes plus its own slots/methods,
@@ -158,6 +165,9 @@ class Class:
         bases = ", ".join(b.name for b in self.bases)
         return f"Class({self.name!r}{f'({bases})' if bases else ''})"
 
+    def __str__(self):
+        return f"<class {self.name}>"
+
 
 # The built-in `error` type, as a real Class so `class Foo(error) {}`
 # (base-class subclassing) type-checks like any other inheritance - see
@@ -173,6 +183,36 @@ ERROR_CLASS = Class(
     {},
     [],
 )
+
+
+# The root class of every syntax tree that crosses into wyrm code. A
+# decorator is `fn [TreeBase] name(...)`, so the tree it receives has to be
+# an instance of a real Class for ordinary dispatch (resolve_overload) to
+# find it - which is what makes a decorator's source identical whether the
+# tree is this interpreter's AST or a self-hosted parser's own node objects.
+# The AST node itself lives in the instance's `__tree` slot; `sexpr()`
+# unwraps it (see sexpr_value below), so the box is an indirection in
+# practice and the identity in effect.
+TREE_BASE_CLASS = Class(
+    "TreeBase",
+    ast.ClassDef("TreeBase", [], [ast.SlotDef("__tree", None, None, None)]),
+    {},
+    [],
+)
+
+_TREE_SLOT = "__tree"
+
+
+def tree_box(node) -> "ClassInstance":
+    """`node` boxed as a TreeBase instance - what a decorator is handed and
+    what `foo::$ast` evaluates to."""
+    inst = ClassInstance(TREE_BASE_CLASS)
+    inst.attrs[_TREE_SLOT] = Variable(node)
+    return inst
+
+
+def is_tree_box(value) -> bool:
+    return isinstance(value, ClassInstance) and value.cls is TREE_BASE_CLASS
 
 
 def _builtin_error_subtype(name: str) -> Class:
@@ -214,6 +254,9 @@ class Coroutine:
 
     def __repr__(self):
         return f"Coroutine({self.name!r})"
+
+    def __str__(self):
+        return f"<co {self.name}>"
 
 
 _current_coroutine = threading.local()
@@ -446,6 +489,9 @@ class Module:
     def __repr__(self):
         return f"Module({self.name!r})"
 
+    def __str__(self):
+        return f"<module {self.name}>"
+
 
 _module_cache: dict = {}
 
@@ -522,29 +568,108 @@ def import_module(path_segments, roots=None) -> Module:
     return mod
 
 
-def eval_using(stmt: ast.Using, ctx: dict) -> None:
-    """`using mod` bulk-imports every top-level name from `mod` into the
-    current scope; `using alias = mod::name` imports one name, aliased. The
-    unaliased `using mod::name` form is ambiguous at the syntax level (see
-    wyrm.gram's note on `Using`) - resolved here by trying the whole path as
-    a module first, and falling back to path[:-1]::path[-1] if that fails."""
-    path = stmt.path
-    if stmt.alias is not None:
-        if len(path) < 2:
-            raise ImportError(f"using {stmt.alias} = {'::'.join(path)} needs a module::name path")
-        mod = import_module(path[:-1])
-        bind_new(stmt.alias, lookup(path[-1], mod.ctx), ctx)
+def eval_import(stmt: ast.Import, ctx: dict) -> None:
+    """Implements every `import` form doc/language-spec.md's "Modules and
+    Imports" section describes - the old `using` keyword's bulk, aliased,
+    and listed imports are all `import` forms now (see ast_nodes.Import):
+
+      import a::b::c            - binds root `a` (for `::`-chain
+                                   navigation, e.g. `a::b::c` still works
+                                   afterward) *and* leaf `c` (bare access)
+      import a::b::c as x       - like above, but the leaf is bound as
+                                   `x` instead of bare `c`
+      import a::b::(x, y as z)  - pulls x/y (as x/z) out of a::b, checking
+                                   the variable namespace then the message
+                                   one for each (see _import_one)
+      import a::b::*            - bulk-imports every name (variable and
+                                   message) out of a::b, like `using a::b`
+                                   used to
+      import a::b::* except x   - same, skipping the given name(s)
+
+    A path may continue from an existing binding instead of a fresh
+    top-level module search: after `import std as _std`, `import _std::io`
+    resolves by continuing from what `_std` already names, not by
+    searching for a real top-level module called `_std`.
+
+    The bare `import a::b::c` form's leaf is ambiguous at the syntax level
+    (see wyrm.gram's note on `import_stmt`/`module_path`) - resolved here
+    by trying the whole path as a module first, falling back to
+    path[:-1]::path[-1] (module::symbol) if that fails."""
+    prior = unwrap(lookup(stmt.path[0], ctx)) if stmt.path[0] in ctx else None
+    if isinstance(prior, Module):
+        real_path = prior.name.split("::") + list(stmt.path[1:])
+        bind_root = False  # stmt.path[0] already names something; nothing fresh to bind
+    else:
+        real_path = list(stmt.path)
+        bind_root = True
+
+    if stmt.wildcard or stmt.items is not None:
+        mod = import_module(real_path)
+        if stmt.wildcard:
+            excluded = set(stmt.except_names or ())
+            for name, var in mod.ctx.items():
+                if isinstance(name, str) and name not in excluded:  # str: skips mod.ctx's message_table sentinel entry
+                    bind_new(name, unwrap(var), ctx)
+            dest_messages = message_table(ctx)
+            for name, method in message_table(mod.ctx).items():
+                if name not in excluded:
+                    dest_messages[name] = method
+        else:
+            for item in stmt.items:
+                _import_one(item.name, item.alias or item.name, mod, ctx)
         return
+
     try:
-        mod = import_module(path)
+        target = import_module(real_path)
     except ImportError:
-        if len(path) < 2:
+        if len(real_path) < 2:
             raise
-        mod = import_module(path[:-1])
-        bind_new(path[-1], lookup(path[-1], mod.ctx), ctx)
+        parent = import_module(real_path[:-1])
+        _import_one(stmt.path[-1], stmt.alias or stmt.path[-1], parent, ctx)
+    else:
+        bind_new(stmt.alias or stmt.path[-1], target, ctx)
+        if stmt.static:
+            _adopt_messages(target, ctx)
+
+    if bind_root and len(stmt.path) > 1:
+        bind_new(stmt.path[0], _module_cache[stmt.path[0]], ctx)
+
+
+def _adopt_messages(mod: "Module", ctx: dict) -> None:
+    """Pulls `mod`'s messages into `ctx`'s message namespace - what
+    `import static a::b` adds over a plain `import a::b`.
+
+    A decorator is reached as a *selector* rather than through the module
+    binding (`@traced`, never `@decolib::traced`: a selector is never a
+    path), so a plain import leaves it unreachable no matter that the module
+    is loaded. Adopting the table is what closes that, and it is the same
+    thing `import a::b::*` already does for the wildcard case.
+
+    A name this module already defines wins: a static import brings in
+    behaviour, and quietly replacing a local definition with an imported one
+    would be the wrong way round.
+
+    Note what this does *not* do: the `static` constraint itself - no
+    closures over a live environment, no coroutines, no reaching into the
+    importing module's state - is recorded, not enforced. This interpreter
+    runs a module's top level when it is imported either way, so the
+    constraint buys nothing here that it buys in a compiled implementation."""
+    destination = message_table(ctx)
+    for name, method in message_table(mod.ctx).items():
+        destination.setdefault(name, method)
+
+
+def _import_one(name: str, dest_name: str, mod: "Module", ctx: dict) -> None:
+    """Imports a single name from `mod` into `ctx` as `dest_name`, checking
+    the variable namespace first and the message namespace second - see
+    message_table's docstring on why they're separate tables now."""
+    if name in mod.ctx:
+        bind_new(dest_name, lookup(name, mod.ctx), ctx)
         return
-    for name, var in mod.ctx.items():
-        bind_new(name, unwrap(var), ctx)
+    method = message_table(mod.ctx).get(name)
+    if method is None:
+        raise NameError(f"undefined variable {name!r}")
+    message_table(ctx)[dest_name] = method
 
 
 class ReturnSignal(Exception):
@@ -655,9 +780,12 @@ def eval_char_literal(text: str) -> int:
 
 
 def eval_number_literal(text: str):
-    if text.lower().startswith("0x"):
+    lower = text.lower()
+    if lower.startswith("0x"):
         return int(text, 16)
-    if any(c in text for c in ".eE") and not text.lower().startswith("0x"):
+    if lower.startswith("0b"):
+        return int(text, 2)
+    if any(c in text for c in ".eE"):
         return float(text)
     return int(text)
 
@@ -678,6 +806,37 @@ class _UnsetType:
 
 
 UNSET = _UnsetType()
+
+
+_MESSAGES_KEY = object()  # sentinel: never equal to any wyrm name (always a str)
+
+
+def message_table(ctx: dict) -> dict:
+    """The message namespace belonging to `ctx`'s module: a `name -> Method`
+    table held entirely apart from the variable namespace `ctx` itself
+    indexes, per doc/language-spec.md's "Properties and messages occupy
+    separate namespaces" (and the reference implementation's parallel
+    module-globals/message tables) - so a variable and a message may share
+    a name without contending for a cell, and `!` (dispatch_message) never
+    resolves a plain binding by accident.
+
+    Stored under a non-string sentinel key so it's invisible to every
+    string-keyed wyrm lookup (lookup/bind/declare_new/`in`/iteration all
+    take/see only str names) while still surviving plain dict copies -
+    Scope wrapping in eval_program, eval_import's bind_new loop, etc. - the
+    same way an ordinary binding would. Walks up Scope.parent (module code
+    always runs in a scope chain rooted at its module_ctx) so every nested
+    scope shares its module's one table; a plain, unparented dict (as several
+    tests and wyrm_builtins.install() use directly) just holds its own."""
+    root = ctx
+    if isinstance(ctx, Scope):
+        while root.parent is not None:
+            root = root.parent
+    table = dict.get(root, _MESSAGES_KEY)
+    if table is None:
+        table = {}
+        dict.__setitem__(root, _MESSAGES_KEY, table)
+    return table
 
 
 def lookup(name: str, ctx: dict):
@@ -965,18 +1124,86 @@ def _try_resolve_overload(method: "Method", receivers: list) -> "MethodOverload 
 
 def dispatch_message(name: str, receivers: list, args_node, ctx: dict):
     """Shared by `recv ! name(...)`, `recv ! name`, and `(a, b) ! name(...)`:
-    looks up the generic function, resolves the best-matching overload for
-    the given receivers, and either calls it immediately (args_node is a
-    list, even an empty one for `name()`) or returns a BoundMessage
-    (args_node is None, i.e. `recv ! name` with no call parens)."""
-    method = lookup(name, ctx)
-    if not isinstance(method, Method):
-        raise TypeError(f"{name!r} is not a message/method (got {method!r})")
-    overload = resolve_overload(method, receivers)
+    looks up the generic function in the message namespace (message_table -
+    entirely separate from the variable namespace `lookup`/`ctx` indexes),
+    resolves the best-matching overload for the given receivers, and either
+    calls it immediately (args_node is a list, even an empty one for
+    `name()`) or returns a BoundMessage (args_node is None, i.e.
+    `recv ! name` with no call parens)."""
     if args_node is None:
-        return BoundMessage(receivers, overload)
+        return BoundMessage(receivers, _resolve_message(name, receivers, ctx))
     positional, kwargs = eval_args(args_node, ctx)
+    return send_message(name, receivers, positional, kwargs, ctx)
+
+
+def _resolve_message(name: str, receivers: list, ctx: dict) -> MethodOverload:
+    method = message_table(ctx).get(name)
+    if method is None:
+        raise NameError(f"no message named {name!r}")
+    return resolve_overload(method, receivers)
+
+
+def send_message(name: str, receivers: list, positional, kwargs, ctx: dict):
+    """dispatch_message with the arguments already evaluated - what a
+    decorator invocation needs (its arguments are evaluated before the tree
+    is built, see expand_decorated) and what a special-method hook like
+    `__sexpr` needs (it takes none)."""
+    overload = _resolve_message(name, receivers, ctx)
     return call_overload(overload, receivers, positional, kwargs)
+
+
+def has_message_for(name: str, receivers: list, ctx: dict) -> bool:
+    """Whether `name` has an overload applicable to `receivers` - the "ask
+    first, send only if something answers" test a hook needs, so the
+    overwhelming case (nothing answers) costs a lookup rather than a caught
+    error."""
+    method = message_table(ctx).get(name)
+    if method is None:
+        return False
+    return _try_resolve_overload(method, receivers) is not None
+
+
+class ContextualBuiltin:
+    """A builtin that needs the scope it was called from.
+
+    Almost no builtin does - car/cdr/len and friends are plain Python
+    callables that `call_value` invokes with the argument values alone. The
+    exception is a builtin whose behaviour depends on the *message*
+    namespace, which belongs to the calling module rather than to any value:
+    `sexpr(x)` asks whether x's class answers `__sexpr`, and that question
+    has no answer without a scope to ask it in. eval_expr's Call case
+    recognises this wrapper and passes `ctx` through as the first argument."""
+
+    def __init__(self, fn, name: str):
+        self.fn = fn
+        self.name = name
+
+    def __repr__(self):
+        return f"ContextualBuiltin({self.name!r})"
+
+
+def sexpr_value(ctx: dict, value):
+    """`sexpr(x)` - the canonical s-expression of a tree, in three cases,
+    tried in this order (see doc/language-spec.md's Decorators section):
+
+      1. the value's class answers `__sexpr` - it has taken control of what
+         its own values mean, and what it answers is the s-expression;
+      2. a TreeBase unwraps to the tree it carries;
+      3. anything else passes through unchanged, which is what makes this
+         the identity on an s-expression that already is one.
+
+    That ordering is what lets one decorator source serve two worlds: here a
+    tree is boxed and case 2 carries it, while against a class-based tree
+    (a self-hosted parser's own node objects) each node answers `__sexpr`
+    and case 1 carries it. Same call, same result, no import either way.
+
+    The hook is applied once and its answer is final - a `__sexpr` answering
+    another object is not re-normalized, so a chain cannot loop."""
+    if isinstance(value, ClassInstance) and has_message_for("__sexpr", [value], ctx):
+        return send_message("__sexpr", [value], [], {}, ctx)
+    if is_tree_box(value):
+        return sexpr.encode(lookup(_TREE_SLOT, value.attrs))
+    return value
 
 
 def register_native_method(name: str, fn, ctx: dict, arity: int = 1) -> None:
@@ -985,11 +1212,14 @@ def register_native_method(name: str, fn, ctx: dict, arity: int = 1) -> None:
     though `recv` isn't a ClassInstance - used for builtin per-value
     methods like str's substr, which have no Class to hang a real `fn [Cls]
     name(...)` overload on. `arity` is the number of dispatch positions
-    (receivers) the wildcard should match; almost always 1."""
-    existing = unwrap(ctx[name]) if name in ctx else None
-    method = existing if isinstance(existing, Method) else Method(name)
-    if method is not existing:
-        bind(name, method, ctx)
+    (receivers) the wildcard should match; almost always 1. Registers into
+    the message namespace (message_table), not `ctx` itself - see
+    message_table's docstring."""
+    messages = message_table(ctx)
+    method = messages.get(name)
+    if method is None:
+        method = Method(name)
+        messages[name] = method
     method.add_overload((None,) * arity, NativeBody(fn), {})
 
 
@@ -1001,28 +1231,33 @@ def _lookup_class(name: str, ctx: dict) -> Class:
 
 
 def register_overload(name: str, signature, node, closure: dict, target_ctx: dict) -> None:
-    """Defines or extends the generic function bound to `name` in
-    target_ctx. `signature=None` means a plain (non-method) `fn`: it stays
-    an ordinary Function unless/until `name` is (or becomes) a Method, at
-    which point per doc/language-spec.md it's "promoted" - the existing
-    plain function becomes that Method's wildcard/"empty type" overload.
-    A wildcard's dispatch arity (how many receivers it matches) isn't
-    something a bare `fn name(...)` states explicitly - it's derived from
-    whichever `[Cls, ...]` signature is triggering the promotion (or, if
-    a bare `fn` is redefined after the Method already exists, from one of
-    its existing overloads), since that's the arity actually in use."""
-    existing = unwrap(target_ctx[name]) if name in target_ctx else None
-    if signature is None and not isinstance(existing, Method):
+    """Defines or extends the generic function registered under `name` in
+    target_ctx's message namespace (message_table) - never target_ctx
+    itself, which stays purely the variable namespace (see message_table's
+    docstring). `signature=None` means a plain (non-method) `fn`: it stays
+    an ordinary Function bound in target_ctx unless/until `name` is (or
+    becomes) a message, at which point per doc/language-spec.md it's
+    "promoted" - a *copy* of the existing plain function becomes that
+    message's wildcard/"empty type" overload, leaving the original
+    variable binding untouched (a variable and a message of the same name
+    coexist in their own namespaces from then on). A wildcard's dispatch
+    arity (how many receivers it matches) isn't something a bare
+    `fn name(...)` states explicitly - it's derived from whichever
+    `[Cls, ...]` signature is triggering the promotion (or, if a bare `fn`
+    is redefined after the message already exists, from one of its
+    existing overloads), since that's the arity actually in use."""
+    messages = message_table(target_ctx)
+    method = messages.get(name)
+    if signature is None and method is None:
         bind(name, Function(name, node, closure), target_ctx)
         return
-    if isinstance(existing, Method):
-        method = existing
-    else:
+    if method is None:
         method = Method(name)
+        existing = unwrap(target_ctx[name]) if name in target_ctx else None
         if isinstance(existing, Function):
             wildcard_arity = len(signature) if signature is not None else 1
             method.add_overload((None,) * wildcard_arity, existing.node, existing.closure)
-        bind(name, method, target_ctx)
+        messages[name] = method
     if signature is None:
         wildcard_arity = len(method.overloads[0].signature) if method.overloads else 1
         signature = (None,) * wildcard_arity
@@ -1055,15 +1290,18 @@ def stop_iteration() -> ClassInstance:
 
 
 _PRIMITIVE_TYPE_CHECKS = {
-    "nil": lambda v: v is None,
+    # One nil, two representations - see wyrm_builtins._Nil.__eq__.
+    "nil": lambda v: v is None or v is wyrm_builtins.NIL,
     "bool": lambda v: isinstance(v, bool),
     "int": lambda v: isinstance(v, int) and not isinstance(v, bool),
     "uint": lambda v: isinstance(v, int) and not isinstance(v, bool) and v >= 0,
     "float": lambda v: isinstance(v, float),
-    # No distinct symbol representation in this POC (see eval_expr's
-    # ast.Symbol case) - `is sym` can't be told apart from `is str` here.
     "str": lambda v: isinstance(v, str),
-    "sym": lambda v: isinstance(v, str),
+    "sym": lambda v: isinstance(v, wyrm_builtins.Symbol),
+    "list": lambda v: isinstance(v, list),
+    "tuple": lambda v: isinstance(v, tuple),
+    "dict": lambda v: isinstance(v, dict),
+    "pair": lambda v: isinstance(v, wyrm_builtins.Pair),
     "error": lambda v: wyrm_builtins.is_error(v),
 }
 
@@ -1083,6 +1321,119 @@ def _matches_type(value, type_expr: "ast.TypeExpr", ctx: dict) -> bool:
     except (NameError, TypeError):
         return False
     return isinstance(value, ClassInstance) and _class_distance(value.cls, cls) is not None
+
+
+# ---------------------------------------------------------------------
+# Decorators
+# ---------------------------------------------------------------------
+
+class DecoratorError(Exception):
+    """A decorator that could not be applied: the tree it was handed cannot
+    cross, the tree it answered is not a well-formed one, or what came back
+    is the wrong sort of thing for where the decorator was written. The
+    message names the decorator and, where there is one, the source line -
+    the *use* site's line rather than the decorator's own, which is the more
+    useful of the two."""
+
+
+# What may come back in statement position. An expression coming back there
+# is wrapped in an ExprStmt (a decorator answering `1 + 1` for a statement
+# means the statement `1 + 1`); a statement coming back in *expression*
+# position has nowhere to go and is an error instead.
+_STATEMENT_NODES = (
+    ast.ExprStmt, ast.VarDecl, ast.Assign, ast.StaticDecl, ast.If, ast.While,
+    ast.For, ast.Break, ast.Continue, ast.Return, ast.Pass, ast.WithBlock,
+    ast.WithSimple, ast.Defer, ast.FnDef, ast.CoDef, ast.ClassDef,
+    ast.Import, ast.FromImport,
+)
+
+
+def expand_decorated(node: ast.Decorated, ctx: dict, as_statement: bool):
+    """`@dec(args) X` -> the tree that gets evaluated in X's place.
+
+    The rewrite happens once per `Decorated` node and is cached on it, which
+    is this interpreter's stand-in for the reference implementation's
+    "decorators run at compile time": a decorated definition nested inside a
+    function is rewritten the first time that function runs, not on every
+    call. What the decorator answers is therefore fixed for the life of the
+    parsed tree, exactly as a compile-time rewrite would be.
+
+    Nesting resolves innermost first - `@a @b X` is `@a (@b X)` - so the
+    outer decorator is handed whatever the inner one answered, not the
+    original tree.
+
+    The decorator itself is an ordinary message send on the boxed tree, so
+    dispatch, multiple dispatch and native messages all behave exactly as
+    they do at run time rather than being reimplemented here. Reaching one
+    written in wyrm needs `import static`, which is what runs its module
+    before this one gets here (see eval_import)."""
+    cached = getattr(node, "_expanded", None)
+    if cached is not None:
+        return cached
+
+    decorator = node.decorator
+    inner = node.inner
+    if isinstance(inner, ast.Decorated):
+        inner = expand_decorated(inner, ctx, as_statement)
+
+    try:
+        positional, kwargs = eval_args(decorator.args, ctx)
+        answer = send_message(decorator.name, [tree_box(inner)],
+                              positional, kwargs, ctx)
+        result = sexpr.decode(sexpr_value(ctx, answer))
+    except sexpr.SexprError as exc:
+        raise _decorator_error(decorator, str(exc)) from None
+    except NameError as exc:
+        # The overwhelmingly common mistake: the decorator's module was
+        # imported without `static`, so it has not run and its messages are
+        # not in this module's namespace yet.
+        raise _decorator_error(
+            decorator,
+            f"{exc} (a decorator must be reachable through `import static`)",
+        ) from None
+
+    if isinstance(result, _STATEMENT_NODES):
+        if not as_statement:
+            raise _decorator_error(
+                decorator,
+                f"answered a {type(result).__name__} where an expression was required",
+            )
+    elif as_statement:
+        result = ast.ExprStmt(result, pos=getattr(result, "pos", None))
+
+    node._expanded = result
+    return result
+
+
+def _decorator_error(decorator: ast.Decorator, message: str) -> DecoratorError:
+    where = f" at line {decorator.pos[0]}" if decorator.pos else ""
+    return DecoratorError(f"@{decorator.name}{where}: {message}")
+
+
+def _decorator_dump(this, *args, **kwargs):
+    """`@__dump X` - prints the s-expression the decorator would receive and
+    compiles X unchanged. Arguments are accepted and ignored. Native, so it
+    exercises the wire format without needing a decorator written in wyrm
+    (and therefore without needing `import static`) - see doc/sexpr-spec.md's
+    "Trying it"."""
+    wyrm_builtins.print_(wyrm_builtins._to_str(
+        sexpr.encode(lookup(_TREE_SLOT, this.attrs))) + "\n")
+    return this
+
+
+def _decorator_identity(this, *args, **kwargs):
+    """`@__identity X` - rebuilds X's tree from its s-expression and compiles
+    that, so every use is a full encode-then-decode round trip. Arguments
+    are accepted and ignored."""
+    return sexpr.encode(lookup(_TREE_SLOT, this.attrs))
+
+
+def install_native_decorators(ctx: dict) -> None:
+    """Registers `@__dump`/`@__identity` as TreeBase messages. Typed on
+    TreeBase rather than registered as wildcards (register_native_method)
+    so they only ever answer for a tree."""
+    for name, fn in (("__dump", _decorator_dump), ("__identity", _decorator_identity)):
+        register_overload(name, (TREE_BASE_CLASS,), NativeBody(fn), {}, ctx)
 
 
 def instantiate(cls: Class, positional, kwargs) -> "ClassInstance | WyrmError":
@@ -1125,11 +1476,10 @@ def instantiate(cls: Class, positional, kwargs) -> "ClassInstance | WyrmError":
 def _lookup_dunder(cls: Class, name: str) -> "Method | None":
     """A special method (e.g. `__iter__`) applicable to `cls`, if any class
     in scope has defined one - same lookup instantiate() uses for `init`:
-    dunders register into the class's own defining scope (`cls.closure`)
-    as ordinary Methods, so this is just a name lookup, not a new
-    mechanism."""
-    method = unwrap(cls.closure[name]) if name in cls.closure else None
-    return method if isinstance(method, Method) else None
+    dunders register into the class's own defining scope's message
+    namespace (`message_table(cls.closure)`), same as any other message,
+    so this is just a name lookup there, not a new mechanism."""
+    return message_table(cls.closure).get(name)
 
 
 def _call_dunder(instance: ClassInstance, name: str, positional=()):
@@ -1249,7 +1599,9 @@ def eval_expr(node, ctx: dict):
     if isinstance(node, ast.Bool):
         return node.value
     if isinstance(node, ast.Symbol):
-        return node.name
+        return wyrm_builtins.Symbol(node.name)
+    if isinstance(node, ast.EllipsisExpr):
+        return wyrm_builtins.ELLIPSIS
     if isinstance(node, ast.Name):
         return lookup(node.id, ctx)
     if isinstance(node, ast.Tuple):
@@ -1294,7 +1646,28 @@ def eval_expr(node, ctx: dict):
     if isinstance(node, ast.Call):
         func = eval_expr(node.func, ctx)
         positional, kwargs = eval_args(node.args, ctx)
+        if isinstance(func, ContextualBuiltin):
+            return func.fn(ctx, *positional, **kwargs)
         return call_value(func, positional, kwargs)
+    if isinstance(node, ast.Decorated):
+        return eval_expr(expand_decorated(node, ctx, as_statement=False), ctx)
+    if isinstance(node, ast.AstRef):
+        # `foo::$ast` - the tree of the definition `foo` names. Reached
+        # through the binding rather than through a separate name-to-tree
+        # table, which is what makes it describe the definition *after*
+        # decoration: a decorated `fn` binds what the decorator answered, so
+        # that is the tree found here. It also means `foo = other` leaves
+        # the answer describing `other`, which is the documented
+        # "describes the definition, not the binding" caveat seen from this
+        # side.
+        target = eval_expr(node.obj, ctx)
+        definition = getattr(target, "node", None)
+        if definition is None:
+            raise TypeError(
+                f"'::${node.field}' needs a fn, co or class definition "
+                f"(got {type(target).__name__})"
+            )
+        return tree_box(definition)
     if isinstance(node, ast.Index):
         obj = eval_expr(node.obj, ctx)
         idx = eval_expr(node.index, ctx)
@@ -1303,6 +1676,14 @@ def eval_expr(node, ctx: dict):
             # the single indexed char, per doc/language-spec.md's Lookup
             # Operator ("7"[0] -> the u32 for the char '7', not the char).
             return ord(obj[idx])
+        if isinstance(obj, dict):
+            # A missing key hands back the Unset error value rather than
+            # raising, matching doc/language-spec.md's predefined
+            # `Unset: error` type and enabling
+            # `d['missing'] catch ...`/`try d['missing']` - see the
+            # reference implementation's same divergence from a raw
+            # KeyError.
+            return obj.get(idx, UNSET)
         return obj[idx]
     if isinstance(node, ast.Scope):
         obj = eval_expr(node.obj, ctx)
@@ -1332,6 +1713,8 @@ def eval_expr(node, ctx: dict):
     if isinstance(node, ast.ThisRef):
         return lookup("this", ctx)
     if isinstance(node, ast.Defined):
+        if not isinstance(node.symbol, ast.Symbol):
+            raise TypeError("defined() takes a symbol literal, e.g. defined('foo)")
         return is_defined(node.symbol.name, ctx)
     if isinstance(node, ast.SetIfUnset):
         if isinstance(node.target, ast.Name):
@@ -1394,17 +1777,15 @@ def eval_stmt(stmt, ctx: dict) -> "object":
     produce the value of the last statement executed" note, only a directly
     trailing expression statement is threaded through here - a block ending
     in a compound statement (if/while/for) evaluates to nil."""
+    if isinstance(stmt, ast.Decorated):
+        return eval_stmt(expand_decorated(stmt, ctx, as_statement=True), ctx)
     if isinstance(stmt, ast.Import):
-        import_module(stmt.path)  # loads the whole chain, caching every prefix along the way
-        bind_new(stmt.path[0], _module_cache[stmt.path[0]], ctx)
+        eval_import(stmt, ctx)
         return
     if isinstance(stmt, ast.FromImport):
         mod = import_module(stmt.path)
         for name in stmt.names:
             bind_new(name, lookup(name, mod.ctx), ctx)
-        return
-    if isinstance(stmt, ast.Using):
-        eval_using(stmt, ctx)
         return
     if isinstance(stmt, ast.VarDecl):
         # `var`, and the `:=` shorthand (see actions.make_assignment_stmt) -

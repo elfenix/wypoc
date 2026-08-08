@@ -21,14 +21,33 @@ _WYPOC_DIR = os.path.dirname(os.path.abspath(__file__))
 DEFAULT_COREPATH = os.path.join(_WYPOC_DIR, "corelib")
 
 
+_script_root: "str | None" = None
+
+
+def set_script_root(path: "str | None") -> "str | None":
+    """Register the directory a script is being run from, so its own
+    neighbours are importable - `import static decolib` next to `main.wy`
+    resolves without WYRM_PATH being set at all, the same way Python puts a
+    script's directory on sys.path. Set by cli.py (and by tests running a
+    sample); returns the previous value so a caller can restore it."""
+    global _script_root
+    previous = _script_root
+    _script_root = os.path.abspath(path) if path else None
+    return previous
+
+
 def search_paths(env: dict = None) -> list:
-    """WYRM_PATH entries (colon-separated), in search order, followed by the
-    default corelib directory as a fallback. Reads `env` (os.environ by
-    default) fresh on every call - nothing here is cached at import time -
-    so tests can override WYRM_PATH without needing to patch this module."""
+    """The search roots, in order: WYRM_PATH's entries (colon-separated),
+    then the running script's own directory if one is registered (see
+    set_script_root), then the default corelib directory as a fallback.
+    Reads `env` (os.environ by default) fresh on every call - nothing here is
+    cached at import time - so tests can override WYRM_PATH without needing
+    to patch this module."""
     env = os.environ if env is None else env
     raw = env.get("WYRM_PATH", "")
     paths = [p for p in raw.split(":") if p]
+    if _script_root is not None:
+        paths.append(_script_root)
     paths.append(DEFAULT_COREPATH)
     return paths
 

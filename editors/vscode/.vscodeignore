@@ -1,3 +1,11 @@
-.vscodeignore
+# Keep the .vsix to what the extension needs at runtime: out/ plus the
+# production dependency tree (vscode-languageclient - see rebuild.sh on why
+# that one must ship). Sources and build config are in the repo already.
+.vscode/**
+src/**
+examples/**
+tsconfig.json
 rebuild.sh
-*.vsix
+**/*.map
+**/*.ts
+**/*.vsix

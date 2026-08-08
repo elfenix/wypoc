@@ -18,6 +18,8 @@ EXPECTED = {
     "arr": [99, 2, 3, 4],
     "grown": [1, 2, 3, 4, 5],
     "pruned": [1],
+    "expanded": [1, 0, 0, 0],
+    "appended": [1, 2],
     "d": {"a": 100},
     "removed": 2,
     "grid": [[1, 42], [3, 4]],
@@ -59,7 +61,7 @@ def test_dict_remove_missing_key_raises():
     ctx: dict = {}
     wyrm_builtins.install(ctx)
     with pytest.raises(KeyError):
-        eval_program(parse('d := ${ "a": 1 }\nd!remove("missing")\n'), ctx)
+        eval_program(parse('d := { "a": 1 }\nd!remove("missing")\n'), ctx)
 
 
 def test_dict_remove_rejects_non_dict_receiver():
@@ -89,6 +91,57 @@ def test_list_resize_grows_with_unset(ctx):
     assert a[3] is UNSET and a[4] is UNSET
 
 
+def test_list_expand_is_relative_and_shares_the_fill_value():
+    from wypoc.parse import parse
+    from wypoc.wyrm_eval_parse_tree import eval_program
+
+    ctx: dict = {}
+    wyrm_builtins.install(ctx)
+    eval_program(parse("a := [1]\na!expand(0, 3)\na!expand(9, 0)\n"), ctx)
+    assert ctx["a"].value == [1, 0, 0, 0], "expand grows by count, not to count"
+
+    # A mutable fill is stored by reference, one object shared per slot.
+    fresh: dict = {}
+    wyrm_builtins.install(fresh)
+    eval_program(parse("row := [0]\ngrid := []\ngrid!expand(row, 2)\n"), fresh)
+    grid = fresh["grid"].value
+    assert grid[0] is grid[1] is fresh["row"].value
+
+
+def test_list_expand_rejects_negative_count():
+    from wypoc.parse import parse
+    from wypoc.wyrm_eval_parse_tree import eval_program
+
+    ctx: dict = {}
+    wyrm_builtins.install(ctx)
+    with pytest.raises(ValueError, match="count must be >= 0"):
+        eval_program(parse("a := [1, 2, 3]\na!expand(0, -1)\n"), ctx)
+
+
+def test_list_append_grows_by_one_and_chains():
+    from wypoc.parse import parse
+    from wypoc.wyrm_eval_parse_tree import eval_program
+
+    ctx: dict = {}
+    wyrm_builtins.install(ctx)
+    eval_program(parse('a := []\na!append(1)!append("two")\n'), ctx)
+    assert ctx["a"].value == [1, "two"]
+
+
+def test_list_expand_and_append_reject_non_list_receivers():
+    from wypoc.parse import parse
+    from wypoc.wyrm_eval_parse_tree import eval_program
+
+    for src, message in (
+        ('d := { "a": 1 }\nd!expand(0, 2)\n', "expand: not a list"),
+        ('d := { "a": 1 }\nd!append(0)\n', "append: not a list"),
+    ):
+        ctx: dict = {}
+        wyrm_builtins.install(ctx)
+        with pytest.raises(TypeError, match=message):
+            eval_program(parse(src), ctx)
+
+
 def test_list_resize_rejects_negative_count():
     from wypoc.parse import parse
     from wypoc.wyrm_eval_parse_tree import eval_program
@@ -106,4 +159,4 @@ def test_list_resize_rejects_non_list_receiver():
     ctx: dict = {}
     wyrm_builtins.install(ctx)
     with pytest.raises(TypeError, match="not a list"):
-        eval_program(parse('d := ${ "a": 1 }\nd!resize(2)\n'), ctx)
+        eval_program(parse('d := { "a": 1 }\nd!resize(2)\n'), ctx)

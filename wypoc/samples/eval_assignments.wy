@@ -18,7 +18,13 @@ grown[4] = 5
 pruned := [1, 2, 3]
 pruned!resize(1)
 
-d := ${ "a": 1, "b": 2 }
+expanded := [1]
+expanded!expand(0, 3)
+
+appended := [1]
+appended!append(2)
+
+d := { "a": 1, "b": 2 }
 d["a"] = 100
 removed := d!remove("b")
 

@@ -1,26 +1,34 @@
-"""Statement-list ("block") compilation - the state-machine engine that
-turns a `wyrm` function body into chunks, per DESIGN.md's "Chunk model".
+"""Statement compilation.
 
-If/While/Return/Break/Continue and non-tail call splits are handled
-directly in `run_stmts` (they need block_path/remaining_stmts/fallthrough
-plumbing that a plain `(ctx, node)` handler signature doesn't carry, and
-that set of control-flow forms is expected to stay small - see handlers.py's
-module docstring). Every other statement kind (currently Assign, ExprStmt)
-is dispatched through STATEMENT_HANDLERS/LOCAL_COLLECT_HANDLERS, so new
-plain-statement kinds can be added - from this file or another - without
-touching `run_stmts`/`collect_locals_stmt` themselves.
+A wyrm function body compiles to a C function body, statement for statement:
+`if` is `if`, `while` is `while`, `break` is `break`. The previous backend had
+to build a graph of resumable chunks and jump between them, because the
+convention it targeted could not hold a C stack frame across a call; the
+convention this one targets can, so the control flow survives intact and the
+join-point/continuation machinery is gone.
+
+Two passes remain, and only because `--compile` does no type inference:
+`collect_locals` walks the body first so every local's C declaration can be
+emitted at the top of the function (C requires a declaration before use, and
+a `var` inside a loop body must not be redeclared on each iteration), then
+`run_stmts` emits.
+
+Statement kinds are dispatched through STATEMENT_HANDLERS/LOCAL_COLLECT_
+HANDLERS, so a new one can be added from this file or another without
+touching the runner. Control flow (`if`/`while`/`return`/`break`/`continue`)
+stays in the runner itself: each needs to recurse into `run_stmts` for its
+own body, which a plain `(ctx, node)` handler signature cannot express.
 """
 from wypoc import ast_nodes as ast
 
-from .calls import compile_call_split, compile_tail_call, split_call_stmt
+from .calls import compile_call  # noqa: F401  (registers the Call expression handler)
 from .context import FnContext
 from .errors import err
-from .expressions import compile_expr
+from .expressions import BOOL, compile_expr, compile_expr_as
 from .handlers import LOCAL_COLLECT_HANDLERS, STATEMENT_HANDLERS
 from .native_blocks import compile_native_block, is_native_block_call
-from .wtypes import TYPES
 
-# -- pass 1: collect locals (every local must have a known type before use) --
+# -- pass 1: collect locals ------------------------------------------------
 
 
 def collect_locals(ctx: FnContext, stmts):
@@ -31,10 +39,9 @@ def collect_locals(ctx: FnContext, stmts):
 def collect_locals_stmt(ctx: FnContext, s):
     if isinstance(s, ast.If):
         collect_locals(ctx, s.body)
-        for e in s.elifs:
-            collect_locals(ctx, e.body)
-        if s.orelse:
-            collect_locals(ctx, s.orelse)
+        for clause in s.elifs:
+            collect_locals(ctx, clause.body)
+        collect_locals(ctx, s.orelse or [])
         return
     if isinstance(s, ast.While):
         collect_locals(ctx, s.body)
@@ -49,9 +56,9 @@ def collect_locals_stmt(ctx: FnContext, s):
 
 @LOCAL_COLLECT_HANDLERS.register(ast.VarDecl)
 def _collect_var_decl(ctx: FnContext, s: ast.VarDecl):
-    # --compile does no type inference, so every `var` (and `:=`, which
-    # desugars to a VarDecl with no type - see actions.make_assignment_stmt)
-    # needs an explicit type to give its C local a concrete representation.
+    # No type inference, so every `var` (and `:=`, which desugars to a
+    # VarDecl with no type - see actions.make_assignment_stmt) needs an
+    # explicit type to give its C local a representation.
     for t in s.targets:
         if t.type is None:
             err(
@@ -64,10 +71,9 @@ def _collect_var_decl(ctx: FnContext, s: ast.VarDecl):
 @LOCAL_COLLECT_HANDLERS.register(ast.Assign)
 def _collect_assign(ctx: FnContext, s: ast.Assign):
     if s.op == "?=":
-        # `foo ?= expr` (only assign if `foo` is undefined/an error) has no
-        # compiled equivalent yet - _compile_assign below would otherwise
-        # silently emit an unconditional assignment, which is wrong rather
-        # than merely unsupported.
+        # `foo ?= expr` assigns only when `foo` is unset or an error, and a
+        # compiled local is neither - _compile_assign would emit an
+        # unconditional assignment, which is wrong rather than unsupported.
         err("'?=' not supported by --compile", s)
     for t in s.targets:
         if not isinstance(t, ast.NameTarget):
@@ -84,203 +90,177 @@ def _collect_expr_stmt(ctx: FnContext, s: ast.ExprStmt):
     pass
 
 
-# -- pass 2: emit --
+# -- pass 2: emit ----------------------------------------------------------
 
 
-def run_stmts(ctx: FnContext, stmts, block_path, fallthrough):
-    """Compile `stmts` into the currently-open chunk, opening/closing
-    further chunks as needed for control flow and calls. `fallthrough`
-    is the 0-arg callable to invoke (then close the chunk) if control
-    falls off the end of `stmts` without an explicit return/break/
-    continue/call-split."""
-    for i, s in enumerate(stmts):
+def run_stmts(ctx: FnContext, stmts):
+    """Emit `stmts` into the current C block. Answers True if control cannot
+    fall off the end (the block ended in a `return`), so the caller knows
+    whether a trailing implicit `return nil` is reachable."""
+    for s in stmts:
         if isinstance(s, ast.Pass):
             continue
-        if isinstance(s, ast.Continue):
-            if ctx.continue_target is None:
-                err("'continue' outside of a loop", s)
-            ctx.continue_target()
-            ctx.end_chunk()
-            return
-        if isinstance(s, ast.Break):
-            if ctx.break_target is None:
-                err("'break' outside of a loop", s)
-            ctx.break_target()
-            ctx.end_chunk()
-            return
         if isinstance(s, ast.Return):
             compile_return(ctx, s)
-            ctx.end_chunk()
-            return
+            return True
+        if isinstance(s, ast.Break):
+            if ctx.loop_depth == 0:
+                err("'break' outside of a loop", s)
+            ctx.emit("break;")
+            return True
+        if isinstance(s, ast.Continue):
+            if ctx.loop_depth == 0:
+                err("'continue' outside of a loop", s)
+            ctx.emit("continue;")
+            return True
         if isinstance(s, ast.If):
-            compile_if_stmt(ctx, s, block_path, stmts[i + 1:], fallthrough)
-            return
+            compile_if_stmt(ctx, s)
+            continue
         if isinstance(s, ast.While):
-            compile_while_stmt(ctx, s, block_path, stmts[i + 1:], fallthrough)
-            return
-        split = split_call_stmt(s)
-        if split is not None:
-            compile_call_split(ctx, split, block_path, stmts[i + 1:], fallthrough, run_stmts)
-            return
+            compile_while_stmt(ctx, s)
+            continue
         handler = STATEMENT_HANDLERS.get(s)
         if handler is None:
             err("statement not supported by --compile", s)
         handler(ctx, s)
-    fallthrough()
-    ctx.end_chunk()
+    return False
 
 
-def continuation_for(ctx: FnContext, remaining_stmts, block_path, fallthrough):
-    """Build the 0-arg jump callable a branch/loop-exit should invoke
-    to continue with `remaining_stmts` (possibly empty) in block_path,
-    followed by `fallthrough`. Returns (jump, materialize) where
-    materialize (or None, if no join chunk was needed) must be called
-    once, after all users of `jump` have been emitted, to compile the
-    join chunk's body."""
-    if not remaining_stmts:
-        return fallthrough, None
-    join_name = ctx.same_block_chunk_name(block_path)
+def compile_if_stmt(ctx: FnContext, s: ast.If):
+    """`if`/`elif`/`else`.
 
-    def jump():
-        ctx.emit(f"wyrm_state_set_pending(state, {join_name});")
-        ctx.emit("return WYRM_EXEC_CONTINUE;")
+    An `elif`'s condition has to be evaluated *after* the preceding branch is
+    known false, so it cannot be hoisted into the same block - which is why
+    the chain nests as `else { if (...) ... }` rather than flattening to
+    `else if`. That is exactly what an `elif` means, and it is what keeps a
+    condition containing a call from running early."""
+    ctx.emit(f"if ({_condition(ctx, s.cond)}) {{")
+    ctx.indent += 1
+    run_stmts(ctx, s.body)
+    ctx.indent -= 1
 
-    def materialize():
-        ctx.begin_chunk(join_name, static=True)
-        run_stmts(ctx, remaining_stmts, block_path, fallthrough)
-
-    return jump, materialize
-
-
-def compile_if_stmt(ctx: FnContext, s: ast.If, block_path, remaining_stmts, fallthrough):
-    join, materialize_join = continuation_for(ctx, remaining_stmts, block_path, fallthrough)
-
-    branches = [(s.cond, s.body)] + [(e.cond, e.body) for e in s.elifs]
-    branch_targets = [(cond, *ctx.new_child_block(block_path), body) for cond, body in branches]
-    else_target = ctx.new_child_block(block_path) if s.orelse else None
-
-    for i, (cond, _path, name, _body) in enumerate(branch_targets):
-        kw = "if" if i == 0 else "} else if"
-        ctx.emit(f"{kw} ({compile_expr(ctx, cond)}) {{")
+    clauses = list(s.elifs)
+    if clauses:
+        ctx.emit("} else {")
         ctx.indent += 1
-        ctx.emit(f"wyrm_state_set_pending(state, {name});")
-        ctx.emit("return WYRM_EXEC_CONTINUE;")
+        compile_if_stmt(ctx, ast.If(clauses[0].cond, clauses[0].body,
+                                    clauses[1:], s.orelse))
         ctx.indent -= 1
-    ctx.emit("} else {")
+        ctx.emit("}")
+        return
+    if s.orelse:
+        ctx.emit("} else {")
+        ctx.indent += 1
+        run_stmts(ctx, s.orelse)
+        ctx.indent -= 1
+    ctx.emit("}")
+
+
+def compile_while_stmt(ctx: FnContext, s: ast.While):
+    """`while`.
+
+    The condition is re-evaluated every iteration, so anything hoisted out of
+    it has to be re-run every iteration too - `while (1) { <hoisted> if
+    (!cond) break; ... }` rather than `while (cond)`. When nothing was
+    hoisted (the common case) the plain form is emitted instead, since it
+    reads as what was written."""
+    mark = len(ctx.lines)
+    condition = _condition(ctx, s.cond)
+    hoisted = ctx.lines[mark:]
+
+    if not hoisted:
+        ctx.emit(f"while ({condition}) {{")
+        ctx.indent += 1
+        ctx.loop_depth += 1
+        run_stmts(ctx, s.body)
+        ctx.loop_depth -= 1
+        ctx.indent -= 1
+        ctx.emit("}")
+        return
+
+    del ctx.lines[mark:]
+    ctx.emit("for (;;) {")
     ctx.indent += 1
-    if else_target is not None:
-        ctx.emit(f"wyrm_state_set_pending(state, {else_target[1]});")
-        ctx.emit("return WYRM_EXEC_CONTINUE;")
-    else:
-        join()
+    for line in hoisted:
+        ctx.lines.append(("    " + line) if line else "")
+    ctx.emit(f"if (!({condition})) {{ break; }}")
+    ctx.loop_depth += 1
+    run_stmts(ctx, s.body)
+    ctx.loop_depth -= 1
     ctx.indent -= 1
     ctx.emit("}")
-    ctx.end_chunk()
-
-    for cond, path, name, body in branch_targets:
-        ctx.begin_chunk(name, static=True)
-        run_stmts(ctx, body, path, join)
-    if else_target is not None:
-        else_path, else_name = else_target
-        ctx.begin_chunk(else_name, static=True)
-        run_stmts(ctx, s.orelse, else_path, join)
-
-    if materialize_join:
-        materialize_join()
 
 
-def compile_while_stmt(ctx: FnContext, s: ast.While, block_path, remaining_stmts, fallthrough):
-    after, materialize_after = continuation_for(ctx, remaining_stmts, block_path, fallthrough)
-
-    check_name = ctx.same_block_chunk_name(block_path)
-    body_path, body_name = ctx.new_child_block(block_path)
-
-    ctx.emit(f"wyrm_state_set_pending(state, {check_name});")
-    ctx.emit("return WYRM_EXEC_CONTINUE;")
-    ctx.end_chunk()
-
-    ctx.begin_chunk(check_name, static=True)
-    ctx.emit(f"if ({compile_expr(ctx, s.cond)}) {{")
-    ctx.indent += 1
-    ctx.emit(f"wyrm_state_set_pending(state, {body_name});")
-    ctx.emit("return WYRM_EXEC_CONTINUE;")
-    ctx.indent -= 1
-    ctx.emit("} else {")
-    ctx.indent += 1
-    after()
-    ctx.indent -= 1
-    ctx.emit("}")
-    ctx.end_chunk()
-
-    def loop_back():
-        ctx.emit(f"wyrm_state_set_pending(state, {check_name});")
-        ctx.emit("return WYRM_EXEC_CONTINUE;")
-
-    ctx.begin_chunk(body_name, static=True)
-    old_break, old_continue = ctx.break_target, ctx.continue_target
-    ctx.break_target, ctx.continue_target = after, loop_back
-    run_stmts(ctx, s.body, body_path, loop_back)
-    ctx.break_target, ctx.continue_target = old_break, old_continue
-
-    if materialize_after:
-        materialize_after()
+def _condition(ctx: FnContext, node) -> str:
+    """A condition as a C truth value. Any wyrm scalar is usable as one, so
+    this only names the conversion rather than demanding a bool."""
+    value = compile_expr(ctx, node)
+    return value.expr if value.type is BOOL else f"(({value.expr}) != 0)"
 
 
 def compile_return(ctx: FnContext, s: ast.Return):
     if s.value is None:
-        ctx.emit("return WYRM_EXEC_DONE;")
+        ctx.emit("*out = lang_value_nil();")
+        ctx.emit("return true;")
         return
     if isinstance(s.value, ast.Tuple):
-        err("multi-value return not supported by --compile (fn return type is single-valued)", s)
-    if isinstance(s.value, ast.Call):
-        if is_native_block_call(s.value):
-            err("native::block() cannot be used as a return value", s)
-        compile_tail_call(ctx, s.value)
-        return
-    if ctx.ret_type_name is None:
+        err("multi-value return not supported by --compile (a fn returns one value)", s)
+    if isinstance(s.value, ast.Call) and is_native_block_call(s.value):
+        err("native::block() cannot be used as a return value", s)
+    if ctx.ret_type is None:
         err(f"fn '{ctx.fndef.name}' has no declared return type but returns a value", s)
-    val = compile_expr(ctx, s.value)
-    ctx.emit(f"wyrm_state_push_return(state, wyrm_value_word((wyrm_word)({val})));")
-    ctx.emit("return WYRM_EXEC_DONE;")
+    value = compile_expr_as(ctx, s.value, ctx.ret_type, f"fn '{ctx.fndef.name}' return")
+    ctx.emit(f"*out = {ctx.ret_type.boxed(value)};")
+    ctx.emit("return true;")
 
 
 @STATEMENT_HANDLERS.register(ast.VarDecl)
 def _compile_var_decl(ctx: FnContext, s: ast.VarDecl):
     if s.values is None:
-        return  # forward declaration only - nothing to emit
+        return  # forward declaration; the C declaration is already emitted
     if len(s.targets) != len(s.values):
         err("declaration target/value count mismatch", s)
-    _compile_targets_and_values(ctx, [t.name for t in s.targets], s.values)
+    _assign_all(ctx, [t.name for t in s.targets], s.values)
 
 
 @STATEMENT_HANDLERS.register(ast.Assign)
 def _compile_assign(ctx: FnContext, s: ast.Assign):
     if len(s.targets) != len(s.values):
         err("assignment target/value count mismatch", s)
-    _compile_targets_and_values(ctx, [t.name for t in s.targets], s.values)
+    _assign_all(ctx, [t.name for t in s.targets], s.values)
 
 
-def _compile_targets_and_values(ctx: FnContext, names, value_nodes):
+def _assign_all(ctx: FnContext, names, value_nodes):
     if len(names) == 1:
-        ctx.emit_local_assign(names[0], compile_expr(ctx, value_nodes[0]))
+        target = ctx.type_of(names[0])
+        value = compile_expr_as(ctx, value_nodes[0], target, f"'{names[0]}'")
+        ctx.emit(f"{names[0]} = {value};")
         return
-    # Evaluate every RHS into a temp first so `a, b = b, a` works.
-    tmp_names = []
-    for name, v in zip(names, value_nodes):
-        ctype_, _tag, _field = TYPES[ctx.locals[name]]
+    # Every right-hand side is evaluated into a temporary first, so
+    # `a, b = b, a` swaps rather than assigning `a` twice.
+    temporaries = []
+    for name, node in zip(names, value_nodes):
+        target = ctx.type_of(name)
         tmp = ctx.new_tmp()
-        ctx.emit(f"{ctype_} {tmp} = {compile_expr(ctx, v)};")
-        tmp_names.append(tmp)
-    for name, tmp in zip(names, tmp_names):
-        ctx.emit_local_assign(name, tmp)
+        ctx.emit(f"{target.ctype} {tmp} = "
+                 f"{compile_expr_as(ctx, node, target, f'{name!r}')};")
+        temporaries.append(tmp)
+    for name, tmp in zip(names, temporaries):
+        ctx.emit(f"{name} = {tmp};")
 
 
 @STATEMENT_HANDLERS.register(ast.ExprStmt)
 def _compile_expr_stmt(ctx: FnContext, s: ast.ExprStmt):
-    call = s.value
-    if isinstance(call, ast.Call) and is_native_block_call(call):
-        compile_native_block(ctx, call)
+    if isinstance(s.value, ast.Call) and is_native_block_call(s.value):
+        compile_native_block(ctx, s.value)
         return
-    # Non-native calls are intercepted by split_call_stmt before reaching
-    # here, so any Call left is unreachable; keep the fallback generic.
-    err("expression statements are not supported by --compile (only native::block() calls)", s)
+    if isinstance(s.value, ast.Call):
+        # A call whose result is discarded: compile it for its effects, and
+        # tell C the value is deliberately unused.
+        value = compile_expr(ctx, s.value)
+        ctx.emit(f"(void)({value.expr});")
+        return
+    err(
+        "an expression statement with no effect is not supported by --compile "
+        "(only a call or native::block())", s,
+    )

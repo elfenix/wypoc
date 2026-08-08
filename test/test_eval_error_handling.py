@@ -4,7 +4,7 @@ import pytest
 
 from conftest import eval_sample
 from wypoc import wyrm_builtins
-from wypoc.wyrm_builtins import WyrmError
+from wypoc.wyrm_builtins import Symbol, WyrmError
 from wypoc.wyrm_eval_parse_tree import ClassInstance, Variable
 
 EXPECTED = {
@@ -13,7 +13,9 @@ EXPECTED = {
     "f": 5,  # error("Hello") catch 5 -> the handler's value
     "not_an_error": 10,  # catch's handler is never evaluated when there's no error
     "catch_return_result": 0,  # `catch return 0` forces an actual function return
-    "demo_div_by_zero": "div0",  # demo(10, 0)'s init hit a division error -> catch fired
+    # demo(10, 0)'s init hit a division error -> catch fired. A symbol, not
+    # the string of the same name: `'div0 != "div0"` (see Symbol).
+    "demo_div_by_zero": Symbol("div0"),
 }
 
 

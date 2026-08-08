@@ -3,9 +3,9 @@ import mod::baz::bar
 
 from mod import function
 
-using math
-using math::sin
-using sin = math::sin
+import math::*
+import math::sin
+import math::sin as sin
 
 var foo: int = 5      # canonical declaration with type constraint
 var foo2 = 5           # inferred type
@@ -81,8 +81,8 @@ t1 := 1, 2, 3, 4
 t2 := (1,)
 t3 := ()
 
-d := ${ "Name": 15 }
-d2 := ${}
+d := { "Name": 15 }
+d2 := {}
 
 a := a ** 2
 b := a + b + c

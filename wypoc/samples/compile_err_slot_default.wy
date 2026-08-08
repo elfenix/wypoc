@@ -1,0 +1,7 @@
+import native
+
+fn one() -> int:
+    return 1
+
+class Counter:
+    slot n: int = one()

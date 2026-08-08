@@ -15,6 +15,60 @@ below.
 """
 
 
+class Symbol:
+    """`'name` - a symbol: an interned name that is its own value type,
+    distinct from the string of the same characters (`'a != "a"`).
+
+    Symbols used to evaluate to plain Python strings here, which made the
+    canonical s-expression format (doc/sexpr-spec.md) unrepresentable: a
+    node's head kind, an operator, and a `'str` node's text would all have
+    been the same kind of value, so `$['str, "int"]` and `$['str, 'int]`
+    could not be told apart on the way back in. Symbols are interned, so
+    identity comparison works too, but `__eq__`/`__hash__` are defined on
+    the name so a hand-built Symbol compares equal to the interned one."""
+
+    __slots__ = ("name",)
+    _interned: dict = {}
+
+    def __new__(cls, name: str):
+        existing = cls._interned.get(name)
+        if existing is not None:
+            return existing
+        self = super().__new__(cls)
+        object.__setattr__(self, "name", name)
+        cls._interned[name] = self
+        return self
+
+    def __repr__(self):
+        return f"'{self.name}"
+
+    def __eq__(self, other):
+        return isinstance(other, Symbol) and self.name == other.name
+
+    def __hash__(self):
+        return hash((Symbol, self.name))
+
+
+class _EllipsisType:
+    """`...` - the placeholder value. Ordinary enough to store and pass
+    around, which is what lets a template's body carry one (see the
+    Decorators section of doc/language-spec.md): a template is a real
+    function, so its hole has to be real syntax."""
+
+    _instance = None
+
+    def __new__(cls):
+        if cls._instance is None:
+            cls._instance = super().__new__(cls)
+        return cls._instance
+
+    def __repr__(self):
+        return "..."
+
+
+ELLIPSIS = _EllipsisType()
+
+
 class PrimitiveType:
     """A wyrm primitive type, usable as a value. Calling it (`str(4)`) casts
     its single argument to this type via `cast`."""
@@ -28,8 +82,64 @@ class PrimitiveType:
 
 
 def _to_str(value) -> str:
+    """`str(value)` - the "bare" rendering, where a str/symbol contributes
+    its own characters and nothing else. Containers render their elements
+    in *repr* mode instead (see _repr_str), so `str("hi")` is `hi` while
+    `str(["hi"])` is `['hi']`, matching the reference implementation's
+    single `append_value(sb, v, repr)` with its one repr flag."""
+    return _format(value, repr_mode=False)
+
+
+def _repr_str(value) -> str:
+    """The rendering a value gets when it appears *inside* a container:
+    strings quoted, symbols quote-prefixed, everything else as in _to_str."""
+    return _format(value, repr_mode=True)
+
+
+def display(value) -> str:
+    """How a value is echoed back when it's the value of something the user
+    asked for directly - the REPL's answer line (see wypoc/repl.py). Same
+    rendering a value gets inside a container, so `"hi"` echoes as `'hi'`
+    and is told apart from the symbol `'hi` and the bare characters `hi`."""
+    return _repr_str(value)
+
+
+def _format(value, repr_mode: bool) -> str:
+    if value is None or value is NIL:
+        # One `nil`, spelled the way the language spells it. wypoc's NIL is
+        # also the empty pair list (`$[]`), and a fn that falls off its end
+        # answers Python's None; both are wyrm's single nil value, so both
+        # print as `nil` rather than as two spellings of the same thing.
+        return "nil"
     if isinstance(value, bool):
         return "true" if value else "false"
+    if isinstance(value, Symbol):
+        return f"'{value.name}" if repr_mode else value.name
+    if isinstance(value, str):
+        return f"'{value}'" if repr_mode else value
+    if value is ELLIPSIS:
+        return "..."
+    if isinstance(value, Pair):
+        # Printed in the literal syntax that builds it - `$[1, 2, 3]`, and
+        # `$[1, 2 . 3]` when the chain ends in something other than nil.
+        parts = []
+        node = value
+        while isinstance(node, Pair):
+            parts.append(_format(node.car, True))
+            node = node.cdr
+        tail = "" if node is NIL or node is None else f" . {_format(node, True)}"
+        return f"$[{', '.join(parts)}{tail}]"
+    if isinstance(value, list):
+        return "[" + ", ".join(_format(v, True) for v in value) + "]"
+    if isinstance(value, tuple):
+        inner = ", ".join(_format(v, True) for v in value)
+        return f"({inner},)" if len(value) == 1 else f"({inner})"
+    if isinstance(value, dict):
+        return "{" + ", ".join(
+            f"{_format(k, True)}: {_format(v, True)}" for k, v in value.items()
+        ) + "}"
+    if isinstance(value, WyrmError):
+        return f"error({value.what})"
     return str(value)
 
 
@@ -47,12 +157,24 @@ def _to_bool(value) -> bool:
     return bool(value)
 
 
+def _to_sym(value) -> "Symbol":
+    """`sym("name")` / `sym('name)` - the cast into the symbol type, so a
+    name computed as a string can become the symbol an s-expression node
+    needs for its head kind."""
+    if isinstance(value, Symbol):
+        return value
+    if isinstance(value, str):
+        return Symbol(value)
+    raise TypeError(f"sym: cannot make a symbol from {type(value).__name__}")
+
+
 STR = PrimitiveType("str", _to_str)
 INT = PrimitiveType("int", _to_int)
 FLOAT = PrimitiveType("float", _to_float)
 BOOL = PrimitiveType("bool", _to_bool)
+SYM = PrimitiveType("sym", _to_sym)
 
-PRIMITIVE_TYPES = {t.name: t for t in (STR, INT, FLOAT, BOOL)}
+PRIMITIVE_TYPES = {t.name: t for t in (STR, INT, FLOAT, BOOL, SYM)}
 
 
 class WyrmError:
@@ -86,12 +208,15 @@ def error(what: str) -> WyrmError:
 
 
 def is_error(value) -> bool:
-    """True for the base error type's WyrmError representation *and* for
-    an instance of any user class that (transitively) subclasses `error`
+    """True for the base error type's WyrmError representation, for an
+    instance of any user class that (transitively) subclasses `error`
     (see doc/language-spec.md's "Error may be inherited to create new
-    error types") - the single predicate `try`/`catch`/`?=`/`defined()`
-    all check (see wyrm_eval_parse_tree.py)."""
-    if isinstance(value, WyrmError):
+    error types"), and for UNSET (doc/language-spec.md lists `Unset` as a
+    predefined `error` subtype) - the single predicate `try`/`catch`/`?=`/
+    `defined()` all check (see wyrm_eval_parse_tree.py)."""
+    from wypoc.wyrm_eval_parse_tree import UNSET
+
+    if value is UNSET or isinstance(value, WyrmError):
         return True
     from wypoc.wyrm_eval_parse_tree import ClassInstance, ERROR_CLASS, _class_distance
 
@@ -169,6 +294,22 @@ class _Nil:
 
     def __iter__(self):
         return iter(())
+
+    def __eq__(self, other):
+        # wyrm has one nil. This evaluator reaches it two ways - the `nil`
+        # literal/empty pair list (this singleton) and Python's None, which
+        # is what a fn falling off its end answers and what a slot with no
+        # zero value holds - so the two compare equal rather than being a
+        # distinction wyrm code can see. Python tries the reflected
+        # operand when None's own __eq__ answers NotImplemented, so this
+        # covers `nil == x` and `x == nil` alike.
+        return other is self or other is None
+
+    def __ne__(self, other):
+        return not self.__eq__(other)
+
+    def __hash__(self):
+        return hash(None)
 
 
 NIL = _Nil()
@@ -291,6 +432,37 @@ def resize(lst, count: int):
     return lst
 
 
+def expand(lst, value, count: int):
+    """(lst ! expand(value, count)) -> grows list `lst` in place by `count`
+    more items, each a copy of `value` - the sized-allocation counterpart
+    to resize, which can only fill with Unset. `count` is relative (items
+    added), not a new total length, so `[1] ! expand(0, 3)` is
+    `[1, 0, 0, 0]`; `count == 0` is a no-op. `value` is stored by
+    reference, exactly as an element assignment would: expanding with a
+    list or dict gives `count` references to that same object, not copies
+    of it. A message (`!`), not a plain call, since it's a method on list
+    values - see register_native_method (wyrm_eval_parse_tree.py).
+    Returns `lst`."""
+    if not isinstance(lst, list):
+        raise TypeError(f"expand: not a list (got {type(lst).__name__})")
+    if count < 0:
+        raise ValueError(f"expand: count must be >= 0 (got {count})")
+    lst.extend(value for _ in range(count))
+    return lst
+
+
+def append(lst, value):
+    """(lst ! append(value)) -> adds `value` to the end of list `lst` in
+    place, growing it by one. A message (`!`), not a plain call, since it's
+    a method on list values - see register_native_method
+    (wyrm_eval_parse_tree.py). Returns `lst`, so appends chain
+    (`l ! append(1) ! append(2)`)."""
+    if not isinstance(lst, list):
+        raise TypeError(f"append: not a list (got {type(lst).__name__})")
+    lst.append(value)
+    return lst
+
+
 def remove(d, key):
     """(d ! remove(key)) -> removes `key` from dict `d` in place and
     returns the value that was removed. A message (`!`), not a plain call,
@@ -319,8 +491,8 @@ def print_(*args) -> None:
 
 def install(ctx: dict) -> None:
     """Expose str/int/float/bool, cons/pair/car/cdr, nil, copy, len, and
-    print as wyrm-visible builtins, plus str's substr, list's resize, and
-    dict's remove as `!`-callable messages. `pair` is `cons` under another
+    print as wyrm-visible builtins, plus str's substr, list's
+    resize/expand/append, and dict's remove as `!`-callable messages. `pair` is `cons` under another
     name - doc/language-spec.md's
     spelling for building an improper pair-list cell (`pair('a, 'b)`),
     since the `$[...]` pair-list literal only ever builds proper lists.
@@ -336,8 +508,10 @@ def install(ctx: dict) -> None:
     StopIteration - see doc/language-spec.md's Fundamental Types) are
     exposed the same way `error` is, as real subclassable Classes."""
     from wypoc.wyrm_eval_parse_tree import (
-        ERROR_CLASS, OS_ERROR_CLASS, OUT_OF_MEMORY_CLASS, RUNTIME_ERROR_CLASS,
-        STOP_ITERATION_CLASS, expose_all, next_, register_native_method, send_,
+        ContextualBuiltin, ERROR_CLASS, OS_ERROR_CLASS, OUT_OF_MEMORY_CLASS,
+        RUNTIME_ERROR_CLASS, STOP_ITERATION_CLASS, TREE_BASE_CLASS, expose_all,
+        install_native_decorators, next_, register_native_method, send_,
+        sexpr_value,
     )
 
     expose_all(
@@ -345,8 +519,17 @@ def install(ctx: dict) -> None:
         copy=copy, len=length, print=print_, error=ERROR_CLASS,
         OutOfMemory=OUT_OF_MEMORY_CLASS, RuntimeError=RUNTIME_ERROR_CLASS,
         OSError=OS_ERROR_CLASS, StopIteration=STOP_ITERATION_CLASS,
-        next=next_, send=send_,
+        next=next_, send=send_, TreeBase=TREE_BASE_CLASS,
+        # `sexpr` is a builtin function and unqualified, deliberately not a
+        # module path: that is what makes one decorator's source run against
+        # either representation of a tree without even differing by an
+        # import. It needs the calling scope to ask whether a class answers
+        # `__sexpr`, hence the ContextualBuiltin wrapper.
+        sexpr=ContextualBuiltin(sexpr_value, "sexpr"),
     )
+    install_native_decorators(ctx)
     register_native_method("substr", substr, ctx)
     register_native_method("remove", remove, ctx)
     register_native_method("resize", resize, ctx)
+    register_native_method("expand", expand, ctx)
+    register_native_method("append", append, ctx)

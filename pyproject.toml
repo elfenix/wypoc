@@ -13,14 +13,17 @@ dependencies = [
 
 [project.optional-dependencies]
 lsp = ["pygls>=2.1,<3"]
-dev = ["pytest>=8"]
+repl = ["rich>=13", "textual>=0.80"]
+dev = ["pytest>=8", "rich>=13", "textual>=0.80"]
 
 [project.scripts]
 wyrm = "wypoc.cli:main"
 wyrm-lsp = "wypoc.lsp:main"
 
 [tool.setuptools]
-packages = ["wypoc"]
+# `wypoc.compiler_c` is a package of its own, so it needs listing here too -
+# an editable install papers over its absence, a real one does not.
+packages = ["wypoc", "wypoc.compiler_c"]
 
 [tool.setuptools.package-data]
 wypoc = ["*.gram", "corelib/**/*.wy"]

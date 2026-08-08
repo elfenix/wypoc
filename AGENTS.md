@@ -47,6 +47,7 @@ semantics validation, not memory layout or dispatch performance.
 ```
 doc/                 language spec / grammar / design docs (see above)
 editors/vscode/       syntax highlighting + LSP client extension
+tools/                dev scripts (generate_parser.py — regenerates parser.py)
 wypoc/
   corelib/             small wyrm-language standard library (shapes.wy, std/, wyrm/),
                         installed as package data
@@ -57,36 +58,66 @@ wypoc/
   ast_nodes.py         typed AST node dataclasses
   parse.py             glues tokenizer + generated parser together
   wyrm_eval_parse_tree.py   the tree-walking evaluator (the interpreter proper)
+  sexpr.py             the canonical s-expression wire format a syntax tree
+                        crosses in and out of wyrm code - what a decorator
+                        receives and must answer. One table (`ROWS`), read by
+                        both directions; see its module docstring
   wyrm_modules.py      WYRM_PATH search-path resolution
   wyrm_io.py           POSIX-ish low-level I/O primitives exposed to wyrm
+  symbols.py           static symbol table for one parsed module (no eval, no I/O)
+  symbol_index.py      cross-file symbol lookup — follows imports to their files
+  completion.py        completion candidates for a position; reads its context
+                        from raw text so it works on source that doesn't parse
   cli.py               the `wyrm` command
-  lsp.py               the `wyrm-lsp` language server (diagnostics only)
+  repl.py              the interactive REPL - session + options + "is this entry
+                        finished?" + the readline front end (`wyrm` with no script)
+  pretty.py            multi-line renderings of a REPL result (lisp pairs, JSON
+                        dicts/arrays, class-definition-shaped instances)
+  repl_tui.py          `wyrm --tui`: the same REPL as a Textual full-screen UI
+  lsp.py               the `wyrm-lsp` language server
   samples/             *.wy fixtures used by test/
 test/                  pytest suite (see "Commands")
 ```
 
 See `wypoc/README.md` for the full pipeline walkthrough (tokenizer → pegen parser → AST →
-tree-walking eval), the message-dispatch (`!`) implementation notes, and the current list
-of known gaps (coroutines not drivable, no `init`-based construction with args, no
-attribute assignment, slot getter/setter options parsed but unused, diamond inheritance
-uses a simplified linearization, LSP is diagnostics-only).
+tree-walking eval), the message-dispatch (`!`) implementation notes, the decorator /
+s-expression bridge, and the current list of known gaps (slot getter/setter options
+parsed but unused, diamond inheritance uses a simplified linearization, LSP has no
+references/rename, name resolution is span containment rather than a real scope chain).
+
+**Decorators run.** `@dec(args) X` hands `X`'s tree to `dec` and evaluates the tree
+`dec` answers instead; a decorator is `fn [TreeBase] dec(...)`, reached through
+`import static`, and it reads and builds trees through the unqualified `sexpr(x)`
+builtin. `wypoc/samples/decorators.wy` (driven by `test/test_eval_decorators.py`) is the
+conformance script and `wypoc/samples/decolib.wy` is a decorator library written in
+wyrm. When changing the AST, keep `wypoc/sexpr.py`'s table in step - a node kind with no
+row there cannot cross into a decorator, and `test/test_sexpr.py` asserts each kind's
+documented shape as well as that it round-trips.
 
 ## Commands
 
 ```bash
-python -m venv .venv && .venv/bin/python -m pip install -e ".[lsp,dev]"   # setup
+python -m venv .venv && .venv/bin/python -m pip install -e ".[lsp,repl,dev]"   # setup
 
 .venv/bin/pytest                                       # run the whole test suite
 .venv/bin/pytest test/test_grammar.py                  # run one test file
 
 .venv/bin/wyrm path/to/script.wy                       # run a .wy script
-.venv/bin/python -m pegen wypoc/wyrm.gram -o wypoc/parser.py -q   # regenerate parser.py
-                                                                    # after editing wyrm.gram
+.venv/bin/wyrm                                         # interactive REPL (readline)
+.venv/bin/wyrm --tui                                   # interactive REPL (full screen)
+.venv/bin/python tools/generate_parser.py              # regenerate parser.py
+                                                        # after editing wyrm.gram
 ```
 
 `parser.py` is generated output — edit `wypoc/wyrm.gram`, then regenerate; never
-hand-edit `parser.py` directly. After any grammar change, run `test/test_grammar.py`
-first (it parses every `samples/*.wy` fixture and fails loudly on syntax errors).
+hand-edit `parser.py` directly. Use `tools/generate_parser.py`, **not** plain
+`python -m pegen`: the grammar's `LOCATIONS` annotations (source spans on AST nodes)
+need a `location_formatting` only reachable through pegen's generator API, and a
+parser generated without it raises `TypeError` from every action.
+
+After any grammar change, run `test/test_grammar.py` first (it parses every
+`samples/*.wy` fixture and fails loudly on syntax errors), then
+`test/test_positions.py` (it catches a new rule that forgot `LOCATIONS`).
 
 **`pytest` must run clean (zero failures) at all times.** Any change that breaks a test
 is not done until the test suite passes again — either fix the code, or update the test
@@ -99,6 +130,9 @@ don't skip/xfail a test to work around a real regression instead of fixing it.
   value/type system faithfully, that's the point of a PoC.
 - One dataclass per grammar construct in `ast_nodes.py`; `Node.__str__` is generic via
   `dataclasses.fields`, don't write per-node pretty-printers.
+- Every AST node carries a source span (`pos`, plus `name_pos`/`<field>_pos` where a
+  bare identifier string needs one of its own). A new grammar rule that builds a node
+  must pass `LOCATIONS` — `test/test_positions.py` fails otherwise.
 - Tests live under `test/` and use pytest (plain `assert`, fixtures, `pytest.mark.parametrize`);
   keep new tests in that style. Shared helpers (`eval_sample`, `SAMPLES_DIR`, ...) live in
   `test/conftest.py`.

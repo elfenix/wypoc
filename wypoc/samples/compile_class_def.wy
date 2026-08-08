@@ -5,4 +5,10 @@ class Point:
     slot y: int
 
 class Flag:
-    slot on: bool
+    slot on: bool = true
+
+# A slot default must be constant - it is evaluated once when the class is
+# built, with no function body around it for a name or a call to resolve in.
+class Scaled:
+    slot factor: float = 2.5
+    slot count: int = 3

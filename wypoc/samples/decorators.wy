@@ -1,0 +1,294 @@
+# Decorators and the canonical s-expression wire format (see wypoc/sexpr.py).
+#
+# The first half drives the format through two native decorators: `@__dump`
+# prints the s-expression a decorator would receive and compiles the original
+# tree, `@__identity` rebuilds the tree from its s-expression and compiles
+# that. Every `@__identity` therefore proves a round trip - the value printed
+# is what survived encode + decode.
+#
+# The second half uses decorators written in wyrm (samples/decolib.wy), which
+# run when this file reaches them.
+
+import std::io::*
+
+# --- the printed format ---------------------------------------------------
+
+d1 := @__dump 41
+d2 := @__dump "text"
+println("dumped: " + str(d1) + " " + d2)
+
+# --- expression kinds, each through a full round trip ---------------------
+
+println("int: " + str(@__identity 7))
+println("float: " + str(@__identity 2.5))
+println("str: " + (@__identity "hello"))
+println("true: " + str(@__identity true))
+println("false: " + str(@__identity false))
+println("nil: " + str(@__identity nil))
+println("sym: " + str(@__identity 'name))
+println("list: " + str(@__identity [1, 2, 3]))
+
+v := 6
+println("name: " + str(@__identity v))
+
+# A decorator binds as tightly as unary minus does, so reaching a binary
+# operator means parenthesising - and parens straight after the decorator's
+# name are always its own argument list, so the empty list gets spelled out.
+println("binop +: " + str(@__identity() (v + 1)))
+println("binop -: " + str(@__identity() (v - 1)))
+println("binop *: " + str(@__identity() (v * 2)))
+println("binop /: " + str(@__identity() (v / 2)))
+println("binop %: " + str(@__identity() (v % 4)))
+println("binop **: " + str(@__identity() (v ** 2)))
+println("binop &: " + str(@__identity() (v & 3)))
+println("binop |: " + str(@__identity() (v | 1)))
+println("binop ^: " + str(@__identity() (v ^ 1)))
+println("binop ==: " + str(@__identity() (v == 6)))
+println("binop !=: " + str(@__identity() (v != 6)))
+println("binop <: " + str(@__identity() (v < 7)))
+println("binop >: " + str(@__identity() (v > 7)))
+println("binop <=: " + str(@__identity() (v <= 6)))
+println("binop >=: " + str(@__identity() (v >= 6)))
+println("binop <=>: " + str(@__identity() (v <=> 7)))
+println("unop -: " + str(@__identity -v))
+println("not: " + str(@__identity() (not false)))
+println("and: " + str(@__identity() (true and false)))
+println("or: " + str(@__identity() (false or true)))
+println("tuple: " + str(@__identity() (1, 2)))
+println("grouped: " + str(@__identity() (v + 1)))
+println("pairlist: " + str(@__identity $[1, 2]))
+println("dict: " + str(@__identity {"a": 1}))
+println("is: " + str(@__identity() (v is int)))
+println("do: " + str(@__identity() do: 41 + 1))
+
+fn twice(n):
+    return n * 2
+
+println("call: " + str(@__identity twice(4)))
+println("index: " + str(@__identity [10, 20][1]))
+
+class Box:
+    slot v: int = 0
+
+    fn get() -> int:
+        return v
+
+b := Box()
+b.v = 12
+println("attr: " + str(@__identity b.v))
+println("msg: " + str(@__identity b ! get()))
+
+import shapes
+println("mod_get: " + str(@__identity shapes::Circle))
+
+# Arguments are accepted and, for these two, ignored.
+println("args: " + str(@__identity(1, "two", 'three) v))
+
+# --- definitions ----------------------------------------------------------
+
+@__identity fn add(a, b):
+    return a + b
+
+println("fn: " + str(add(2, 3)))
+
+# Signatures carry their types: parameter types, the result and qualified
+# names all survive the round trip. Nothing enforces them - they are there
+# for a decorator to read.
+@__dump fn typed(a: int, b: str | nil, c: shapes::Circle) -> int:
+    return a
+
+@__identity fn measured(n: int) -> int:
+    return n * 3
+
+println("typed: " + str(measured(5)))
+
+# `*rest` travels in its own position, not as a flag on a parameter, and
+# rejoins the parameter list on the way back.
+@__dump fn spread(a: int, *others) -> int:
+    return a
+
+@__identity fn braced(a) { return a * 3 }
+println("fn braced: " + str(braced(4)))
+
+@__identity fn [Box] describe():
+    return "box " + str(this.v)
+
+println("message: " + (b ! describe()))
+
+@__identity fn count_args(*args):
+    return len(args)
+
+println("rest params: " + str(count_args(1, 2, 3, 4)))
+
+# --- statements in a body -------------------------------------------------
+
+# A body is a statement list, not an opaque handle, so every statement kind
+# below makes the round trip and comes back compiling to the same thing.
+@__identity fn control(n):
+    total := 0
+    i := 0
+    while true:
+        if i >= n:
+            break
+        elif i % 2 == 0:
+            total = total + i
+        else:
+            total = total - 1
+        i = i + 1
+    for w in [1, 2, 3]:
+        if w == 2:
+            continue
+        total = total + w * 10
+    return total
+
+println("control: " + str(control(5)))
+
+@__identity fn bindings():
+    static seen = 0
+    seen = seen + 1
+    d := {"a": 1, "b": 2}
+    p := $[1, 2, 3]
+    var later
+    later ?= 7
+    lst := [0, 0]
+    lst[1] = 5
+    with:
+        x = 2
+        y = 3
+    return seen + d["a"] + car(p) + later + lst[1] + x + y
+
+println("bindings: " + str(bindings()))
+println("bindings again: " + str(bindings()))
+
+@__identity fn failure(v):
+    defer:
+        pass
+    defer on error:
+        pass
+    got := v catch 0
+    checked := v is int
+    inner := do:
+        41 + 1
+    return str(got) + " " + str(checked) + " " + str(inner)
+
+println("failure: " + failure(3))
+
+# `catch return` and `try` are their own kinds - `catch` carries no flag.
+@__identity fn guarded(a, b):
+    quotient := a / b catch return "divided by zero"
+    doubled := try quotient * 2
+    return str(doubled)
+
+println("guarded: " + str(guarded(10, 2)))
+println("guarded zero: " + guarded(10, 0))
+
+@__identity fn nests():
+    fn helper(x):
+        return x + 1
+    helper(1)          # a bare expression statement
+    return helper(9)
+
+println("nested fn: " + str(nests()))
+
+# Nesting resolves innermost first, so the outer decorator sees whatever the
+# inner one answered.
+@__dump @__identity fn nested(x):
+    return x
+
+println("nested: " + str(nested(5)))
+
+fn outer():
+    @__identity fn inner(x):
+        return x + 100
+    return inner(1)
+
+println("nested scope: " + str(outer()))
+
+# --- decorators written in wyrm -------------------------------------------
+
+# `import static` runs the module and adopts its messages, which is what
+# makes its decorators callable from here. The values printed below are what
+# the rewritten code does.
+import static decolib
+
+@unchanged fn kept(a, b):
+    return a * b
+
+println("unchanged: " + str(kept(6, 7)))
+
+@traced("traced: entering") fn watched(n):
+    return n + 1
+
+println("traced result: " + str(watched(41)))
+
+@constant(99) fn replaced(a, b):
+    return "this body is discarded"
+
+println("constant: " + str(replaced(1, 2)))
+
+@arity fn counted(a, b, c):
+    return "discarded too"
+
+println("arity: " + str(counted(1, 2, 3)))
+
+@param_types fn annotated(a: int, b, c: shapes::Circle):
+    pass
+
+println("param types: " + str(annotated(1, 2, 3)))
+
+w := 5
+println("scaled: " + str(@scaled(3) w))
+
+# A decorator sees whatever the decorator inside it answered.
+@traced("nested decorators: outer ran") @constant(7) fn layered():
+    return 0
+
+println("layered: " + str(layered()))
+
+# --- foo::$ast ------------------------------------------------------------
+
+# `$ast` is a definition's own tree, boxed the same way a decorator's
+# argument is - so `sexpr` reads it the same either way.
+fn plain(a, b):
+    return a - b
+
+println("$ast head: " + str(car(sexpr(plain::$ast))))
+println("$ast name: " + str(car(cdr(sexpr(plain::$ast)))))
+println("$ast is a tree: " + str(plain::$ast is TreeBase))
+println("$ast across modules: " + str(car(sexpr(decolib::is_hole::$ast))))
+
+# --- templates ------------------------------------------------------------
+
+# The template is written as ordinary wyrm in decolib; `...` is where this
+# body lands.
+@framed fn framed_work(n):
+    println("framed: body running on " + str(n))
+    return n * 2
+
+println("framed result: " + str(framed_work(21)))
+
+# A template named here rather than in the decorator's module.
+fn banner():
+    println("banner: open")
+    ...
+    println("banner: close")
+
+@using_template(banner::$ast) fn announced():
+    println("announced: body")
+
+announced()
+
+# --- the `__sexpr` hook ---------------------------------------------------
+#
+# `sexpr(x)` is the identity on an s-expression and unwraps a TreeBase, but a
+# class asked first can answer for itself.
+
+println("hook in class body: " + str(sexpr(decolib::Literal(7))))
+println("hook from outside: " + str(sexpr(decolib::Boxed(5))))
+println("hook inherited: " + str(sexpr(decolib::SubBoxed(5))))
+println("no hook is identity: " + str(sexpr($['int, 3])))
+println("a TreeBase still unwraps: " + str(car(sexpr(plain::$ast))))
+
+# The decorator answers a `Literal`, not a tree; the return contract runs it
+# through the same hook.
+println("returned object: " + str(@as_literal(42) 0))
