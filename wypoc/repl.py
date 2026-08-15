@@ -30,7 +30,9 @@ from dataclasses import dataclass
 import token as token_mod
 
 from wypoc import ast_nodes as ast
+from wypoc import config as config_mod
 from wypoc import pretty as pretty_mod
+from wypoc import project as project_mod
 from wypoc import wyrm_builtins, wyrm_io, wyrm_modules
 from wypoc.parse import parse
 from wypoc.wyrm_tokenizer import TokenizeError, generate_tokens
@@ -50,9 +52,12 @@ BANNER = "wyrm REPL - :help for help, :quit (or ctrl-d) to leave"
 HELP = """\
 :help          show this message
 :quit, :q      leave the REPL
-:clear         forget every binding and start a fresh session
-:set NAME      turn an option on (:set alone lists them)
-:unset NAME    turn it off
+:clear         forget every binding and start a fresh session (ctrl-l too)
+:set NAME      turn an option on for this session (:set alone lists them)
+:unset NAME    turn it off for this session
+:set config NAME    turn it on here *and* in ~/.wyrm/config, so every later
+                     session starts with it on (:unset config NAME to undo;
+                     bare :set config shows the file)
 
 Options:
   compact      answer with one-line results, the way `str()` spells them.
@@ -60,14 +65,34 @@ Options:
                an array in JSON layout, and a class instance in the shape of
                its class definition - each broken across lines only when it
                doesn't fit.
+  tui          start the REPL in its full-screen UI, as if `wyrm --tui` had
+               been run. Only read at startup, so it's `:set config tui`
+               that's worth setting - toggling it live changes nothing.
+  path         extra module search directories, colon-separated, searched
+               before WYRM_PATH. A relative entry resolves against the
+               project root; `${project_root}` in an entry expands to it
+               explicitly, useful when the option is set in ~/.wyrm/config
+               and should still mean "this project's own directory".
+               Only settable in a config file (global or project), not
+               with :set - see `project_root` below.
+  project_root string-valued like `path`; not a toggle either.
+
+Project setup: starting `wyrm` in a directory walks up looking for a
+`.wyrm/` directory (set `project_root` in ~/.wyrm/config to pin one and
+skip the walk instead). When found, `.wyrm/config` overlays ~/.wyrm/config's
+options, and `.wyrm/preamble.wy`, if present, is run once before the first
+prompt - the way to give a project's own sessions a standard set of imports
+or bindings to start from.
 
 Entries spanning several lines: an entry with an unclosed bracket, or one
 opening a block (a trailing `:`), keeps prompting for more. Finish a block
 with an empty line."""
 
-# The REPL's own options and their defaults, as `:set`/`:unset` toggle them.
-# `compact` off means results are pretty-printed (see pretty.py).
-OPTIONS = {"compact": False}
+# The REPL's options and their defaults - see config.py, which owns the
+# table (the same options are settable in ~/.wyrm/config) and which
+# `:set`/`:unset` toggle here. `compact` off means results are
+# pretty-printed (see pretty.py).
+OPTIONS = config_mod.OPTIONS
 
 # Brackets whose being open means "this entry isn't finished" - the same set
 # the tokenizer joins lines inside (see wyrm_tokenizer's bracket_depth /
@@ -166,7 +191,7 @@ def run_command(session: "Session", text: str) -> "tuple | None":
     if command == ":help":
         return ("message", HELP)
     if command == ":clear":
-        session.reset()
+        session.clear()
         return ("message", "session cleared")
     words = command.split()
     if words and words[0] in (":set", ":unset"):
@@ -178,32 +203,87 @@ def _set_option(session: "Session", on: bool, names: list) -> str:
     """`:set name` / `:unset name`, and bare `:set` as "what are they?".
     Answers the line to show - an unknown name is reported rather than
     quietly doing nothing, since a typo'd option would otherwise look like
-    it had taken effect."""
+    it had taken effect.
+
+    `:set config name` does the same to this session *and* writes it into
+    `~/.wyrm/config`, so the next session starts that way too; bare `:set
+    config` shows what the file currently says."""
+    persist = bool(names) and names[0] == "config"
+    if persist:
+        names = names[1:]
+        if not names:
+            return _config_listing()
     if not names:
-        return "\n".join(f"{name}  {'on' if value else 'off'}"
+        return "\n".join(f"{name}  {_format_value(value)}"
                          for name, value in sorted(session.options.items()))
     said = []
     for name in names:
         if name not in session.options:
             known = ", ".join(sorted(session.options))
             return f"unknown option {name!r} - known options: {known}"
+        if type(session.options[name]) is not bool:
+            return (f"{name!r} isn't a toggle - set it in ~/.wyrm/config "
+                     "(or a project's .wyrm/config) instead")
+        if persist:
+            try:
+                config_mod.set_option(name, on)
+            except config_mod.ConfigError as e:
+                return str(e)
         session.options[name] = on
         said.append(f"{name} {'on' if on else 'off'}")
-    return ", ".join(said)
+    where = f" (saved in {config_mod.config_path()})" if persist else ""
+    return ", ".join(said) + where
+
+
+def _config_listing() -> str:
+    """What the config file sets, for bare `:set config` - the file's own
+    path first, so there's somewhere to go and edit it by hand."""
+    path = config_mod.config_path()
+    stored = config_mod.load(warn=lambda message: None)
+    lines = [path if os.path.exists(path) else f"{path} (not created yet)"]
+    lines += [f"{name}  {_format_value(value)}"
+              for name, value in sorted(stored.items())]
+    return "\n".join(lines)
+
+
+def _format_value(value) -> str:
+    if isinstance(value, bool):
+        return "on" if value else "off"
+    return value if value else "(not set)"
 
 
 class Session:
     """One REPL session: a scope that outlives each entry, plus the
     evaluate-and-render step both front ends drive."""
 
-    def __init__(self, script_root: "str | None" = None):
+    def __init__(self, script_root: "str | None" = None,
+                 options: "dict | None" = None,
+                 project_root: "str | None" = None,
+                 preamble: "str | None" = None):
         self.entries = 0
-        self.options = dict(OPTIONS)
+        # Defaults from ~/.wyrm/config unless a caller hands over options it
+        # has loaded (and possibly overridden) already - cli.py does, so a
+        # `wyrm --tui` doesn't re-read the file the CLI just read.
+        self.options = dict(options) if options is not None else config_mod.load()
+        # The project root a caller (cli.py's run_repl) found for this
+        # session - see project.py - only kept around for `path`'s relative
+        # entries; the REPL itself doesn't otherwise care where it is.
+        self.project_root = project_root
         # How wide a result may be before it's broken across lines; a front
         # end that knows its terminal sets this (see run_readline and the
         # TUI's on_resize).
         self.width = pretty_mod.DEFAULT_WIDTH
+        # Kept around (rather than only used once here) so :clear can rerun
+        # it - see `clear` below.
+        self.preamble = preamble
+        self._script_root = script_root
         self.reset(script_root)
+        wyrm_modules.set_extra_search_paths(
+            project_mod.resolve_search_paths(self.options.get("path", ""), project_root))
+        # Run once, before the first prompt - not counted as an entry (see
+        # `evaluate`'s `count`), so the status bar's "N entries" still means
+        # "N things you typed".
+        self.preamble_result = self.evaluate(preamble, count=False) if preamble else None
 
     def reset(self, script_root: "str | None" = None) -> None:
         # The working directory plays the role a script's own directory
@@ -215,12 +295,27 @@ class Session:
         populate_globals(self.ctx)
         expose(self.ctx, "__ARGS", ())
 
-    def evaluate(self, source: str) -> Result:
+    def clear(self) -> None:
+        """`:clear`'s own work: forgets every binding *and*, when this
+        session started from a project preamble, reruns it - so a session
+        just cleared looks like the one that greeted you at startup, not an
+        emptier one that's lost the project's standard imports along with
+        whatever you'd bound since."""
+        self.reset(self._script_root)
+        self.preamble_result = (
+            self.evaluate(self.preamble, count=False) if self.preamble else None)
+
+    def evaluate(self, source: str, *, count: bool = True) -> Result:
         """Parses and runs one entry, capturing anything it printed. Never
         raises: a syntax error, a wyrm error value and a Python-level
         exception out of the evaluator all come back as `Result.error`,
-        since a REPL that dies on a typo is no REPL at all."""
-        self.entries += 1
+        since a REPL that dies on a typo is no REPL at all.
+
+        `count=False` (the preamble's own call, in __init__) runs the entry
+        without bumping `entries` - the status bar's count is of things the
+        person at the keyboard ran, not of setup that ran on their behalf."""
+        if count:
+            self.entries += 1
         try:
             tree = parse(source, filename="<repl>")
         except SyntaxError as e:
@@ -323,10 +418,63 @@ class _captured_output:
 
 
 # --------------------------------------------------------------------------
+# history - shared by both front ends (repl_tui.py uses these directly; the
+# readline front end below hands the same path to readline's own file
+# format instead, since readline already manages that file itself)
+# --------------------------------------------------------------------------
+
+def _escape_history_line(source: str) -> str:
+    """One entry as a single line: backslash-escapes an entry's own
+    backslashes and newlines, so a multi-line entry (a `fn`, a `class`)
+    still round-trips through a file that's one entry per line."""
+    return source.replace("\\", "\\\\").replace("\n", "\\n")
+
+
+def _unescape_history_line(line: str) -> str:
+    """Reverses `_escape_history_line`."""
+    out = []
+    i = 0
+    while i < len(line):
+        c = line[i]
+        if c == "\\" and i + 1 < len(line) and line[i + 1] in "\\n":
+            out.append("\n" if line[i + 1] == "n" else "\\")
+            i += 2
+        else:
+            out.append(c)
+            i += 1
+    return "".join(out)
+
+
+def load_history(path: str) -> list:
+    """Entries from a history file written by `append_history`, oldest
+    first - a missing file reads as no history, the same as a session that
+    hasn't saved any yet."""
+    try:
+        with open(path, encoding="utf-8") as f:
+            return [_unescape_history_line(line.rstrip("\n")) for line in f]
+    except OSError:
+        return []
+
+
+def append_history(path: str, source: str) -> None:
+    """Adds one entry to the history file, escaped onto its own line and
+    written immediately - not batched until exit - so history survives a
+    crash or a killed session, not just a clean one."""
+    try:
+        directory = os.path.dirname(path)
+        if directory:
+            os.makedirs(directory, exist_ok=True)
+        with open(path, "a", encoding="utf-8") as f:
+            f.write(_escape_history_line(source) + "\n")
+    except OSError:
+        pass
+
+
+# --------------------------------------------------------------------------
 # readline front end
 # --------------------------------------------------------------------------
 
-def _install_readline() -> None:
+def _install_readline(project_root: "str | None" = None) -> None:
     """Line editing, history and a history file, when the platform has
     readline; a terminal without it still gets a working (if plainer)
     prompt, so this failing is not fatal."""
@@ -334,7 +482,7 @@ def _install_readline() -> None:
         import readline
     except ImportError:
         return
-    history = os.path.expanduser("~/.wyrm_history")
+    history = project_mod.history_path(project_root)
     try:
         readline.read_history_file(history)
     except OSError:
@@ -342,6 +490,15 @@ def _install_readline() -> None:
     readline.set_history_length(1000)
     import atexit
     atexit.register(_save_history, readline, history)
+    # ctrl-l as a :clear hotkey (see repl_tui.py, which binds the same key
+    # to the same effect): a macro that clears whatever's half-typed on the
+    # line, types ":clear", and submits it - readline's own default use of
+    # ctrl-l (clear the terminal) is given up for this, so the key means
+    # the same thing in both front ends.
+    try:
+        readline.parse_and_bind(r'"\C-l": "\C-a\C-k:clear\r"')
+    except Exception:  # pragma: no cover - a readline binding is best-effort
+        pass
 
 
 def _save_history(readline, path: str) -> None:
@@ -358,9 +515,11 @@ def run_readline(session: "Session | None" = None, banner: bool = True) -> int:
 
     console = Console()
     session = session or Session()
-    _install_readline()
+    _install_readline(session.project_root)
     if banner:
         console.print(f"[dim]{BANNER}[/dim]")
+    if session.preamble_result is not None:
+        _print_result(console, session.preamble_result)
 
     buffer: list = []
     while True:
@@ -385,6 +544,8 @@ def run_readline(session: "Session | None" = None, banner: bool = True) -> int:
                 if kind == "quit":
                     break
                 console.print(f"[dim]{payload}[/dim]", highlight=False)
+                if line.strip() == ":clear" and session.preamble_result is not None:
+                    _print_result(console, session.preamble_result)
                 continue
 
         buffer.append(line)

@@ -169,14 +169,17 @@ def test_set_compact_returns_to_one_line_results():
 
 
 def test_compact_is_off_to_begin_with():
-    assert Session().options == {"compact": False}
+    assert Session().options == {
+        "compact": False, "tui": False, "path": "", "project_root": ""}
 
 
 def test_bare_set_lists_the_options_and_their_state():
     session = Session()
-    assert run_command(session, ":set") == ("message", "compact  off")
+    assert run_command(session, ":set") == (
+        "message", "compact  off\npath  (not set)\nproject_root  (not set)\ntui  off")
     run_command(session, ":set compact")
-    assert run_command(session, ":set") == ("message", "compact  on")
+    assert run_command(session, ":set") == (
+        "message", "compact  on\npath  (not set)\nproject_root  (not set)\ntui  off")
 
 
 def test_an_unknown_option_is_reported_rather_than_ignored():
@@ -184,7 +187,17 @@ def test_an_unknown_option_is_reported_rather_than_ignored():
     kind, message = run_command(session, ":set colour")
     assert kind == "message"
     assert "unknown option 'colour'" in message and "compact" in message
-    assert session.options == {"compact": False}, "and nothing was changed"
+    assert session.options == {
+        "compact": False, "tui": False, "path": "", "project_root": ""}, \
+        "and nothing was changed"
+
+
+def test_setting_a_string_option_is_rejected_as_not_a_toggle():
+    session = Session()
+    kind, message = run_command(session, ":set path")
+    assert kind == "message"
+    assert "isn't a toggle" in message
+    assert session.options["path"] == ""
 
 
 def test_the_width_a_session_breaks_results_at_is_settable():
@@ -207,3 +220,29 @@ def test_ordinary_source_is_not_a_command():
 def test_result_reports_failure():
     assert not Result("x").failed
     assert Result("x", error="boom").failed
+
+
+def test_preamble_runs_before_any_entry_and_is_not_counted():
+    session = Session(preamble="var greeting = \"hi\"")
+    assert session.preamble_result.display == "'hi'"
+    assert session.entries == 0
+    assert session.evaluate("greeting").display == "'hi'"
+
+
+def test_no_preamble_means_no_preamble_result():
+    assert Session().preamble_result is None
+
+
+def test_a_failing_preamble_is_reported_but_does_not_stop_the_session():
+    session = Session(preamble="1 / 0")
+    assert session.preamble_result.failed
+    assert session.evaluate("1 + 1").display == "2"
+
+
+def test_path_option_is_registered_as_an_extra_search_root(tmp_path):
+    from wypoc import wyrm_modules
+    lib = tmp_path / "lib"
+    lib.mkdir()
+    Session(options={"compact": False, "tui": False, "path": "lib", "project_root": ""},
+            project_root=str(tmp_path))
+    assert str(lib) in wyrm_modules.search_paths()

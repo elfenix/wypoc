@@ -9,6 +9,10 @@ description = "Proof-of-concept PEG grammar, parser, and tree-walking interprete
 requires-python = ">=3.10"
 dependencies = [
     "pegen==0.3.0",
+    # ~/.wyrm/config (see wypoc/config.py). tomlkit rather than tomllib
+    # because the file is written as well as read, and a round-tripping
+    # editor keeps the comments and layout a person put in it.
+    "tomlkit>=0.13",
 ]
 
 [project.optional-dependencies]
@@ -19,11 +23,12 @@ dev = ["pytest>=8", "rich>=13", "textual>=0.80"]
 [project.scripts]
 wyrm = "wypoc.cli:main"
 wyrm-lsp = "wypoc.lsp:main"
+wyrm-dap = "wypoc.dap.server:main"
 
 [tool.setuptools]
 # `wypoc.compiler_c` is a package of its own, so it needs listing here too -
 # an editable install papers over its absence, a real one does not.
-packages = ["wypoc", "wypoc.compiler_c"]
+packages = ["wypoc", "wypoc.compiler_c", "wypoc.dap"]
 
 [tool.setuptools.package-data]
 wypoc = ["*.gram", "corelib/**/*.wy"]

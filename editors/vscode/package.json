@@ -33,6 +33,61 @@
         "path": "./syntaxes/wyrm.tmLanguage.json"
       }
     ],
+    "breakpoints": [
+      { "language": "wyrm" }
+    ],
+    "debuggers": [
+      {
+        "type": "wyrm",
+        "label": "Wyrm",
+        "languages": ["wyrm"],
+        "configurationAttributes": {
+          "launch": {
+            "required": ["program"],
+            "properties": {
+              "program": {
+                "type": "string",
+                "description": "Absolute path to the .wy script to debug.",
+                "default": "${file}"
+              },
+              "args": {
+                "type": "array",
+                "items": { "type": "string" },
+                "description": "Command-line arguments passed to the script.",
+                "default": []
+              },
+              "stopOnEntry": {
+                "type": "boolean",
+                "description": "Pause before the first statement runs.",
+                "default": false
+              }
+            }
+          }
+        },
+        "initialConfigurations": [
+          {
+            "type": "wyrm",
+            "request": "launch",
+            "name": "Wyrm: Debug Current File",
+            "program": "${file}",
+            "stopOnEntry": false
+          }
+        ],
+        "configurationSnippets": [
+          {
+            "label": "Wyrm: Debug Current File",
+            "description": "Launch and debug the active .wy file.",
+            "body": {
+              "type": "wyrm",
+              "request": "launch",
+              "name": "Wyrm: Debug Current File",
+              "program": "${file}",
+              "stopOnEntry": false
+            }
+          }
+        ]
+      }
+    ],
     "configuration": {
       "title": "Wyrm",
       "properties": {
@@ -67,6 +122,12 @@
           "type": "boolean",
           "default": true,
           "description": "Enable the wyrm-lsp language server (diagnostics, outline, go-to-definition, hover, completion)."
+        },
+        "wyrm.dap.serverPath": {
+          "type": "string",
+          "default": "",
+          "scope": "machine-overridable",
+          "markdownDescription": "Path to the `wyrm-dap` executable used for debugging. Leave empty to auto-detect: the `wyrm-dap` next to `#wyrm.interpreterPath#`, then `${workspaceFolder}/.venv/bin/wyrm-dap` (this repo's own dev layout), then `wyrm-dap` on `PATH`."
         }
       }
     },
@@ -93,6 +154,12 @@
         "icon": "$(play)"
       },
       {
+        "command": "wyrm.debugFile",
+        "title": "Debug Current File",
+        "category": "Wyrm",
+        "icon": "$(debug-alt)"
+      },
+      {
         "command": "wyrm.restartServer",
         "title": "Restart Language Server",
         "category": "Wyrm"
@@ -103,7 +170,12 @@
         {
           "command": "wyrm.runFile",
           "when": "resourceLangId == wyrm",
-          "group": "navigation"
+          "group": "navigation@1"
+        },
+        {
+          "command": "wyrm.debugFile",
+          "when": "resourceLangId == wyrm",
+          "group": "navigation@2"
         }
       ],
       "explorer/context": [

@@ -69,6 +69,9 @@ wypoc/
   completion.py        completion candidates for a position; reads its context
                         from raw text so it works on source that doesn't parse
   cli.py               the `wyrm` command
+  config.py            ~/.wyrm/config - the TOML `[wyrm]` section holding the
+                        defaults for the REPL's options; read at startup,
+                        written by `wyrm --config n=v` and `:set config n`
   repl.py              the interactive REPL - session + options + "is this entry
                         finished?" + the readline front end (`wyrm` with no script)
   pretty.py            multi-line renderings of a REPL result (lisp pairs, JSON

@@ -6,7 +6,18 @@ import token as token_mod
 from pegen.tokenizer import Tokenizer
 
 from wypoc.parser import GeneratedParser
-from wypoc.wyrm_tokenizer import generate_tokens
+from wypoc.wyrm_tokenizer import RESERVED_DOLLAR_NAMES, generate_tokens
+
+# `$ast` is a NAME token like any other now that `$` is an identifier
+# character, and `wyrm.gram` matches it by its exact text (see scope_op).
+# Reserving it - so `$ast = 1` or a parameter called `$ast` is a syntax
+# error rather than an ordinary binding - means keeping it out of pegen's
+# `name()` rule, which skips whatever is in the parser's KEYWORDS. The
+# grammar can't put it there itself: pegen only treats a quoted string as a
+# keyword when it matches `[a-zA-Z_]\w*`, which `$ast` does not. Extending
+# the tuple here is the whole of the reservation - `expect("$ast")`
+# compares token text and is unaffected by it.
+GeneratedParser.KEYWORDS = GeneratedParser.KEYWORDS + tuple(sorted(RESERVED_DOLLAR_NAMES))
 
 # How to describe a token that carries no useful text of its own, for the
 # "unexpected ..." half of a syntax error message. A NEWLINE reported as

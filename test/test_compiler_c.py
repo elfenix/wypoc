@@ -206,6 +206,30 @@ def test_a_message_fn_is_refused():
         compile_module(parse(src), "m")
 
 
+def test_the_bitwise_operators_lower_to_their_c_spellings():
+    src = ("import native\n\n"
+           "fn f(a: int, b: int) -> int:\n"
+           "    return (~a << 2) >> (a & b)\n")
+    c_src = compile_module(parse(src), "m")
+    assert "(((~(a)) << 2) >> (a & b))" in c_src
+
+
+@pytest.mark.parametrize("expr,message", [
+    ("a << 1.5", "no float form"),
+    ("1.5 >> a", "no float form"),
+])
+def test_a_shift_by_a_float_is_refused(expr, message):
+    src = f"import native\n\nfn f(a: int) -> int:\n    return {expr}\n"
+    with pytest.raises(CompileError, match=message):
+        compile_module(parse(src), "m")
+
+
+def test_complementing_a_float_is_refused():
+    src = "import native\n\nfn f(a: float) -> int:\n    return ~a\n"
+    with pytest.raises(CompileError, match="needs an int operand"):
+        compile_module(parse(src), "m")
+
+
 def test_narrowing_a_float_into_an_int_is_refused():
     src = "import native\n\nfn f(a: float) -> int:\n    return a\n"
     with pytest.raises(CompileError, match="does not fit"):

@@ -52,7 +52,10 @@ from wypoc.ast_nodes import (
 #    its one `catch return 0` example are the only constraints given.
 #  * `on` / `error` in `defer on error` are soft keywords (double-quoted),
 #    not reserved words, so plain identifiers like a slot named `on` are
-#    unaffected. So is `ast` in `foo::$ast`.
+#    unaffected. `$ast` in `foo::$ast` is matched the same way (one NAME
+#    token, spelled out here) - but that one *is* reserved everywhere, by
+#    parse.py rather than by this grammar, since pegen only knows how to
+#    reserve a word that looks like a Python identifier.
 #  * A symbol literal (`'name`, `'+`, `'fn`) is one token from the tokenizer
 #    rather than `"'"` + a name here, because a symbol's name may be a
 #    reserved word - `'fn`, `'return`, `'if` are all node kinds in the
@@ -548,6 +551,10 @@ not_expr[object]:
     | comparison
 
 comparison[object]:
+    # `a is not T` is exactly `not (a is T)` and is built as that - a
+    # negated check is the `not` of a check, not a check of its own, so
+    # everything downstream (eval, sexpr, --compile) needs no new case.
+    | a=bitwise_or_expr 'is' 'not' t=type_constraint { UnaryOp('not', TypeCheck(a, t, LOCATIONS), LOCATIONS) }
     | a=bitwise_or_expr 'is' t=type_constraint { TypeCheck(a, t, LOCATIONS) }
     | a=bitwise_or_expr op=comp_op b=bitwise_or_expr { BinOp(op, a, b, LOCATIONS) }
     | bitwise_or_expr
@@ -573,7 +580,12 @@ bitwise_xor_expr[object]:
     | first=bitwise_and_expr rest=("^" bitwise_and_expr)* { fold_left(first, [('^', e) for _, e in rest]) }
 
 bitwise_and_expr[object]:
-    | first=additive_expr rest=("&" additive_expr)* { fold_left(first, [('&', e) for _, e in rest]) }
+    | first=shift_expr rest=("&" shift_expr)* { fold_left(first, [('&', e) for _, e in rest]) }
+
+# Shifts sit between `&` and `+`/`-`, as they do in C and Python: `a & b <<
+# c` shifts first, `a << b + c` adds first.
+shift_expr[object]:
+    | first=additive_expr rest=(("<<" | ">>") additive_expr)* { fold_left(first, [(op.string, e) for op, e in rest]) }
 
 additive_expr[object]:
     | first=mult_expr rest=(("+" | "-") mult_expr)* { fold_left(first, [(op.string, e) for op, e in rest]) }
@@ -589,6 +601,8 @@ mult_expr[object]:
 unary_expr[object]:
     | dec=decorator e=unary_expr { Decorated(dec, e, LOCATIONS) }
     | "-" e=unary_expr { UnaryOp('neg', e, LOCATIONS) }
+    | "+" e=unary_expr { UnaryOp('pos', e, LOCATIONS) }
+    | "~" e=unary_expr { UnaryOp('inv', e, LOCATIONS) }
     | 'not' e=unary_expr { UnaryOp('not', e, LOCATIONS) }
     | power_expr
 
@@ -625,12 +639,14 @@ message_op[object]:
 
 # `foo::$ast` is a definition's own tree as a value - `::` because it
 # resolves a name statically in a namespace, where `.` would ask the
-# runtime value (a closure) for an attribute it hasn't got. `$ast` is the
-# first of a reserved `$`-family (`$name`, `$line`, `$doc` are not built),
-# so the token after `$` is matched literally rather than as any NAME:
-# `foo::$whatever` is a syntax error, not a silently different meaning.
+# runtime value (a closure) for an attribute it hasn't got. `$` is an
+# ordinary identifier character now (see wyrm_tokenizer's _is_ident_cont),
+# so `$ast` arrives as one NAME token and is matched here by its exact
+# text: `foo::$whatever` is an ordinary `::` lookup of a name spelled with
+# a `$`, while `$ast` itself is reserved language-wide (parse.py refuses it
+# as a plain name, the way a keyword is refused).
 scope_op[object]:
-    | "::" "$" "ast" { (lambda node: AstRef(node, "ast", pos=getattr(node, 'pos', None))) }
+    | "::" "$ast" { (lambda node: AstRef(node, "ast", pos=getattr(node, 'pos', None))) }
     | "::" n=NAME { (lambda node, name=n.string, np=tok_pos(n): Scope(node, name, name_pos=np, pos=np)) }
 
 arg_list[object]:

@@ -22,6 +22,18 @@ DEFAULT_COREPATH = os.path.join(_WYPOC_DIR, "corelib")
 
 
 _script_root: "str | None" = None
+_extra_paths: list = []
+
+
+def set_extra_search_paths(paths) -> list:
+    """Registers directories to search *before* WYRM_PATH's own entries -
+    the REPL's `path` config option (see project.py), resolved to absolute
+    paths by the caller. Returns the previous list, the way
+    `set_script_root` does, so a caller can restore it."""
+    global _extra_paths
+    previous = _extra_paths
+    _extra_paths = list(paths)
+    return previous
 
 
 def set_script_root(path: "str | None") -> "str | None":
@@ -36,16 +48,23 @@ def set_script_root(path: "str | None") -> "str | None":
     return previous
 
 
+def script_root() -> "str | None":
+    """The directory currently registered by `set_script_root`, for a caller
+    that wants to put it back afterwards without changing it first."""
+    return _script_root
+
+
 def search_paths(env: dict = None) -> list:
-    """The search roots, in order: WYRM_PATH's entries (colon-separated),
-    then the running script's own directory if one is registered (see
-    set_script_root), then the default corelib directory as a fallback.
-    Reads `env` (os.environ by default) fresh on every call - nothing here is
-    cached at import time - so tests can override WYRM_PATH without needing
-    to patch this module."""
+    """The search roots, in order: the extra paths registered by
+    `set_extra_search_paths` (the REPL's `path` config option), then
+    WYRM_PATH's entries (colon-separated), then the running script's own
+    directory if one is registered (see set_script_root), then the default
+    corelib directory as a fallback. Reads `env` (os.environ by default)
+    fresh on every call - nothing here is cached at import time - so tests
+    can override WYRM_PATH without needing to patch this module."""
     env = os.environ if env is None else env
     raw = env.get("WYRM_PATH", "")
-    paths = [p for p in raw.split(":") if p]
+    paths = list(_extra_paths) + [p for p in raw.split(":") if p]
     if _script_root is not None:
         paths.append(_script_root)
     paths.append(DEFAULT_COREPATH)

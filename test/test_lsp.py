@@ -8,10 +8,41 @@ from lsprotocol import types
 
 from conftest import SAMPLES_DIR
 from wypoc.lsp import (
-    definition_locations, diagnostics_for_source, document_symbols, hover_for,
+    _is_lone_colon_trigger,
+    definition_locations,
+    diagnostics_for_source,
+    document_symbols,
+    hover_for,
 )
 
 SAMPLE_NAMES = sorted(n for n in os.listdir(SAMPLES_DIR) if n.endswith(".wy"))
+
+
+def _completion_params(trigger_character: "str | None" = None,
+                       kind: types.CompletionTriggerKind = types.CompletionTriggerKind.Invoked):
+    return types.CompletionParams(
+        text_document=types.TextDocumentIdentifier(uri="file:///x.wy"),
+        position=types.Position(line=0, character=0),
+        context=types.CompletionContext(trigger_kind=kind, trigger_character=trigger_character),
+    )
+
+
+def test_a_block_opening_colon_does_not_trigger_completion():
+    params = _completion_params(":", types.CompletionTriggerKind.TriggerCharacter)
+    assert _is_lone_colon_trigger(params, "fn f():", 1, 7)
+
+
+def test_the_second_colon_of_a_module_path_does_trigger_completion():
+    params = _completion_params(":", types.CompletionTriggerKind.TriggerCharacter)
+    assert not _is_lone_colon_trigger(params, "std::", 1, 5)
+
+
+def test_a_colon_typed_elsewhere_than_a_trigger_character_event_is_not_suppressed():
+    # A manual invocation (ctrl+space) or a request fired by some other
+    # character shouldn't be second-guessed by this check - only the
+    # protocol event caused by typing a lone `:` is.
+    params = _completion_params(None, types.CompletionTriggerKind.Invoked)
+    assert not _is_lone_colon_trigger(params, "fn f():", 1, 7)
 
 
 def test_clean_source_has_no_diagnostics():

@@ -94,6 +94,15 @@ g := a / b / c
 h := a & b
 i := a | b
 j := a ^ b
+j1 := a << b
+j2 := a >> b
+j3 := ~a
+j4 := +a
+j5 := a & b << c        # shifts bind tighter than `&`, looser than `+`
+
+# `$` is an identifier character, anywhere in a name
+reg$0 := a
+sum$total := reg$0 + b
 
 k := a or b
 l := a and b
@@ -106,6 +115,9 @@ n4 := a < b
 n5 := b > b
 n6 := a == b
 n7 := a != b
+n8 := a is int
+n9 := a is not int
+n10 := a is not int | float
 
 co simple():
     yield 1

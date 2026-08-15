@@ -14,6 +14,9 @@ tokenizer/parser as the sole source of truth for:
   `@` (message selectors), or while typing a plain name (locals, then
   module level, then imports, then builtins and keywords).
 
+A `wyrm` debug adapter type spawns `wyrm-dap` (also from `wypoc/`) for real
+breakpoint/step debugging - see "Debugging" below.
+
 ## Try it locally
 
 Recent VS Code versions (this was tested against 1.130.0) only load "user"
@@ -58,17 +61,21 @@ current `src/` live (no packaging needed there).
 ## Files
 
 - `package.json` — extension manifest: registers the `wyrm` language, the
-  `wyrm-lang` grammar, the `wyrm.*` settings and commands, and the
-  `vscode-languageclient` dependency.
+  `wyrm-lang` grammar, the `wyrm.*` settings and commands, the `wyrm` debug
+  adapter type, and the `vscode-languageclient` dependency.
 - `language-configuration.json` — comments, brackets, auto-closing pairs.
 - `syntaxes/wyrm.tmLanguage.json` — TextMate grammar (tokenization rules).
 - `src/extension.ts` — activation entry point: server lifecycle (start,
   restart on a settings change, stop), command registration, "run this file".
 - `src/config.ts` — every `wyrm.*` setting read/write, and the resolution
   rules that turn them into an executable to spawn and an environment to
-  spawn it in. Both the server and the run terminal go through here.
+  spawn it in. The language server, the debug adapter, and the run
+  terminal all go through here.
 - `src/interpreter.ts` — interpreter discovery, the picker, the status bar item.
 - `src/modulePath.ts` — the `WYRM_PATH` folder dialog and list editor.
+- `src/debug.ts` — the `wyrm` debug adapter type: how a launch
+  configuration is resolved (including "F5 with nothing configured" ->
+  debug the active file) and how `wyrm-dap` is started for a session.
 - `tsconfig.json` — compiles `src/*.ts` to `out/*.js` (the `main` package.json
   points at); both `node_modules/` and `out/` are gitignored, build them
   locally per "Try it locally" above.
@@ -90,6 +97,7 @@ built-in contexts like `launch.json`.
 | `wyrm.modulePathInheritEnvironment` | Append the `WYRM_PATH` VS Code was launched with to `wyrm.modulePath` rather than replacing it (default `true`). |
 | `wyrm.lsp.serverPath` | The `wyrm-lsp` to spawn. Empty = auto-detect (see below). |
 | `wyrm.lsp.enable` | `false` disables the language server entirely (syntax highlighting still works via the grammar alone). |
+| `wyrm.dap.serverPath` | The `wyrm-dap` to spawn for debugging. Empty = auto-detect, same rule as `wyrm.lsp.serverPath` below. |
 
 ## Commands
 
@@ -107,6 +115,10 @@ built-in contexts like `launch.json`.
 - **Wyrm: Run Current File** — saves and runs the active file with the
   selected interpreter in a terminal carrying `WYRM_PATH`. Also the ▷ button
   in the editor title bar.
+- **Wyrm: Debug Current File** — saves and starts a debug session for the
+  active file (breakpoints, stepping, variable inspection - see
+  "Debugging" below). Also the debug-icon button next to Run in the editor
+  title bar.
 - **Wyrm: Restart Language Server**.
 
 Changing any of the settings above restarts the server automatically: it
@@ -137,6 +149,33 @@ keeps working mid-identifier - which is exactly when the file is invalid and
 when you want it. Slot completion after `.` offers every slot it knows about
 rather than one class's: there is no type inference, so narrowing would mean
 guessing. Each candidate's detail names the class it came from.
+
+## Debugging
+
+Click the gutter to set a breakpoint, then either **Wyrm: Debug Current
+File** (the debug-icon button next to Run, or the command) or plain **F5**
+(which, with no `launch.json` yet, debugs the active file the same way -
+`src/debug.ts`'s `WyrmDebugConfigurationProvider` supplies the fallback).
+Both save the file first, the same as Run does.
+
+`wyrm-dap` (`wypoc/dap/`) is a from-scratch minimal DAP adapter, not a
+wrapper around `pdb` or similar - it instruments wypoc's own tree-walking
+evaluator directly, so breakpoints/stepping/variables see wyrm's own scopes
+and call stack, not Python's. It supports breakpoints (by line), step
+over/into/out, pause, and inspecting locals/closure/globals at any frame,
+including a real (wyrm-level) stack trace on an uncaught error. It does
+*not* yet support: conditional breakpoints, watch expressions or the debug
+console's `evaluate`, expanding a structured value (list/dict/instance) in
+the Variables view, or attaching to an already-running process (launch
+only).
+
+`src/config.ts` looks for `wyrm-dap` the same way it looks for `wyrm-lsp`
+(see "Language server" below): the `wyrm.dap.serverPath` setting, then next
+to `wyrm.interpreterPath`, then this repo's own `.venv` layout, then PATH.
+A launch configuration's `args` (an array of strings) and `stopOnEntry`
+(boolean) are optional; `program` defaults to `${file}` when omitted, which
+is what makes the auto-generated "Wyrm: Debug Current File" configuration
+work without editing it.
 
 ## Known gaps
 

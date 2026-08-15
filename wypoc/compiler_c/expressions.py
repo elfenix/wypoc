@@ -95,12 +95,19 @@ def _name(ctx: FnContext, node: ast.Name) -> Value:
 
 @EXPR_HANDLERS.register(ast.UnaryOp)
 def _unary_op(ctx: FnContext, node: ast.UnaryOp) -> Value:
-    # The AST spells negation `neg`, not `-` (see wyrm.gram's unary_expr).
-    if node.op == "neg":
+    # The AST names its unary operators - `neg`, `pos`, `inv` - rather than
+    # spelling them (see wyrm.gram's unary_expr).
+    if node.op in ("neg", "pos"):
+        sign = "-" if node.op == "neg" else "+"
         operand = compile_expr(ctx, node.operand)
         if operand.type is BOOL:
-            err("unary '-' on a bool is not supported by --compile", node)
-        return Value(f"(-({operand.expr}))", operand.type)
+            err(f"unary '{sign}' on a bool is not supported by --compile", node)
+        return Value(f"({sign}({operand.expr}))", operand.type)
+    if node.op == "inv":
+        operand = compile_expr(ctx, node.operand)
+        if operand.type is not INT:
+            err("unary '~' needs an int operand for --compile", node)
+        return Value(f"(~({operand.expr}))", INT)
     if node.op == "not":
         return Value(f"(!({compile_expr(ctx, node.operand).expr}))", BOOL)
     err(f"unary operator '{node.op}' not supported by --compile", node)

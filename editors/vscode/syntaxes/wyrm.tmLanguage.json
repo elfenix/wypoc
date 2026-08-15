@@ -125,7 +125,7 @@
       "patterns": [
         {
           "name": "constant.other.symbol.wyrm",
-          "match": "(')[A-Za-z_][A-Za-z0-9_]*",
+          "match": "(')[A-Za-z_][A-Za-z0-9_$]*",
           "captures": {
             "1": { "name": "punctuation.definition.symbol.wyrm" }
           }
@@ -272,7 +272,7 @@
       "patterns": [
         {
           "comment": "class Name  /  class Name(Parent)",
-          "match": "\\b(class)\\s+([A-Za-z_][A-Za-z0-9_]*)(?:\\s*(\\()\\s*([A-Za-z_][A-Za-z0-9_]*)?)?",
+          "match": "\\b(class)\\s+([A-Za-z_][A-Za-z0-9_$]*)(?:\\s*(\\()\\s*([A-Za-z_][A-Za-z0-9_$]*)?)?",
           "captures": {
             "1": { "name": "storage.type.class.wyrm" },
             "2": { "name": "entity.name.class.wyrm" },
@@ -291,7 +291,7 @@
             "1": { "name": "storage.type.function.wyrm" },
             "2": { "name": "punctuation.definition.class-target.begin.wyrm" }
           },
-          "end": "(\\])\\s*([A-Za-z_][A-Za-z0-9_]*)?",
+          "end": "(\\])\\s*([A-Za-z_][A-Za-z0-9_$]*)?",
           "endCaptures": {
             "1": { "name": "punctuation.definition.class-target.end.wyrm" },
             "2": { "name": "entity.name.function.wyrm" }
@@ -300,7 +300,7 @@
             { "include": "#comments" },
             {
               "name": "entity.name.class.wyrm",
-              "match": "[A-Za-z_][A-Za-z0-9_]*"
+              "match": "[A-Za-z_][A-Za-z0-9_$]*"
             },
             {
               "name": "punctuation.separator.comma.wyrm",
@@ -310,7 +310,7 @@
         },
         {
           "comment": "fn name(...)",
-          "match": "\\b(fn)\\s+([A-Za-z_][A-Za-z0-9_]*)",
+          "match": "\\b(fn)\\s+([A-Za-z_][A-Za-z0-9_$]*)",
           "captures": {
             "1": { "name": "storage.type.function.wyrm" },
             "2": { "name": "entity.name.function.wyrm" }
@@ -332,7 +332,7 @@
             "1": { "name": "storage.type.coroutine.wyrm" },
             "2": { "name": "punctuation.definition.class-target.begin.wyrm" }
           },
-          "end": "(\\])\\s*([A-Za-z_][A-Za-z0-9_]*)?",
+          "end": "(\\])\\s*([A-Za-z_][A-Za-z0-9_$]*)?",
           "endCaptures": {
             "1": { "name": "punctuation.definition.class-target.end.wyrm" },
             "2": { "name": "entity.name.function.wyrm" }
@@ -341,7 +341,7 @@
             { "include": "#comments" },
             {
               "name": "entity.name.class.wyrm",
-              "match": "[A-Za-z_][A-Za-z0-9_]*"
+              "match": "[A-Za-z_][A-Za-z0-9_$]*"
             },
             {
               "name": "punctuation.separator.comma.wyrm",
@@ -351,7 +351,7 @@
         },
         {
           "comment": "co name(...)",
-          "match": "\\b(co)\\s+([A-Za-z_][A-Za-z0-9_]*)",
+          "match": "\\b(co)\\s+([A-Za-z_][A-Za-z0-9_$]*)",
           "captures": {
             "1": { "name": "storage.type.coroutine.wyrm" },
             "2": { "name": "entity.name.function.wyrm" }
@@ -363,7 +363,7 @@
       "patterns": [
         {
           "comment": "@name(...) / @mod::name(...) - compile-time AST-rewriting decorator, see doc/language-spec.md's Decorators section. Only the qualified-name part is highlighted here; its call args are ordinary expressions handled by the rest of the grammar.",
-          "match": "(@)\\s*((?:[A-Za-z_][A-Za-z0-9_]*\\s*(?:::)\\s*)*)([A-Za-z_][A-Za-z0-9_]*)(?=\\s*\\()",
+          "match": "(@)\\s*((?:[A-Za-z_][A-Za-z0-9_$]*\\s*(?:::)\\s*)*)([A-Za-z_][A-Za-z0-9_$]*)(?=\\s*\\()",
           "captures": {
             "1": { "name": "punctuation.definition.decorator.wyrm" },
             "2": { "name": "entity.name.namespace.wyrm" },
@@ -385,7 +385,7 @@
       "patterns": [
         {
           "comment": "obj!method(...) message dispatch",
-          "match": "(!)\\s*([A-Za-z_][A-Za-z0-9_]*)",
+          "match": "(!)\\s*([A-Za-z_][A-Za-z0-9_$]*)",
           "captures": {
             "1": { "name": "keyword.operator.message.wyrm" },
             "2": { "name": "entity.name.function.message.wyrm" }
@@ -397,12 +397,20 @@
       "patterns": [
         {
           "comment": "the segment left of a `::` is a namespace, e.g. std in std::io::open",
-          "match": "\\b([A-Za-z_][A-Za-z0-9_]*)(?=::)",
+          "match": "\\b([A-Za-z_][A-Za-z0-9_$]*)(?=::)",
           "name": "entity.name.namespace.wyrm"
         },
         {
+          "comment": "the reserved `$`-family, e.g. foo::$ast (a definition's own tree)",
+          "match": "(::)\\s*(\\$ast)\\b",
+          "captures": {
+            "1": { "name": "keyword.operator.scope.wyrm" },
+            "2": { "name": "variable.language.ast.wyrm" }
+          }
+        },
+        {
           "comment": "an interior path segment, e.g. io in std::io::open",
-          "match": "(::)\\s*([A-Za-z_][A-Za-z0-9_]*)(?=\\s*::)",
+          "match": "(::)\\s*([A-Za-z_][A-Za-z0-9_$]*)(?=\\s*::)",
           "captures": {
             "1": { "name": "keyword.operator.scope.wyrm" },
             "2": { "name": "entity.name.namespace.wyrm" }
@@ -418,7 +426,7 @@
         },
         {
           "comment": "mod::name(...) - a call through a namespace",
-          "match": "(::)\\s*([A-Za-z_][A-Za-z0-9_]*)(?=\\s*\\()",
+          "match": "(::)\\s*([A-Za-z_][A-Za-z0-9_$]*)(?=\\s*\\()",
           "captures": {
             "1": { "name": "keyword.operator.scope.wyrm" },
             "2": { "name": "entity.name.function.call.wyrm" }
@@ -426,7 +434,7 @@
         },
         {
           "comment": "mod::name - plain namespace access",
-          "match": "(::)\\s*([A-Za-z_][A-Za-z0-9_]*)",
+          "match": "(::)\\s*([A-Za-z_][A-Za-z0-9_$]*)",
           "captures": {
             "1": { "name": "keyword.operator.scope.wyrm" },
             "2": { "name": "variable.other.member.wyrm" }
@@ -442,14 +450,14 @@
     "attribute-access": {
       "patterns": [
         {
-          "match": "(\\.)\\s*([A-Za-z_][A-Za-z0-9_]*)\\s*(?=\\()",
+          "match": "(\\.)\\s*([A-Za-z_][A-Za-z0-9_$]*)\\s*(?=\\()",
           "captures": {
             "1": { "name": "punctuation.accessor.wyrm" },
             "2": { "name": "entity.name.function.call.wyrm" }
           }
         },
         {
-          "match": "(\\.)\\s*([A-Za-z_][A-Za-z0-9_]*)",
+          "match": "(\\.)\\s*([A-Za-z_][A-Za-z0-9_$]*)",
           "captures": {
             "1": { "name": "punctuation.accessor.wyrm" },
             "2": { "name": "variable.other.property.wyrm" }
@@ -460,7 +468,7 @@
     "function-call": {
       "patterns": [
         {
-          "match": "\\b([A-Za-z_][A-Za-z0-9_]*)\\s*(?=\\()",
+          "match": "\\b([A-Za-z_][A-Za-z0-9_$]*)\\s*(?=\\()",
           "name": "entity.name.function.call.wyrm"
         }
       ]
@@ -476,6 +484,11 @@
           "comment": "arrows before the comparison operators, which would otherwise claim the '<' of '<-'",
           "name": "keyword.operator.arrow.wyrm",
           "match": "->|<-"
+        },
+        {
+          "comment": "shifts before the comparison operators, which would otherwise claim the first '<' of '<<'",
+          "name": "keyword.operator.bitwise.wyrm",
+          "match": "<<|>>"
         },
         {
           "name": "keyword.operator.comparison.wyrm",
@@ -496,7 +509,7 @@
         },
         {
           "name": "keyword.operator.bitwise.wyrm",
-          "match": "&|\\||\\^"
+          "match": "&|\\||\\^|~"
         }
       ]
     },

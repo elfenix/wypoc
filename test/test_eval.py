@@ -160,3 +160,60 @@ def test_list_resize_rejects_non_list_receiver():
     wyrm_builtins.install(ctx)
     with pytest.raises(TypeError, match="not a list"):
         eval_program(parse('d := { "a": 1 }\nd!resize(2)\n'), ctx)
+
+
+# --------------------------------------------------------------------------
+# The bitwise family: unary `~`/`+` (which bind like unary `-`), and the
+# `<<`/`>>` shifts (which bind tighter than `&` and looser than `+`).
+# --------------------------------------------------------------------------
+
+def run(src: str) -> dict:
+    from wypoc.parse import parse
+    from wypoc.wyrm_eval_parse_tree import eval_program
+
+    ctx: dict = {}
+    wyrm_builtins.install(ctx)
+    eval_program(parse(src if src.endswith("\n") else src + "\n"), ctx)
+    return {name: var.value for name, var in ctx.items()
+            if isinstance(var, Variable)}
+
+
+@pytest.mark.parametrize("src,expected", [
+    ("x := ~5", -6),
+    ("x := ~-1", 0),
+    ("x := +5", 5),
+    ("x := +-5", -5),
+    ("x := -~5", 6),
+    ("x := 1 << 4", 16),
+    ("x := 256 >> 4", 16),
+    ("x := 1 << 2 << 3", 32),            # left-associative: (1 << 2) << 3
+    ("x := 1 + 1 << 2", 8),              # `+` binds tighter than `<<`
+    ("x := 3 & 1 << 1", 2),              # `<<` binds tighter than `&`
+    ("x := ~0 & 0xff", 255),             # unary binds tighter than either
+    ("x := 2 ** 3 << 1", 16),            # `**` too
+])
+def test_the_bitwise_operators_and_how_tightly_they_bind(src, expected):
+    assert run(src)["x"] == expected
+
+
+def test_a_negative_shift_count_is_an_error_value_not_a_crash():
+    # The same treatment `/` gives division by zero, so wyrm code can catch it.
+    assert wyrm_builtins.is_error(run("x := 1 << -1")["x"])
+    assert wyrm_builtins.is_error(run("x := 1 >> -1")["x"])
+
+
+def test_a_name_may_contain_a_dollar():
+    values = run("reg$0 := 7\n$total := reg$0 * 2\nx := $total + 1")
+    assert values["reg$0"] == 7 and values["$total"] == 14 and values["x"] == 15
+
+
+@pytest.mark.parametrize("src,expected", [
+    ("x := 1 is int", True),
+    ("x := 1 is not int", False),
+    ("x := 1 is not str", True),
+    ('x := "s" is not int | float', True),
+    ("x := 1.5 is not int | float", False),
+    ("x := (1 is not str) and (1 is int)", True),
+])
+def test_is_not_negates_the_type_check(src, expected):
+    assert run(src)["x"] is expected

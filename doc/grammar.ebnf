@@ -42,7 +42,12 @@ float_literal   ::= [ "-" ] , digit , { digit | "_" } , "." , digit , { digit | 
 bool_literal    ::= "true" | "false" ;
 nil_literal     ::= "nil" ;
 
-identifier      ::= letter , { letter | digit } ;
+(* `$` is an ordinary identifier character, in any position: `$ast`, `a$b`,
+   `reg$0` are all names. The `$` of the pair-list sigil `$[` is still the
+   operator it always was - a `$` only begins a name when a letter follows
+   it. `$ast` (see scope_op) is reserved language-wide; the rest of the
+   `$`-family (`$name`, `$line`, `$doc`) is not built yet. *)
+identifier      ::= ( letter | "$" , letter ) , { letter | digit | "$" } ;
 
 symbol_literal  ::= "'" , ( identifier | operator_symbol ) ;
                   (* At least 31 significant characters recognized.
@@ -56,7 +61,7 @@ symbol_literal  ::= "'" , ( identifier | operator_symbol ) ;
    these; nothing else in the grammar puts an operator after a quote, so
    there is no ambiguity to trade for it. *)
 operator_symbol ::= "+" | "-" | "*" | "/" | "%" | "**"
-                   | "&" | "|" | "^"
+                   | "&" | "|" | "^" | "~" | "<<" | ">>"
                    | "==" | "!=" | "<" | ">" | "<=" | ">=" | "<=>" ;
 
 ellipsis_literal
@@ -258,7 +263,9 @@ and_expr        ::= not_expr , { "and" , not_expr } ;
 not_expr        ::= "not" , not_expr
                    | comparison ;
 
-comparison      ::= bitwise_or_expr , "is" , type_constraint
+(* `a is not T` is exactly `not (a is T)`, and is built as that rather than
+   as a negated check of its own. *)
+comparison      ::= bitwise_or_expr , "is" , [ "not" ] , type_constraint
                    | bitwise_or_expr , [ comp_op , bitwise_or_expr ] ;
 comp_op         ::= "<=" | ">=" | "<=>" | "<" | ">" | "==" | "!=" | "in" ;
 
@@ -266,7 +273,11 @@ type_constraint ::= type_expr , { "|" , type_expr } ;
 
 bitwise_or_expr  ::= bitwise_xor_expr , { "|" , bitwise_xor_expr } ;
 bitwise_xor_expr ::= bitwise_and_expr , { "^" , bitwise_and_expr } ;
-bitwise_and_expr ::= additive_expr , { "&" , additive_expr } ;
+bitwise_and_expr ::= shift_expr , { "&" , shift_expr } ;
+
+(* Shifts bind tighter than "&" and looser than "+"/"-", as in C and
+   Python: `a & b << c` shifts first, `a << b + c` adds first. *)
+shift_expr      ::= additive_expr , { ( "<<" | ">>" ) , additive_expr } ;
 
 additive_expr   ::= mult_expr , { ( "+" | "-" ) , mult_expr } ;
 mult_expr       ::= unary_expr , { ( "*" | "/" | "%" ) , unary_expr } ;
@@ -274,8 +285,10 @@ mult_expr       ::= unary_expr , { ( "*" | "/" | "%" ) , unary_expr } ;
 (* A decorator in expression position binds exactly as tightly as unary
    minus, and nests right-associatively: `@d f(x) + 1` decorates `f(x)`, and
    `@a @b x` is `@a (@b x)`. *)
+(* "+" is identity and "~" is bitwise complement; both bind exactly as
+   tightly as unary "-". *)
 unary_expr      ::= decorator , unary_expr
-                   | ( "-" | "not" ) , unary_expr
+                   | ( "-" | "+" | "~" | "not" ) , unary_expr
                    | power_expr ;
 
 power_expr      ::= postfix_expr , [ "**" , unary_expr ] ;       (* right-assoc *)
@@ -289,12 +302,13 @@ attr_op         ::= "." , identifier ;
 message_op      ::= "!" , identifier , [ "(" , [ arg_list ] , ")" ] ;
 (* `foo::$ast` is a definition's own tree as a value - `::` because it
    resolves a name statically in a namespace, where `.` would ask the
-   runtime value (a closure) for an attribute it hasn't got. `$ast` is the
-   first of a reserved `$`-family (`$name`, `$line`, `$doc` are not built),
-   so the word after `$` is matched literally: `foo::$whatever` is a syntax
-   error, not a silently different meaning. *)
+   runtime value (a closure) for an attribute it hasn't got. `$ast` is one
+   identifier (`$` is an identifier character - see above), reserved
+   language-wide: it cannot be used as an ordinary name anywhere. The rest
+   of the `$`-family (`$name`, `$line`, `$doc`) is not built, so
+   `foo::$whatever` is an ordinary `::` lookup of a `$`-spelled name. *)
 scope_op        ::= "::" , identifier
-                   | "::" , "$" , "ast" ;
+                   | "::" , "$ast" ;
 
 attr_ref        ::= postfix_expr , "." , identifier ;
 

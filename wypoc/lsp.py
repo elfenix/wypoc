@@ -306,6 +306,21 @@ def hover(ls: LanguageServer, params: types.HoverParams):
     return hover_for(doc.source, uri_to_path(params.text_document.uri), line, col)
 
 
+def _is_lone_colon_trigger(params: types.CompletionParams, source: str, line: int, col: int) -> bool:
+    """Whether this request is the protocol event fired by typing a single
+    `:` that isn't the second half of `::` - the case COMPLETION_TRIGGERS
+    has to register `:` for (so the *real* `::` half is caught) but that
+    `complete` shouldn't act on."""
+    context = params.context
+    if context is None or context.trigger_kind != types.CompletionTriggerKind.TriggerCharacter:
+        return False
+    if context.trigger_character != ":":
+        return False
+    lines = source.splitlines() or [""]
+    text = lines[line - 1] if 1 <= line <= len(lines) else ""
+    return not text[:col].rstrip().endswith("::")
+
+
 @server.feature(
     types.TEXT_DOCUMENT_COMPLETION,
     types.CompletionOptions(trigger_characters=COMPLETION_TRIGGERS),
@@ -313,6 +328,12 @@ def hover(ls: LanguageServer, params: types.HoverParams):
 def complete(ls: LanguageServer, params: types.CompletionParams) -> types.CompletionList:
     doc = ls.workspace.get_text_document(params.text_document.uri)
     line, col = position_to_point(params.position)
+    if _is_lone_colon_trigger(params, doc.source, line, col):
+        # `:` is only a real trigger as the second half of `::` (a module
+        # path); a block's own `:` (`fn f():`) fires the same protocol
+        # event, and popping the ordinary name list up over it would just
+        # be noise on a character that isn't starting a completion at all.
+        return types.CompletionList(is_incomplete=False, items=[])
     items = completions(doc.source, uri_to_path(params.text_document.uri), line, col)
     # `is_incomplete=False`: the list is complete for this prefix, so the
     # editor may filter it down as the user keeps typing rather than asking

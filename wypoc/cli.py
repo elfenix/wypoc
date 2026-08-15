@@ -8,11 +8,19 @@ Usage:
     wyrm [interpreter options] script.wy [script args...]
     wyrm [interpreter options] -c "code" [args...]
     wyrm --compile [-o out.c] module.wy
+    wyrm --config name=value [--config ...]  (set an option and exit)
 
 Interpreter options (must come before the script path):
     -c code         eval `code` directly, instead of reading a script file
     -t, --tui       start the REPL in its full-screen Textual UI rather
                      than the default readline prompt
+    --no-tui        use the readline prompt even if ~/.wyrm/config asks
+                     for the full-screen one
+    --config n=v    set option `n` to `v` in ~/.wyrm/config (creating the
+                     file and its directory if needed) and exit, running
+                     nothing - the command-line form of the REPL's
+                     `:set config n`. Repeatable; `--config n` alone turns
+                     a boolean option on, and bare `--config` lists them
     --compile       translate `module.wy` (must `import native`) to C source
                      targeting the real wyrm VM calling convention, instead
                      of running it; prints to stdout unless -o is given
@@ -33,13 +41,41 @@ import os
 import sys
 import traceback
 
+from wypoc import config as config_mod
+from wypoc import project as project_mod
 from wypoc import wyrm_modules
 from wypoc.compiler_c import CompileError, compile_module
 from wypoc.parse import parse
 from wypoc.wyrm_eval_parse_tree import Scope, eval_program, expose, populate_globals
 
 
-def run_repl(tui: bool) -> int:
+def write_config(assignments: list) -> int:
+    """`wyrm --config name=value ...`: a mode of its own, like --compile -
+    it writes the options into ~/.wyrm/config and exits without running
+    anything. Bare `--config` (no assignment at all) lists what can be set
+    and what the file says now."""
+    if not assignments:
+        options = config_mod.load()
+        print(f"config file: {config_mod.config_path()}")
+        for name in sorted(config_mod.OPTIONS):
+            value = "true" if options[name] else "false"
+            print(f"  {name} = {value}    {config_mod.DESCRIPTIONS[name]}")
+        return 0
+    for text in assignments:
+        try:
+            name, value = config_mod.parse_assignment(text)
+            config_mod.set_option(name, value)
+        except config_mod.ConfigError as e:
+            print(f"wyrm: {e}", file=sys.stderr)
+            return 2
+        print(f"{name} = {str(value).lower() if isinstance(value, bool) else value}"
+              f"  ({config_mod.config_path()})")
+    return 0
+
+
+def run_repl(tui: bool, options: "dict | None" = None,
+             project_root: "str | None" = None,
+             preamble: "str | None" = None) -> int:
     """Starts an interactive session. The full-screen UI needs both a real
     terminal and `textual`, so `--tui` falls back to the readline prompt
     (with a note saying why) rather than failing outright - the REPL still
@@ -52,7 +88,7 @@ def run_repl(tui: bool) -> int:
               f"(pip install 'wypoc[repl]'): {e}", file=sys.stderr)
         return 2
 
-    session = Session()
+    session = Session(options=options, project_root=project_root, preamble=preamble)
     if tui:
         reason = None
         if not (sys.stdin.isatty() and sys.stdout.isatty()):
@@ -76,7 +112,9 @@ def main(argv: list = None) -> int:
     verbose = False
     code = None
     compile_mode = False
-    tui = False
+    tui = None  # None: whatever ~/.wyrm/config says; -t/--no-tui decide it
+    config_mode = False
+    config_assignments = []
     output_path = None
     i = 0
     while i < len(argv) and argv[i].startswith("-") and argv[i] != "-":
@@ -90,6 +128,16 @@ def main(argv: list = None) -> int:
             compile_mode = True
         elif opt in ("-t", "--tui"):
             tui = True
+        elif opt == "--no-tui":
+            tui = False
+        elif opt == "--config":
+            config_mode = True
+            # `--config` may be the whole command (list the options), so its
+            # argument is optional - but a following `-something` is the next
+            # option, not this one's value.
+            if i + 1 < len(argv) and not argv[i + 1].startswith("-"):
+                config_assignments.append(argv[i + 1])
+                i += 1
         elif opt == "-o":
             if i + 1 >= len(argv):
                 print("wyrm: -o requires a path argument", file=sys.stderr)
@@ -108,6 +156,16 @@ def main(argv: list = None) -> int:
             return 2
         i += 1
 
+    if config_mode:
+        # A mode of its own: set the options, say so, and stop. Combining it
+        # with something to run would leave it ambiguous whether the new
+        # settings applied to that run, so it's refused rather than guessed.
+        if compile_mode or code is not None or tui is not None or i < len(argv):
+            print("wyrm: --config sets options and exits; it takes nothing "
+                  "else to run", file=sys.stderr)
+            return 2
+        return write_config(config_assignments)
+
     if compile_mode and code is not None:
         print("wyrm: --compile cannot be used with -c", file=sys.stderr)
         return 2
@@ -120,7 +178,14 @@ def main(argv: list = None) -> int:
     # No script and no -c: this is an interactive session, not a usage
     # error - `wyrm` alone means the REPL, like `python` alone does.
     if code is None and not compile_mode and i >= len(argv):
-        return run_repl(tui)
+        # The config file supplies the session's starting options - global,
+        # then a project's own if one is found (see project.py) - and the
+        # `tui` one among them stands in for --tui when neither -t nor
+        # --no-tui said otherwise.
+        options, project_root = project_mod.load_options()
+        preamble = project_mod.load_preamble(project_root)
+        return run_repl(options["tui"] if tui is None else tui, options,
+                        project_root, preamble)
 
     if code is not None:
         src = code

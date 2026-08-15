@@ -53,14 +53,14 @@ TYPES = {
 # statements would not.
 BINOPS = {
     "+": "+", "-": "-", "*": "*", "/": "/", "%": "%",
-    "&": "&", "|": "|", "^": "^",
+    "&": "&", "|": "|", "^": "^", "<<": "<<", ">>": ">>",
     "<": "<", "<=": "<=", ">": ">", ">=": ">=", "==": "==", "!=": "!=",
     "and": "&&", "or": "||",
 }
 
 # Operators that make no sense on a float in C (`%` and the bitwise set are
 # integer-only), checked so the generated C can't fail to compile.
-INTEGER_ONLY_BINOPS = frozenset({"%", "&", "|", "^"})
+INTEGER_ONLY_BINOPS = frozenset({"%", "&", "|", "^", "<<", ">>"})
 
 
 def c_ident(name: str) -> str:

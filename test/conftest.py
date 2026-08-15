@@ -2,7 +2,7 @@ import os
 
 import pytest
 
-from wypoc import wyrm_modules
+from wypoc import config, wyrm_modules
 from wypoc.compiler_c import compile_module
 from wypoc.parse import parse
 from wypoc.wyrm_eval_parse_tree import eval_program
@@ -38,6 +38,22 @@ def _wyrm_search_environment():
     wyrm_modules.set_script_root(previous_root)
     if previous_path is not None:
         os.environ["WYRM_PATH"] = previous_path
+
+
+@pytest.fixture(autouse=True)
+def _wyrm_config(tmp_path, monkeypatch):
+    """Every test gets a config file of its own (an empty, not-yet-created
+    one), so a Session picks up wypoc's own defaults rather than whatever
+    the developer running the suite happens to have in ~/.wyrm/config - and
+    so a test writing one (`:set config`) can't overwrite theirs."""
+    monkeypatch.setenv(config.CONFIG_ENV_VAR, str(tmp_path / "wyrm-config"))
+    # Building a Session points the module search root at the working
+    # directory (repl.Session.reset does, standing in for a script's own
+    # directory) - put back what _wyrm_search_environment set, so a test
+    # that starts a REPL doesn't leave later tests unable to find samples/.
+    previous_root = wyrm_modules.script_root()
+    yield
+    wyrm_modules.set_script_root(previous_root)
 
 
 def sample_path(name: str) -> str:

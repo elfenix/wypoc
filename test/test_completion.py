@@ -91,7 +91,7 @@ CONTEXTS = [
     ("after a spaced bang", "x := b ! des", 12, "!", "des"),
     ("after a scope", "x := std::io::pri", 17, "::", "pri"),
     ("after a bare scope", "x := std::", 10, "::", ""),
-    ("after a dollar", "x := f::$as", 11, "::$", "as"),
+    ("after a dollar", "x := f::$as", 11, "::$", "$as"),
     ("after an at", "@trac", 5, "@", "trac"),
 ]
 
@@ -189,7 +189,7 @@ def test_scope_follows_an_alias_to_the_real_module(index):
 
 def test_dollar_offers_only_what_is_built(index):
     items = complete_at(index, *at_end("x := area::$"))
-    assert labels(items) == ["ast"]
+    assert labels(items) == ["$ast"], "the `$` is part of the name, so part of the label"
 
 
 # --- plain names, and their ordering ---------------------------------------

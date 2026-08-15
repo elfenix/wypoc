@@ -37,19 +37,20 @@ KEYWORDS = {
 # (a template's hole - see wyrm.gram's ellipsis_literal), and lexing it
 # whole keeps it from ever colliding with attribute access's `.`.
 MULTI_OPS = sorted(
-    ["...", "**", "->", "<-", "<=", ">=", "==", "!=", "::", "?=", ":="],
+    ["...", "**", "->", "<-", "<=", ">=", "==", "!=", "::", "?=", ":=",
+     "<<", ">>"],
     key=len, reverse=True,
 )
 
-SINGLE_OPS = set("()[]{}.,:+-*/%&|^<>=!$'@")
+SINGLE_OPS = set("()[]{}.,:+-*/%&|^~<>=!$'@")
 
 # The operators a symbol literal may name - `'+`, `'<=>`, ... The canonical
 # s-expression format spells a binop's operator as a symbol, so building a
 # tree from scratch is impossible without these (see doc/sexpr-spec.md's
 # "Operators"). Longest first, same maximal-munch rule MULTI_OPS uses.
 SYMBOL_OPERATORS = sorted(
-    ["<=>", "**", "==", "!=", "<=", ">=", "+", "-", "*", "/", "%",
-     "&", "|", "^", "<", ">"],
+    ["<=>", "**", "==", "!=", "<=", ">=", "<<", ">>", "+", "-", "*", "/", "%",
+     "&", "|", "^", "~", "<", ">"],
     key=len, reverse=True,
 )
 
@@ -66,7 +67,27 @@ def _is_ident_start(c: str) -> bool:
 
 
 def _is_ident_cont(c: str) -> bool:
-    return c.isalnum() or c == "_"
+    # `$` is an ordinary identifier character (`$ast`, `reg$0`, `a$b`); only
+    # `$ast` itself is reserved, and that reservation is the parser's (see
+    # RESERVED_DOLLAR_NAMES below and parse.py), not the lexer's.
+    return c.isalnum() or c == "_" or c == "$"
+
+
+def _starts_name(line: str, i: int) -> bool:
+    """Whether an identifier begins at `line[i]`. A leading `$` only starts
+    one when a name follows it: `$ast` is a name, while the `$` of `$[1, 2]`
+    (the pair-list sigil) is the operator it has always been."""
+    c = line[i]
+    if _is_ident_start(c):
+        return True
+    return c == "$" and i + 1 < len(line) and _is_ident_start(line[i + 1])
+
+
+# `$`-names the language keeps for itself. `$ast` (a definition's own tree -
+# see wyrm.gram's scope_op) is the only one built; `$name`/`$line`/`$doc`
+# are the rest of the family it heads. The lexer scans them as the plain
+# NAMEs they now are; parse.py is what stops one being used as a variable.
+RESERVED_DOLLAR_NAMES = frozenset({"$ast"})
 
 
 class _Lexer:
@@ -206,7 +227,7 @@ class _Lexer:
             if c.isdigit():
                 yield self._scan_number(start)
                 continue
-            if _is_ident_start(c):
+            if _starts_name(self.line, self.col):
                 yield self._scan_name(start)
                 continue
             if c in OPEN_BRACKETS:
@@ -350,7 +371,7 @@ class _Lexer:
         line = self.line
         i = self.col  # at the quote
         j = i + 1
-        if j < len(line) and _is_ident_start(line[j]):
+        if j < len(line) and _starts_name(line, j):
             k = j + 1
             while k < len(line) and _is_ident_cont(line[k]):
                 k += 1

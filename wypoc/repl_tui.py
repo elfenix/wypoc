@@ -16,6 +16,9 @@ Keys:
                   what would draw a continuation prompt in readline mode),
                   in which case it inserts a newline instead
     shift+enter  always insert a newline, never run
+    backspace    in a line's leading whitespace, steps back a whole indent
+                  level at once instead of one column - undoing what
+                  auto-indent (above) added, undone the same way
     up / down    move by line inside the entry; at the buffer's first/last
                   line they step into history instead, landing on the last
                   (respectively first) line of the neighbouring entry
@@ -26,6 +29,7 @@ Keys:
                   have focus keeps a dimmed "shadow" cursor, so it's
                   obvious where focus will land coming back
     ctrl+c       copy the selection (in either the log or the prompt)
+    ctrl+l       :clear - forget every binding and start a fresh session
     ctrl+q       quit
 
 Both halves are real text areas, so the mouse works throughout: the wheel
@@ -46,8 +50,17 @@ from textual.containers import Horizontal
 from textual.message import Message
 from textual.widgets import Rule, Static, TextArea
 
+from wypoc import project as project_mod
 from wypoc.pretty import DELIMITERS
-from wypoc.repl import HELP, Result, Session, is_incomplete, run_command
+from wypoc.repl import (
+    HELP,
+    Result,
+    Session,
+    append_history,
+    is_incomplete,
+    load_history,
+    run_command,
+)
 
 # What the log puts in front of each kind of line - a submitted entry, and
 # everything that entry answered.
@@ -59,10 +72,12 @@ CONTINUATION_MARKER = "  "
 KEYS = """\
 enter                run the entry (or continue an unfinished one)
 shift+enter          add a line without running (ctrl+j / alt+enter too)
+backspace            in leading whitespace, back a whole indent level
 up / down            move by line; at the buffer's edges, step into history
 ctrl+up / ctrl+down  the previous / next entry (alt+p / alt+n too)
 ctrl+o, F6           switch between the prompt and the log
 ctrl+c               copy the selection
+ctrl+l               :clear - forget every binding, start a fresh session
 ctrl+q               quit"""
 
 # repl.py's banner names ctrl-d, which is the readline front end's way out;
@@ -94,18 +109,26 @@ class PromptArea(TextArea):
     Edits made to a recalled entry are kept while browsing (`_drafts`), the
     way a shell does - including the half-typed buffer you were on when you
     started, which `down` past the newest entry brings back. Submitting
-    clears all of that."""
+    clears all of that.
+
+    History also survives between sessions, in `history_path` (see
+    project.history_path - a project's own `.wyrm/history` when there is
+    one, next to the user's config file otherwise): loaded once at startup, and appended
+    to as each entry is submitted (`remember`), one escaped line per entry
+    (repl.append_history), so it's durable the moment it's typed rather than
+    only on a clean exit."""
 
     class Submitted(Message):
         def __init__(self, source: str) -> None:
             self.source = source
             super().__init__()
 
-    def __init__(self, **kwargs) -> None:
+    def __init__(self, history_path: "str | None" = None, **kwargs) -> None:
         super().__init__(soft_wrap=True, tab_behavior="indent", **kwargs)
         self.show_line_numbers = False
         self.cursor_blink = True
-        self._history: list = []
+        self._history_path = history_path
+        self._history: list = load_history(history_path) if history_path else []
         # Which entry is being browsed: an index into _history, or None for
         # the buffer being typed (which is "after" the newest entry).
         self._index = None
@@ -121,6 +144,10 @@ class PromptArea(TextArea):
         return super()._draw_cursor
 
     async def _on_key(self, event) -> None:
+        if event.key == "backspace" and self._dedent_backspace():
+            event.prevent_default()
+            event.stop()
+            return
         if event.key == "enter":
             # `enter` submits a finished entry and continues an unfinished
             # one, so the same text that would keep prompting in readline
@@ -162,6 +189,8 @@ class PromptArea(TextArea):
         before it isn't filed twice, the way a shell's history behaves."""
         if source.strip() and (not self._history or self._history[-1] != source):
             self._history.append(source)
+            if self._history_path:
+                append_history(self._history_path, source)
         self._index = None
         self._drafts.clear()
 
@@ -209,6 +238,25 @@ class PromptArea(TextArea):
         if line.strip().endswith(":"):
             indent += INDENT
         self.insert("\n" + indent)
+
+    def _dedent_backspace(self) -> bool:
+        """Backspace with nothing but whitespace before the cursor steps
+        back a whole indent level at once, to the previous multiple of
+        INDENT's width - undoing `_newline`'s auto-indent should feel like
+        undoing one level of nesting, not take four presses to claw back
+        what one `enter` added. Answers whether it handled the key (False
+        - cursor at column 0, or something other than whitespace precedes
+        it - leaves backspace to do its ordinary thing: delete one
+        character, or join with the line above)."""
+        row, col = self.cursor_location
+        if col == 0:
+            return False
+        prefix = self.document.get_line(row)[:col]
+        if prefix.strip():
+            return False
+        target = ((col - 1) // len(INDENT)) * len(INDENT)
+        self.delete((row, target), (row, col))
+        return True
 
 
 class SessionLog(TextArea):
@@ -436,6 +484,11 @@ class WyrmReplApp(App):
         # text area sees it first.
         Binding("ctrl+o", "toggle_focus", "Prompt/log", priority=True, show=False),
         Binding("f6", "toggle_focus", "Prompt/log", priority=True, show=False),
+        # The readline front end binds the same key to the same effect (see
+        # repl.py's _install_readline) - :clear, not "clear the screen",
+        # which is ctrl+l's usual meaning; priority, so neither text area's
+        # own bindings (if any) see it first.
+        Binding("ctrl+l", "clear_session", ":clear", priority=True, show=False),
     ]
     # ctrl+c is deliberately *not* bound to quit: in both the log and the
     # prompt it copies the selection, which is the whole point of having a
@@ -456,7 +509,9 @@ class WyrmReplApp(App):
         # buffer would be text the user could edit (or submit).
         with Horizontal(id="prompt-row"):
             yield Static(ENTRY_MARKER, id="prompt-marker")
-            yield PromptArea(id="prompt")
+            yield PromptArea(
+                id="prompt",
+                history_path=project_mod.history_path(self.session.project_root))
         yield Rule(classes="-separator")
         yield StatusBar(id="status")
 
@@ -465,6 +520,8 @@ class WyrmReplApp(App):
         self.prompt = self.query_one(PromptArea)
         self.status = self.query_one(StatusBar)
         self.log_widget.write_note(BANNER)
+        if self.session.preamble_result is not None:
+            self._show_result(self.session.preamble_result)
         self.prompt.focus()
         self._refresh_status()
 
@@ -479,6 +536,16 @@ class WyrmReplApp(App):
             self.log_widget.focus()
         else:
             self.prompt.focus()
+        self._refresh_status()
+
+    def action_clear_session(self) -> None:
+        # Same effect as typing `:clear`, without going through the prompt
+        # - so it works from either pane, and even mid-entry.
+        kind, payload = run_command(self.session, ":clear")
+        assert kind == "message"
+        self.log_widget.write_note(payload)
+        if self.session.preamble_result is not None:
+            self._show_result(self.session.preamble_result)
         self._refresh_status()
 
     def _refresh_status(self) -> None:
@@ -517,6 +584,8 @@ class WyrmReplApp(App):
                 if payload is HELP:
                     payload = f"{payload}\n\n{KEYS}"
                 self.log_widget.write_note(payload)
+                if source.strip() == ":clear" and self.session.preamble_result is not None:
+                    self._show_result(self.session.preamble_result)
             self._refresh_status()
             return
 

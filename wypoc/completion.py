@@ -50,11 +50,14 @@ DOLLAR = "dollar"
 
 # Reserved only inside their own construct (see wyrm.gram), but worth
 # offering: a user typing `defer on ...` wants `error` suggested.
-SOFT_KEYWORDS = ("as", "except", "on", "error", "ast")
+SOFT_KEYWORDS = ("as", "except", "on", "error")
 
 # `$ast` is the only member of the `$`-family that is built; the others are
-# reserved (see ast_nodes.AstRef) and deliberately not offered.
-DOLLAR_MEMBERS = ("ast",)
+# reserved (see ast_nodes.AstRef) and deliberately not offered. The `$` is
+# part of the name now that it's an ordinary identifier character (see
+# wyrm_tokenizer._is_ident_cont), so it's part of the label an editor
+# inserts too.
+DOLLAR_MEMBERS = ("$ast",)
 
 
 @dataclass
@@ -87,7 +90,9 @@ class Context:
     start_col: int
 
 
-_IDENT_CONT = set("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_")
+# `$` included: it is an identifier character (`$ast`, `reg$0`), so a word
+# being typed reaches back across one.
+_IDENT_CONT = set("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_$")
 
 
 def context_at(source: str, line: int, col: int) -> Context:
@@ -107,11 +112,12 @@ def context_at(source: str, line: int, col: int) -> Context:
     # `std :: io`), so the trigger is whatever non-space character precedes
     # the word rather than the character immediately before it.
     before = text[:start].rstrip()
-    if before.endswith("::$"):
-        # `foo::$a` - the `$`-family, whose qualifier is the chain before it.
-        return Context("::$", prefix, before[:-3], start)
     if before.endswith("::"):
-        return Context("::", prefix, before[:-2], start)
+        # `foo::$a` - the `$`-family, whose qualifier is the chain before
+        # it; told from an ordinary `foo::bar` by the word's leading `$`,
+        # which is part of the word rather than a trigger of its own.
+        trigger = "::$" if prefix.startswith("$") else "::"
+        return Context(trigger, prefix, before[:-2], start)
     if before.endswith("!"):
         return Context("!", prefix, before[:-1], start)
     if before.endswith("."):

@@ -55,15 +55,16 @@ from wypoc import ast_nodes as ast
 from wypoc.wyrm_builtins import NIL, Pair, Symbol
 
 # The operators a `'binop`/`'unop` may name. The one place a wyrm operator is
-# spelled as a symbol; `UnaryOp` stores negation as `neg`, so that one arm
-# needs the two spellings mapped (see `_UNOP_TO_OP`).
+# spelled as a symbol; `UnaryOp` names its operators (`neg`, `pos`, `inv`)
+# rather than spelling them, so that arm needs the two spellings mapped (see
+# `_UNOP_TO_OP`).
 OPERATORS = (
-    "+", "-", "*", "/", "%", "**", "&", "|", "^",
+    "+", "-", "*", "/", "%", "**", "&", "|", "^", "<<", ">>",
     "==", "!=", "<", ">", "<=", ">=", "<=>",
 )
 
-_UNOP_TO_OP = {"neg": "-"}
-_OP_TO_UNOP = {"-": "neg"}
+_UNOP_TO_OP = {"neg": "-", "pos": "+", "inv": "~"}
+_OP_TO_UNOP = {op: name for name, op in _UNOP_TO_OP.items()}
 
 
 class SexprError(Exception):
@@ -674,7 +675,8 @@ def _decode_binop(kind: str, fields: list):
 def _decode_unop(kind: str, fields: list):
     op, operand = _expect(fields, 2, kind)
     if not isinstance(op, Symbol) or op.name not in _OP_TO_UNOP:
-        raise SexprError("'unop's operator must be '-")
+        spelled = ", ".join(f"'{o}" for o in _OP_TO_UNOP)
+        raise SexprError(f"'unop's operator must be one of {spelled}")
     return ast.UnaryOp(_OP_TO_UNOP[op.name], decode(operand))
 
 

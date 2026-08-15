@@ -92,6 +92,53 @@ def test_shift_enter_adds_a_line_to_an_entry_that_would_otherwise_run():
     assert "3" not in log
 
 
+def test_backspace_in_leading_whitespace_steps_back_a_whole_indent():
+    async def steps(pilot, app):
+        await pilot.press(*"fn f(a):")
+        await pilot.press("enter")  # auto-indents to one level: "    "
+        await pilot.press("backspace")
+        await pilot.pause()
+        return app.query_one(PromptArea).text
+
+    assert drive(steps) == "fn f(a):\n"
+
+
+def test_backspace_in_whitespace_snaps_down_to_the_indent_below_it():
+    async def steps(pilot, app):
+        await pilot.press(*"fn f(a):")
+        await pilot.press("enter")     # "    "
+        await pilot.press(*"if x:")
+        await pilot.press("enter")     # "        "
+        await pilot.press("space")     # "         " - one past the indent
+        await pilot.press("backspace")
+        await pilot.pause()
+        return app.query_one(PromptArea).text
+
+    text = drive(steps)
+    assert text.endswith("\n        "), "back to the indent it was one past"
+
+
+def test_backspace_with_code_before_the_cursor_deletes_one_character():
+    async def steps(pilot, app):
+        await pilot.press(*"1 + 2")
+        await pilot.press("backspace")
+        await pilot.pause()
+        return app.query_one(PromptArea).text
+
+    assert drive(steps) == "1 + "
+
+
+def test_backspace_at_column_zero_joins_with_the_line_above():
+    async def steps(pilot, app):
+        await pilot.press(*"1 + 2")
+        await pilot.press("shift+enter")
+        await pilot.press("backspace")
+        await pilot.pause()
+        return app.query_one(PromptArea).text
+
+    assert drive(steps) == "1 + 2"
+
+
 def test_a_multi_line_definition_runs_and_is_callable_afterwards():
     async def steps(pilot, app):
         await submit(pilot, app, "fn double(a):\nreturn a * 2\n")

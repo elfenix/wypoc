@@ -18,6 +18,7 @@ export const SECTION = "wyrm";
 /** Executable basenames, `.exe`-suffixed on Windows. */
 export const INTERPRETER_EXE = process.platform === "win32" ? "wyrm.exe" : "wyrm";
 export const SERVER_EXE = process.platform === "win32" ? "wyrm-lsp.exe" : "wyrm-lsp";
+export const DAP_EXE = process.platform === "win32" ? "wyrm-dap.exe" : "wyrm-dap";
 
 /** `bin/` on POSIX, `Scripts/` in a Windows virtualenv. */
 export const VENV_BIN = process.platform === "win32" ? "Scripts" : "bin";
@@ -204,6 +205,37 @@ export function serverCommand(): string {
   }
 
   return SERVER_EXE;
+}
+
+/**
+ * The `wyrm-dap` executable to spawn for a debug session, same priority
+ * order as `serverCommand()`'s `wyrm-lsp` lookup:
+ *   1. `wyrm.dap.serverPath`, if set;
+ *   2. the `wyrm-dap` sitting next to the selected `wyrm.interpreterPath`;
+ *   3. `<workspaceFolder>/.venv/<bin>/wyrm-dap` (this repo's own dev layout);
+ *   4. `wyrm-dap` on PATH.
+ */
+export function dapCommand(): string {
+  const configured = expandPath(config().get<string>("dap.serverPath", ""));
+  if (configured) {
+    return configured;
+  }
+
+  const interpreter = interpreterPath();
+  if (interpreter) {
+    const sibling = path.join(path.dirname(interpreter), DAP_EXE);
+    if (fs.existsSync(sibling)) {
+      return sibling;
+    }
+  }
+
+  for (const candidate of venvCandidates(DAP_EXE)) {
+    if (fs.existsSync(candidate)) {
+      return candidate;
+    }
+  }
+
+  return DAP_EXE;
 }
 
 /**

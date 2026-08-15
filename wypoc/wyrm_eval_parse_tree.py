@@ -16,6 +16,36 @@ from wypoc import wyrm_builtins
 from wypoc import wyrm_modules
 from wypoc.parse import parse
 
+# Debugger hooks (wypoc/dap/debugger.py) - both None, and both checked
+# before use, so a plain `wyrm`/REPL run pays nothing and behaves exactly
+# as before. `_call_stack` is a debugger's own list of Frame objects that
+# this module pushes to/pops from around every call; `_stmt_hook` is
+# called at the top of every `eval_stmt`, the one place every statement
+# everywhere (module top level, fn/co bodies, if/while/for bodies - loops
+# re-enter it once per iteration via run_scoped_block) passes through.
+_call_stack: "list | None" = None
+_stmt_hook = None
+_exception_hook = None
+_last_captured_exc = None
+
+
+class Frame:
+    """One entry in a debugger's explicit call stack - a wyrm-level analog
+    of a Python stack frame, since wyrm calls otherwise only exist as
+    ordinary recursive Python calls with nothing tracking them. Lives here
+    (not in wypoc/dap/debugger.py) so this module never has to import the
+    debugger package - only the reverse."""
+
+    __slots__ = ("name", "scope", "current_pos")
+
+    def __init__(self, name: str, scope: "Scope"):
+        self.name = name
+        self.scope = scope
+        self.current_pos = None
+
+    def __repr__(self):
+        return f"Frame({self.name!r})"
+
 
 class Variable:
     """A bound name in a wyrm scope: holds whatever value it currently has."""
@@ -292,6 +322,14 @@ class CoroutineInstance:
 
     def _run(self) -> None:
         _current_coroutine.instance = self
+        # Runs on this instance's own daemon thread, but push/pop stay
+        # correct without extra locking: the GIL plus the _to_co/_to_caller
+        # handoff mean only one of {caller thread, this thread} is ever
+        # truly executing (see the class docstring), and that handoff
+        # already brackets this call, so _call_stack is never touched by
+        # two threads "at once" even though it's one shared list.
+        if _call_stack is not None:
+            _call_stack.append(Frame(self.node.name, self.local_ctx))
         try:
             run_scoped_block(self.node.body, self.local_ctx)
         except ReturnSignal as ret:
@@ -305,6 +343,8 @@ class CoroutineInstance:
             # iteration`), not as a raw Python traceback in the caller.
             self._result = wyrm_builtins.error(str(exc))
         finally:
+            if _call_stack is not None:
+                _call_stack.pop()
             self._finished = True
             self._to_caller.set()
 
@@ -705,6 +745,21 @@ def _safe_mod(a, b):
         return wyrm_builtins.error("modulo by zero")
 
 
+def _safe_shift(shift):
+    """`<<` / `>>`, with a negative shift count answering an error value
+    rather than raising - the same treatment `/` gives division by zero, and
+    for the same reason: it's a runtime condition wyrm code should be able
+    to `catch`, not an interpreter fault."""
+
+    def apply(a, b):
+        try:
+            return shift(a, b)
+        except ValueError:
+            return wyrm_builtins.error("negative shift count")
+
+    return apply
+
+
 BINOPS = {
     "+": operator.add,
     "-": operator.sub,
@@ -715,6 +770,8 @@ BINOPS = {
     "&": operator.and_,
     "|": operator.or_,
     "^": operator.xor,
+    "<<": _safe_shift(operator.lshift),
+    ">>": _safe_shift(operator.rshift),
     "<": operator.lt,
     ">": operator.gt,
     "<=": operator.le,
@@ -998,11 +1055,17 @@ def _bind_params_and_run(node, local_ctx: dict, positional, kwargs, display_name
     directly in the call's own top-level scope fires when the call
     returns - see doc/language-spec.md's Defer section."""
     _bind_params(node, local_ctx, positional, kwargs, display_name)
+    if _call_stack is not None:
+        _call_stack.append(Frame(display_name, local_ctx))
     try:
-        run_scoped_block(node.body, local_ctx)
-    except ReturnSignal as ret:
-        return ret.value
-    return None
+        try:
+            run_scoped_block(node.body, local_ctx)
+        except ReturnSignal as ret:
+            return ret.value
+        return None
+    finally:
+        if _call_stack is not None:
+            _call_stack.pop()
 
 
 def call_function(fn: Function, positional, kwargs):
@@ -1625,6 +1688,10 @@ def eval_expr(node, ctx: dict):
         val = eval_expr(node.operand, ctx)
         if node.op == "neg":
             return -val
+        if node.op == "pos":
+            return +val
+        if node.op == "inv":
+            return ~val
         if node.op == "not":
             return not val
         raise NotImplementedError(f"unsupported unary op: {node.op}")
@@ -1769,6 +1836,38 @@ def eval_expr(node, ctx: dict):
 
 
 def eval_stmt(stmt, ctx: dict) -> "object":
+    """The one place every statement everywhere passes through - module top
+    level, fn/co bodies, if/while/for bodies (a loop re-enters this once per
+    iteration, via run_scoped_block) - so it's where a debugger's
+    breakpoint/step hook and its exception-stack capture attach (both
+    `None`, and both checked before use, when nothing is debugging - see
+    the `_call_stack`/`_stmt_hook`/`_exception_hook` globals near the top of
+    this module). The statement itself is dispatched by `_eval_stmt_impl`,
+    below."""
+    if _stmt_hook is not None:
+        _stmt_hook(stmt, ctx)
+    if _call_stack is None:
+        return _eval_stmt_impl(stmt, ctx)
+    try:
+        return _eval_stmt_impl(stmt, ctx)
+    except (ReturnSignal, BreakSignal, ContinueSignal):
+        # Ordinary control flow (every `return`/`break`/`continue` is one
+        # of these), not an error - nothing for a debugger to report.
+        raise
+    except BaseException as exc:
+        # Only the *first* eval_stmt frame to see a given exception object
+        # captures it - by the time it's re-raised through an outer
+        # eval_stmt, _call_stack has already been popped back by the
+        # enclosing call's `finally` (see _bind_params_and_run), so only
+        # the innermost sighting still has the full stack to snapshot.
+        global _last_captured_exc
+        if _exception_hook is not None and exc is not _last_captured_exc:
+            _last_captured_exc = exc
+            _exception_hook(exc, list(_call_stack), stmt.pos)
+        raise
+
+
+def _eval_stmt_impl(stmt, ctx: dict) -> "object":
     """Executes one statement. Returns its value for `ast.ExprStmt` (a bare
     expression statement) and None for every other statement kind - used by
     eval_block/run_scoped_block to support `do:`'s "value of the last
@@ -2053,7 +2152,13 @@ def eval_program(program: ast.Program, ctx: dict) -> dict:
     scope = ctx if isinstance(ctx, Scope) else Scope()
     if scope is not ctx:
         scope.update(ctx)
-    run_scoped_block(program.body, scope)
+    if _call_stack is not None:
+        _call_stack.append(Frame("<module>", scope))
+    try:
+        run_scoped_block(program.body, scope)
+    finally:
+        if _call_stack is not None:
+            _call_stack.pop()
     if scope is not ctx:
         ctx.update(scope)
     return ctx

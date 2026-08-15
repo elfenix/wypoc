@@ -92,6 +92,37 @@ argument lists the options and their state.
 
 `:help` lists the REPL's own commands (`:quit`, `:clear`, `:set`, `:unset`).
 
+### Configuration
+
+`~/.wyrm/config` holds the defaults those options start from - TOML, in a
+single `[wyrm]` section:
+
+```toml
+[wyrm]
+compact = true   # one-line results
+tui = true       # `wyrm` with no arguments starts the full-screen UI
+```
+
+`:set NAME` changes an option for the session in front of you and leaves the
+file alone. `:set config NAME` does both - this session *and* the file, so
+every later one starts that way (`:unset config NAME` to undo it, and bare
+`:set config` to see the file and what it currently says).
+
+From a shell, `--config` is a mode of its own: it writes the option and
+exits, running nothing.
+
+```bash
+wyrm --config tui=true            # start in the full-screen UI from now on
+wyrm --config compact=off         # true/false, on/off, yes/no, 1/0
+wyrm --config compact --config tui   # a bare name turns a flag on
+wyrm --config                     # list the options and what they're set to
+```
+
+The file and its directory are created if they aren't there yet, and a
+rewrite keeps whatever else the file holds - comments, layout, other
+sections - as it was. `--no-tui` starts at the readline prompt for one run
+regardless of what the file says.
+
 ## Running the tests
 
 ```bash

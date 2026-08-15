@@ -202,6 +202,12 @@ ground" order:
   `false`-returning convention this backend already has, so those two are the
   cheapest of the set.
 - **Types**: `int`/`uint`/`bool`/`float`. `str` needs the GC story above.
+- **`$` in a name rides on a compiler extension.** `$` is an ordinary wyrm
+  identifier character (`reg$0`), and locals/parameters are emitted as C
+  identifiers verbatim, so such a name reaches the C compiler as-is. GCC and
+  Clang both accept `$` in an identifier (even under `-std=c11 -pedantic`);
+  a toolchain that doesn't - MSVC, or GCC with `-fno-dollars-in-identifiers`
+  - would need a mangling pass here first.
 - **Calls**: only to another compiled function in the same module. Calling
   *into* the interpreter (an uncompiled or corelib function) would need a
   by-name lookup at call time; keyword/spread arguments and multi-value

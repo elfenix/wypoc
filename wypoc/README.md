@@ -38,6 +38,9 @@ tools/generate_parser.py  regenerates parser.py from wyrm.gram
   symbol_index.py         cross-file symbol lookup (following imports)
   completion.py           completion candidates for a position (see below)
   cli.py                  the `wyrm` command (installed via pyproject.toml)
+  config.py               ~/.wyrm/config: the TOML `[wyrm]` section holding the
+                           defaults for the REPL's options (read at startup,
+                           written by `--config` / `:set config`)
   repl.py                 the interactive REPL: session, options, "is this
                            entry finished?", and the readline front end
   pretty.py               multi-line renderings of a result (lisp pairs, JSON
@@ -97,7 +100,9 @@ Python's stdlib `tokenize` can't be reused as-is: a bare `'` starts a string
 literal in Python but is wyrm's symbol sigil (`'name`), `[` doubles as wyrm's
 array literal, `{` doubles as wyrm's dict literal, and `$[` is the cons-list
 (pair-list) sigil; wyrm also has operators (`::`, `?=`, `<=>`, `!`, `$`) stdlib `tokenize` has
-never heard of. `wyrm_tokenizer.py` implements wyrm's own lexical rules
+never heard of, and `$` is one of its identifier characters (`$ast`, `reg$0`)
+on top of being an operator - a `$` starts a name only when a letter follows
+it, which is what keeps `$[1, 2]` the pair-list sigil it always was. `wyrm_tokenizer.py` implements wyrm's own lexical rules
 directly (see `doc/grammar.ebnf` section 0), including Haskell/Python-style
 layout (INDENT/DEDENT) and the rule that brace-delimited blocks (`{ }`) opt
 out of the layout algorithm entirely for their contents, while still
@@ -556,8 +561,8 @@ Or a single file:
 
 | File | Covers |
 | --- | --- |
-| `test_grammar.py` | Parses every `samples/*.wy` fixture and fails loudly on any syntax error - the grammar's own regression suite. Run this after any `wyrm.gram` change (post-regeneration). |
-| `test_eval.py` | Basic single/multi-target assignment, literals, string escaping/raw/multiline decoding, arithmetic. |
+| `test_grammar.py` | Parses every `samples/*.wy` fixture and fails loudly on any syntax error - the grammar's own regression suite. Run this after any `wyrm.gram` change (post-regeneration). Plus `is not` (built as the `not` of a check, so `a is not T` and `not a is T` are the same tree) and `$` as an identifier character: names that contain one, `$[` still lexing as the pair-list sigil, `foo::$ast` as a tree reference against `foo::$line` as a plain lookup, and `$ast` refused as an ordinary name everywhere else. |
+| `test_eval.py` | Basic single/multi-target assignment, literals, string escaping/raw/multiline decoding, arithmetic, and the bitwise family - unary `~`/`+`, the `<<`/`>>` shifts, how tightly each binds, and a negative shift count answering an error value rather than raising. |
 | `test_eval_functions.py` | Calls, default args, `*args`, lambdas, `if`/`elif`/`else` as return-bearing control flow. |
 | `test_eval_control_flow.py` | `while` + `break`/`continue`, `for`/`else` (Python-style: `else` runs only if the loop wasn't broken out of), early `return` from inside a loop. |
 | `test_eval_classes.py` | Class hierarchy metadata (`bases`, `slots`, `methods`), slot inheritance/overriding via `all_slots()`, per-instance slot storage via `new`, and that `new` with constructor args is a clear `NotImplementedError` (needs `init` dispatch). |
@@ -565,9 +570,10 @@ Or a single file:
 | `test_eval_builtins.py` | `expose`/`expose_all`/`builtin` - handing Python callables/values to wyrm code. |
 | `test_eval_modules.py` | `WYRM_PATH` resolution (default + override), package `__init__.wy` loading, `::` module/submodule access, `from ... import`, `import`'s wildcard and aliased-single-name forms. |
 | `test_eval_io.py` | `wyrm_io.py`'s primitives: write/read round-trip, `lseek`, `dup2` handle aliasing (shared file position), `close`/`flush`, and that a closed handle raises. |
-| `test_cli.py` | The *installed* `wyrm` console script via `subprocess` - arg packing (including args that look like flags), every exit-code/error path, and the bare-`wyrm` REPL driven over a pipe (including `--tui`'s fallback off a terminal). Skipped if the `wyrm` console script isn't installed. |
+| `test_cli.py` | The *installed* `wyrm` console script via `subprocess` - arg packing (including args that look like flags), every exit-code/error path, and the bare-`wyrm` REPL driven over a pipe (including `--tui`'s fallback off a terminal), plus `--config` as a mode of its own (writing options, listing them, refusing to be combined with something to run) and a configured `tui`/`compact` reaching the REPL. Skipped if the `wyrm` console script isn't installed. |
 | `test_pretty.py` | `pretty.py`: a pair list as lisp (including an improper tail), dicts/arrays in JSON layout, a class instance always rendering as a block in its definition's shape (and a container holding one having to break), where the breaks and indentation land at a given width, and the fallback to the one-line spelling for everything else. |
-| `test_repl.py` | `repl.py`: which entries are still being typed (unclosed bracket/string, a trailing `:`, an unfinished block) versus ready to run, and `Session.evaluate` - values echoed (and nil not), a binding answering with what it bound, bindings/functions/classes/imports surviving from one entry to the next, captured output, every error kind coming back as a `Result` rather than an exception, and the `:set`/`:unset` options (`compact` off by default, bare `:set` listing state, an unknown name reported rather than ignored). |
+| `test_config.py` | `config.py`: the defaults `[wyrm]` in `~/.wyrm/config` supplies a session, an unknown option / wrong-typed value / unparseable file each being reported and skipped rather than fatal, how `name=value` assignments are read, `set_option` creating the directory and file and round-tripping the rest of the document (comments and all) while refusing to overwrite a file that isn't TOML, and `:set config NAME` writing as well as setting. |
+| `test_repl.py` | `repl.py`: which entries are still being typed (unclosed bracket/string, a trailing `:`, an unfinished block) versus ready to run, and `Session.evaluate` - values echoed (and nil not), a binding answering with what it bound, bindings/functions/classes/imports surviving from one entry to the next, captured output, every error kind coming back as a `Result` rather than an exception, and the `:set`/`:unset` options (`compact` off by default, bare `:set` listing state, an unknown name reported rather than ignored), with defaults coming from `config.py`. |
 | `test_repl_tui.py` | `repl_tui.py` through Textual's headless test pilot: `enter` running a finished entry and extending an unfinished one, `shift+enter` always inserting a newline, `ctrl+o`/`F6` moving between prompt and log (each keeping a shadow cursor when the other has focus, and the log highlighting its cursor line only while focused), multi-line-aware history recall on `up`/`down` and `ctrl+up`/`ctrl+down`, multi-line entries collapsed to `...` in the log, output/errors/status, `:quit`, and the top-to-bottom widget order. Plus the log as a place to read from: mouse drag selection and `ctrl+c` copy, click-to-focus with `enter` handing focus back, the wheel scrolling the backlog (and new entries returning to the tail), and the submitted entry rendering as an inverted band. Skipped without `textual`. |
 | `test_lsp.py` | `lsp.py`'s feature functions directly (no JSON-RPC/server involved). Diagnostics: clean source -> no diagnostics, a syntax error -> exactly one diagnostic on the right (0-indexed) line, covering the whole offending token and naming it, a tokenizer-level error still getting a visible range, and every bundled sample fixture confirmed diagnostic-free. Navigation: outline nesting and parameter filtering, definition into another file through an `import` (against the real corelib), hover content, and 0-based LSP position conversion. |
 | `test_symbols.py` | `symbols.py` over one module: which declarations are found and how they nest, signature rendering, message-overload collection, how each `import` form decomposes into navigable bindings (and which of them actually bind a local name), reference tagging, and innermost-scope name resolution. |

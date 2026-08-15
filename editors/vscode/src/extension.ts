@@ -6,6 +6,7 @@ import {
 } from "vscode-languageclient/node";
 
 import * as config from "./config";
+import * as debug from "./debug";
 import * as interpreter from "./interpreter";
 import * as modulePath from "./modulePath";
 
@@ -142,6 +143,15 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     }),
     vscode.commands.registerCommand("wyrm.restartServer", restartClient),
     vscode.commands.registerCommand("wyrm.runFile", runFile),
+    vscode.commands.registerCommand("wyrm.debugFile", debug.debugFile),
+    vscode.debug.registerDebugConfigurationProvider(
+      "wyrm",
+      new debug.WyrmDebugConfigurationProvider()
+    ),
+    vscode.debug.registerDebugAdapterDescriptorFactory(
+      "wyrm",
+      new debug.WyrmDebugAdapterDescriptorFactory()
+    ),
     vscode.window.onDidChangeActiveTextEditor(() => status?.refresh()),
     vscode.workspace.onDidChangeConfiguration(async (event) => {
       if (config.affectsServer(event)) {
