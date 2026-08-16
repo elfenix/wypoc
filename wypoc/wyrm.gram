@@ -674,6 +674,7 @@ primary[object]:
     | 'defined' "(" s=literal ")" { Defined(s, LOCATIONS) }
     | lambda_expr
     | do_expr
+    | if_expr
     | NAME { Name(name.string, LOCATIONS) }
 
 literal[object]:
@@ -740,3 +741,12 @@ lambda_expr[object]:
 # and evaluates to the value of the last statement executed).
 do_expr[object]:
     | 'do' body=block { Do(body, LOCATIONS) }
+
+# `if` used as an expression - same If node as if_stmt (see above); its
+# value is that of the last statement executed in whichever branch runs
+# (eval_expr's ast.If case runs each branch through run_scoped_block, same
+# as do_expr's Do case). Falling through with no matching branch and no
+# `else` yields None, same as an empty `do:`.
+if_expr[object]:
+    | 'if' cond=expression body=block elifs=elif_clause* orelse=else_clause? {
+          If(cond, body, elifs, orelse, LOCATIONS) }

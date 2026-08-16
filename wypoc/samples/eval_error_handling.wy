@@ -35,3 +35,8 @@ class demo:
 
 demo_ok := demo(10, 2) catch 'div0
 demo_div_by_zero := demo(10, 0) catch 'div0
+
+# An out-of-range index becomes a catchable error value instead of
+# crashing the interpreter, same as a missing dict key.
+out_of_range_list := [1, 2]
+index_error_result := out_of_range_list[12] catch 0

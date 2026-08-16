@@ -15,7 +15,7 @@ import sys
 import pytest
 
 from conftest import SAMPLES_DIR, eval_sample
-from wypoc import wyrm_io
+from wypoc import wyrm_builtins, wyrm_io
 from wypoc.parse import parse
 from wypoc.wyrm_eval_parse_tree import (
     DecoratorError, Scope, clear_module_cache, eval_program, populate_globals,
@@ -226,6 +226,45 @@ AST_AND_HOOK = {
 @pytest.mark.parametrize("label,expected", AST_AND_HOOK.items(), ids=list(AST_AND_HOOK))
 def test_ast_references_and_the_sexpr_hook(printed, label, expected):
     assert printed[label] == expected
+
+
+# --- the `parse` builtin ---------------------------------------------------
+#
+# `parse(source)` boxes `source`'s own tree(s) exactly like `$ast` does, so
+# `sexpr()` reads them the same way; these exercise it directly rather than
+# through samples/decorators.wy, since it isn't part of that narrative.
+
+def _sexpr_of(src: str) -> str:
+    """Evaluates `sexpr(parse(src))`, as `display()` would show it - the
+    same `$[...]` form samples/decorators.wy's own sexpr assertions use."""
+    ctx = run(f'x := sexpr(parse("{src}"))\n')
+    return wyrm_builtins.display(ctx["x"].value)
+
+
+def test_parse_of_one_statement_unboxes_to_its_own_tree():
+    assert _sexpr_of("v := 5") == "$['decl, 'v, $['int, 5]]"
+
+
+def test_parse_of_one_expression_unboxes_to_its_own_tree():
+    assert _sexpr_of("1 + 2") == "$['expr_stmt, $['binop, '+, $['int, 1], $['int, 2]]]"
+
+
+def test_parse_of_several_statements_is_a_list_of_boxed_trees():
+    ctx = run('xs := parse("a := 1\\nb := 2")\nx := sexpr(xs[0])\ny := sexpr(xs[1])\n')
+    assert isinstance(ctx["xs"].value, list)
+    assert len(ctx["xs"].value) == 2
+    assert wyrm_builtins.display(ctx["x"].value) == "$['decl, 'a, $['int, 1]]"
+    assert wyrm_builtins.display(ctx["y"].value) == "$['decl, 'b, $['int, 2]]"
+
+
+def test_parse_of_blank_source_is_nil():
+    ctx = run('x := parse("   ")\n')
+    assert ctx["x"].value is wyrm_builtins.NIL
+
+
+def test_parse_of_bad_syntax_raises_syntax_error():
+    with pytest.raises(SyntaxError):
+        run('parse("v := ")\n')
 
 
 # --- failure modes --------------------------------------------------------

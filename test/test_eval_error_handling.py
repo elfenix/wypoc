@@ -16,6 +16,7 @@ EXPECTED = {
     # demo(10, 0)'s init hit a division error -> catch fired. A symbol, not
     # the string of the same name: `'div0 != "div0"` (see Symbol).
     "demo_div_by_zero": Symbol("div0"),
+    "index_error_result": 0,  # out-of-range list index catch 0 -> 0, not a crash
 }
 
 

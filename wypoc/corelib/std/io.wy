@@ -17,6 +17,13 @@ fn println(*content):
         first = false
         __write(__STDOUT, str(arg))
     __write(__STDOUT, "\n")
+    # explicit, now that a fn's implicit return is the value of its last
+    # statement: without this, println would answer __write's byte count
+    # instead of nil - it's I/O, not string-building. `pass`, not
+    # `return nil`, to match this value's own two-spellings-of-nil note
+    # (wyrm_builtins._format): a fallen-off-the-end fn already answers nil
+    # this way, with no second spelling to reconcile against `is None`.
+    pass
 
 fn eprintln(*content):
     first := true
@@ -26,6 +33,7 @@ fn eprintln(*content):
         first = false
         __write(__STDERR, str(arg))
     __write(__STDERR, "\n")
+    pass
 
 class File:
     slot handle: int = -1

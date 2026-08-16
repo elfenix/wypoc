@@ -217,3 +217,77 @@ def test_a_name_may_contain_a_dollar():
 ])
 def test_is_not_negates_the_type_check(src, expected):
     assert run(src)["x"] is expected
+
+
+# --------------------------------------------------------------------------
+# `and`/`or` short-circuit: the right operand must not be evaluated once
+# the left operand alone decides the result.
+# --------------------------------------------------------------------------
+
+def test_and_short_circuits_on_a_falsy_left_operand():
+    values = run(
+        "fn boom():\n"
+        "    side := true\n"
+        "    side = false\n"
+        "    return true\n"
+        "x := false and boom()\n"
+    )
+    assert values["x"] is False
+
+
+def test_or_short_circuits_on_a_truthy_left_operand():
+    values = run(
+        "fn boom() -> bool:\n"
+        "    1 / 0\n"
+        "    return true\n"
+        "x := true or boom()\n"
+    )
+    assert values["x"] is True
+
+
+def test_and_still_evaluates_the_right_operand_when_needed():
+    values = run("x := true and false\ny := true and true\n")
+    assert values["x"] is False and values["y"] is True
+
+
+def test_or_still_evaluates_the_right_operand_when_needed():
+    values = run("x := false or false\ny := false or true\n")
+    assert values["x"] is False and values["y"] is True
+
+
+# --------------------------------------------------------------------------
+# `if` as an expression: its value is that of the last statement executed
+# in whichever branch ran, same as `do:`.
+# --------------------------------------------------------------------------
+
+def test_if_expression_takes_the_then_branch_value():
+    values = run("check := true\na := if check { 3 } else { 4 }\n")
+    assert values["a"] == 3
+
+
+def test_if_expression_takes_the_else_branch_value():
+    values = run("check := false\na := if check { 3 } else { 4 }\n")
+    assert values["a"] == 4
+
+
+def test_if_expression_takes_an_elif_branch_value():
+    values = run("n := 2\na := if n == 1 { 1 } elif n == 2 { 2 } else { 3 }\n")
+    assert values["a"] == 2
+
+
+def test_if_expression_with_no_matching_branch_and_no_else_is_none():
+    values = run("check := false\na := if check { 3 }\n")
+    assert values["a"] is None
+
+
+def test_if_used_as_a_statement_still_yields_the_taken_branch_value():
+    # An `if` written as an ordinary statement (not through if_expr's
+    # `if COND { ... }` expression form) must still answer the value of
+    # whichever branch ran, so it can be the tail of a `do:`/fn body.
+    values = run("a := do {\n    if true {\n        5\n    }\n}\n")
+    assert values["a"] == 5
+
+
+def test_if_used_as_a_statement_with_no_matching_branch_is_none():
+    values = run("a := do {\n    if false {\n        5\n    }\n}\n")
+    assert values["a"] is None

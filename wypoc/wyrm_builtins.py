@@ -265,6 +265,25 @@ class Pair:
         if node is not NIL:
             raise TypeError("iteration: improper list has no well-defined end")
 
+    def __getitem__(self, index):
+        # `pair_list[i]` treats the chain like an array: `$[1, 2, 3][0] ==
+        # 1`. eval_expr's ast.Index case catches IndexError/TypeError and
+        # turns it into a catchable WyrmError, same as an out-of-range list
+        # index, so an improper-list walk-off or a non-int index lands there
+        # rather than crashing.
+        if not isinstance(index, int) or isinstance(index, bool):
+            raise TypeError(f"pair index must be an int (got {type(index).__name__})")
+        if index < 0:
+            raise IndexError("pair index out of range")
+        node = self
+        for _ in range(index):
+            if not isinstance(node, Pair):
+                raise IndexError("pair index out of range")
+            node = node.cdr
+        if not isinstance(node, Pair):
+            raise IndexError("pair index out of range")
+        return node.car
+
 
 class _Nil:
     """The empty list, Scheme's `'()` - a singleton distinct from Pair, None,
@@ -323,16 +342,20 @@ def cons(a, b):
 def car(x):
     """car, generalized past Scheme's cons-only version to anything
     list-adjacent that wypoc already has lying around: a Pair, or a Python
-    str/list/tuple standing in for wyrm's string/array/tuple values."""
+    str/list/tuple standing in for wyrm's string/array/tuple values. A bad
+    input (empty list/array/string, nil, or an unrelated type) is a
+    catchable WyrmError rather than a raised exception - see _safe_div's
+    docstring for why: wyrm code should be able to `try`/`catch` this
+    instead of the interpreter crashing."""
     if isinstance(x, Pair):
         return x.car
     if x is NIL:
-        raise TypeError("car: cannot take car of '() (the empty list)")
+        return error("car: cannot take car of '() (the empty list)")
     if isinstance(x, (str, list, tuple)):
         if not x:
-            raise TypeError("car: empty list/array/string has no first element")
+            return error("car: empty list/array/string has no first element")
         return x[0]
-    raise TypeError(f"car: not a pair/list/array/string (got {type(x).__name__})")
+    return error(f"car: not a pair/list/array/string (got {type(x).__name__})")
 
 
 def cdr(x):
@@ -340,12 +363,26 @@ def cdr(x):
     if isinstance(x, Pair):
         return x.cdr
     if x is NIL:
-        raise TypeError("cdr: cannot take cdr of '() (the empty list)")
+        return error("cdr: cannot take cdr of '() (the empty list)")
     if isinstance(x, (str, list, tuple)):
         if not x:
-            raise TypeError("cdr: empty list/array/string has no rest")
+            return error("cdr: empty list/array/string has no rest")
         return x[1:]
-    raise TypeError(f"cdr: not a pair/list/array/string (got {type(x).__name__})")
+    return error(f"cdr: not a pair/list/array/string (got {type(x).__name__})")
+
+
+def reverse(node):
+    """(reverse node) -> a new pair list with node's elements in reverse
+    order. `node` must be a proper pair list (NIL-terminated, or NIL
+    itself) - walks it car-by-car, consing each element onto a fresh chain
+    built from the tail backwards, same as the reference implementation's
+    std::pairs::reverse."""
+    out = NIL
+    p = node
+    while isinstance(p, Pair):
+        out = Pair(p.car, out)
+        p = p.cdr
+    return out
 
 
 def copy(x):
@@ -475,6 +512,14 @@ def remove(d, key):
     return d.pop(key)
 
 
+def tuple_(*rest) -> tuple:
+    """(tuple a, b, c) -> a new tuple holding the given arguments, the same
+    way `fn tuple(*rest) { return rest; }` would: *rest already collects a
+    native fn's overflow positional args into a Python tuple (see
+    _bind_params), so this just hands that straight back."""
+    return rest
+
+
 def print_(*args) -> None:
     """(print a, b, c) -> writes each argument, space-separated, to stdout,
     stringified the same way str() would (e.g. bools as true/false) - with
@@ -490,8 +535,8 @@ def print_(*args) -> None:
 
 
 def install(ctx: dict) -> None:
-    """Expose str/int/float/bool, cons/pair/car/cdr, nil, copy, len, and
-    print as wyrm-visible builtins, plus str's substr, list's
+    """Expose str/int/float/bool, cons/pair/car/cdr/reverse, tuple, nil,
+    copy, len, and print as wyrm-visible builtins, plus str's substr, list's
     resize/expand/append, and dict's remove as `!`-callable messages. `pair` is `cons` under another
     name - doc/language-spec.md's
     spelling for building an improper pair-list cell (`pair('a, 'b)`),
@@ -510,13 +555,14 @@ def install(ctx: dict) -> None:
     from wypoc.wyrm_eval_parse_tree import (
         ContextualBuiltin, ERROR_CLASS, OS_ERROR_CLASS, OUT_OF_MEMORY_CLASS,
         RUNTIME_ERROR_CLASS, STOP_ITERATION_CLASS, TREE_BASE_CLASS, expose_all,
-        install_native_decorators, next_, register_native_method, send_,
-        sexpr_value,
+        install_native_decorators, next_, parse_source, register_native_method,
+        send_, sexpr_value,
     )
 
     expose_all(
         ctx, **PRIMITIVE_TYPES, cons=cons, pair=cons, car=car, cdr=cdr, nil=NIL,
-        copy=copy, len=length, print=print_, error=ERROR_CLASS,
+        copy=copy, len=length, print=print_, error=ERROR_CLASS, reverse=reverse,
+        tuple=tuple_,
         OutOfMemory=OUT_OF_MEMORY_CLASS, RuntimeError=RUNTIME_ERROR_CLASS,
         OSError=OS_ERROR_CLASS, StopIteration=STOP_ITERATION_CLASS,
         next=next_, send=send_, TreeBase=TREE_BASE_CLASS,
@@ -526,6 +572,11 @@ def install(ctx: dict) -> None:
         # import. It needs the calling scope to ask whether a class answers
         # `__sexpr`, hence the ContextualBuiltin wrapper.
         sexpr=ContextualBuiltin(sexpr_value, "sexpr"),
+        # `parse(source)` - a string's own tree(s), boxed the same way
+        # `foo::$ast` is, so `sexpr(parse(source))` works exactly like
+        # `sexpr(foo::$ast)` does. Plain (not contextual): unlike sexpr, it
+        # never needs the calling scope.
+        parse=parse_source,
     )
     install_native_decorators(ctx)
     register_native_method("substr", substr, ctx)

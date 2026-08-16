@@ -245,6 +245,27 @@ def is_tree_box(value) -> bool:
     return isinstance(value, ClassInstance) and value.cls is TREE_BASE_CLASS
 
 
+def parse_source(source: str):
+    """`parse(source)` - `source`'s own tree(s), boxed exactly like `$ast`
+    (see tree_box) so `sexpr()` unwraps them the same way:
+    `sexpr(parse("v := 5"))` reads the `vardecl` node directly, the same
+    shape a decorator receives. A syntax error raises (a SyntaxError, same
+    as any other malformed wyrm), letting a wyrm-level `try` catch it like
+    any other builtin misuse.
+
+    `source` may hold more than one statement; a single statement unboxes
+    to its own tree (the common case - inspecting one snippet), while more
+    than one answers a list of boxed trees, one per statement. Blank source
+    answers nil, there being no tree to show."""
+    tree = parse(source, filename="<parse>")
+    boxes = [tree_box(stmt) for stmt in tree.body]
+    if not boxes:
+        return wyrm_builtins.NIL
+    if len(boxes) == 1:
+        return boxes[0]
+    return boxes
+
+
 def _builtin_error_subtype(name: str) -> Class:
     """A trivial `class {name}(error) {{}}` - one of doc/language-spec.md's
     predefined error subtypes (OutOfMemory, RuntimeError, OSError,
@@ -780,8 +801,9 @@ BINOPS = {
     "!=": operator.ne,
     "<=>": lambda a, b: (a > b) - (a < b),
     "in": lambda a, b: (chr(a) in b) if isinstance(b, str) and isinstance(a, int) and not isinstance(a, bool) else (a in b),
-    "and": lambda a, b: a and b,
-    "or": lambda a, b: a or b,
+    # "and"/"or" are short-circuited directly in eval_expr's ast.BinOp case
+    # (they must not evaluate their right operand eagerly), so they have no
+    # entry here.
 }
 
 
@@ -1053,16 +1075,22 @@ def _bind_params_and_run(node, local_ctx: dict, positional, kwargs, display_name
     _bind_params) then runs the body and unwinds ReturnSignal.
     run_scoped_block (not plain eval_block) so a `defer` registered
     directly in the call's own top-level scope fires when the call
-    returns - see doc/language-spec.md's Defer section."""
+    returns - see doc/language-spec.md's Defer section.
+
+    A body that falls off the end (no `return` reached) answers whatever
+    run_scoped_block computed - the value of the last statement executed,
+    per doc/language-spec.md's "If no explicit 'return' is used, the value
+    of the last statement is used." This used to be hardcoded to None,
+    silently discarding that value for every fn/message with an implicit
+    return - e.g. `fn g(x) -> int: x + 1` answered nil instead of x + 1."""
     _bind_params(node, local_ctx, positional, kwargs, display_name)
     if _call_stack is not None:
         _call_stack.append(Frame(display_name, local_ctx))
     try:
         try:
-            run_scoped_block(node.body, local_ctx)
+            return run_scoped_block(node.body, local_ctx)
         except ReturnSignal as ret:
             return ret.value
-        return None
     finally:
         if _call_stack is not None:
             _call_stack.pop()
@@ -1652,6 +1680,25 @@ def assign_target(target, value, ctx: dict) -> None:
     raise NotImplementedError(f"unsupported assignment target: {target}")
 
 
+def _eval_if(node: "ast.If", ctx: dict) -> "object":
+    """Shared by both `if` as a statement (_eval_stmt_impl) and `if` as an
+    expression (eval_expr, via if_expr in wyrm.gram): runs whichever
+    branch's condition is first true and answers the value of the last
+    statement executed in it (via run_scoped_block, same rule `do:` and
+    fn bodies use), or None if no branch ran. Each branch body is its own
+    child scope, so a `var`/`:=` inside one branch never leaks into (or
+    collides with a redeclare error against) another branch or the
+    enclosing scope - see doc/language-spec.md's Variables section."""
+    if eval_expr(node.cond, ctx):
+        return run_scoped_block(node.body, ctx.child())
+    for clause in node.elifs:
+        if eval_expr(clause.cond, ctx):
+            return run_scoped_block(clause.body, ctx.child())
+    if node.orelse is not None:
+        return run_scoped_block(node.orelse, ctx.child())
+    return None
+
+
 def eval_expr(node, ctx: dict):
     if isinstance(node, ast.Num):
         return eval_number_literal(node.value)
@@ -1696,6 +1743,12 @@ def eval_expr(node, ctx: dict):
             return not val
         raise NotImplementedError(f"unsupported unary op: {node.op}")
     if isinstance(node, ast.BinOp):
+        if node.op == "and":
+            left = eval_expr(node.left, ctx)
+            return left if not left else eval_expr(node.right, ctx)
+        if node.op == "or":
+            left = eval_expr(node.left, ctx)
+            return left if left else eval_expr(node.right, ctx)
         left = eval_expr(node.left, ctx)
         right = eval_expr(node.right, ctx)
         try:
@@ -1710,6 +1763,11 @@ def eval_expr(node, ctx: dict):
         # in its body (run_scoped_block also arms any `defer`s registered
         # directly in it) - see doc/language-spec.md's "do" section.
         return run_scoped_block(node.body, ctx.child())
+    if isinstance(node, ast.If):
+        # `if` used as an expression (e.g. `a := if check { 3 } else { 4 }`)
+        # - same node, and same value rule, as the if_stmt case in
+        # _eval_stmt_impl: see _eval_if.
+        return _eval_if(node, ctx)
     if isinstance(node, ast.Call):
         func = eval_expr(node.func, ctx)
         positional, kwargs = eval_args(node.args, ctx)
@@ -1742,7 +1800,13 @@ def eval_expr(node, ctx: dict):
             # No unicode support yet - just the ascii code point (a u32) of
             # the single indexed char, per doc/language-spec.md's Lookup
             # Operator ("7"[0] -> the u32 for the char '7', not the char).
-            return ord(obj[idx])
+            # Out-of-range is a catchable error value, same as the list/
+            # tuple case below - e.g. wyrm::parser::tokenizer's own
+            # `buffer[cur_pos] catch 'EOF` needs this, not a raw crash.
+            try:
+                return ord(obj[idx])
+            except IndexError as exc:
+                return wyrm_builtins.error(str(exc))
         if isinstance(obj, dict):
             # A missing key hands back the Unset error value rather than
             # raising, matching doc/language-spec.md's predefined
@@ -1751,7 +1815,15 @@ def eval_expr(node, ctx: dict):
             # reference implementation's same divergence from a raw
             # KeyError.
             return obj.get(idx, UNSET)
-        return obj[idx]
+        # Out-of-range / bad-index lookups (list/tuple/etc) become a
+        # catchable error value instead of a raw Python exception, matching
+        # the dict case above and doc/language-spec.md's "Unset" error type
+        # - e.g. `a := [1, 2]; b := a[12] catch 0;` must produce 0, not
+        # crash the interpreter.
+        try:
+            return obj[idx]
+        except (IndexError, TypeError, KeyError) as exc:
+            return wyrm_builtins.error(str(exc))
     if isinstance(node, ast.Scope):
         obj = eval_expr(node.obj, ctx)
         if isinstance(obj, Module):
@@ -1975,22 +2047,11 @@ def _eval_stmt_impl(stmt, ctx: dict) -> "object":
     if isinstance(stmt, ast.Return):
         raise ReturnSignal(eval_expr(stmt.value, ctx) if stmt.value is not None else None)
     if isinstance(stmt, ast.If):
-        # Each branch body is its own child scope, so a `var`/`:=` inside
-        # one branch never leaks into (or collides with a redeclare error
-        # against) another branch or the enclosing scope - see
-        # doc/language-spec.md's Variables section. run_scoped_block (not
-        # plain eval_block) so a `defer` inside the branch fires when the
-        # branch itself finishes.
-        if eval_expr(stmt.cond, ctx):
-            run_scoped_block(stmt.body, ctx.child())
-            return
-        for clause in stmt.elifs:
-            if eval_expr(clause.cond, ctx):
-                run_scoped_block(clause.body, ctx.child())
-                return
-        if stmt.orelse is not None:
-            run_scoped_block(stmt.orelse, ctx.child())
-        return
+        # Value rule matches every other block (do:, fn body, ...): an `if`
+        # statement's value is that of whichever branch ran, so it can be
+        # the tail expression of an enclosing `do:`/fn body -
+        # e.g. `do: if true { 5 }` -> 5. See _eval_if.
+        return _eval_if(stmt, ctx)
     if isinstance(stmt, ast.Continue):
         raise ContinueSignal()
     if isinstance(stmt, ast.Break):
