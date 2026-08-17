@@ -8,6 +8,7 @@ Usage:
     wyrm [interpreter options] script.wy [script args...]
     wyrm [interpreter options] -c "code" [args...]
     wyrm --compile [-o out.c] module.wy
+    wyrm --compile-py out_dir script.wy
     wyrm --config name=value [--config ...]  (set an option and exit)
 
 Interpreter options (must come before the script path):
@@ -26,13 +27,22 @@ Interpreter options (must come before the script path):
                      of running it; prints to stdout unless -o is given
     -o path         with --compile, write the generated C to `path` instead
                      of stdout
+    --compile-py out_dir
+                     translate `script.wy`, and everything it transitively
+                     imports, into a tree of async Python source files
+                     under `out_dir` (a `wyrm` namespace package mirroring
+                     wyrm module-space, plus `script`'s own compiled form
+                     as a sibling of it) instead of running it - see
+                     wypoc/compiler_py/__init__.py. Unlike --compile, no
+                     `import native`-style marker is required.
     -v, --verbose   turn on the pegen parser's verbose trace
     -h, --help      show this message and exit
 
 Everything after the script path (or, for -c, after the code string) is left
 untouched (dashes and all) and packed into a __ARGS tuple of strings,
 visible to the script - the wyrm equivalent of sys.argv[1:] for a Python
-script. --compile ignores script args (a module being compiled isn't run).
+script. --compile/--compile-py ignore script args (a module being compiled
+isn't run).
 
 Installed as the `wyrm` console script (see pyproject.toml's
 [project.scripts]); also runnable directly via `python -m wypoc.cli`.
@@ -41,6 +51,7 @@ import os
 import sys
 import traceback
 
+from wypoc import compiler_py
 from wypoc import config as config_mod
 from wypoc import project as project_mod
 from wypoc import wyrm_modules
@@ -112,6 +123,8 @@ def main(argv: list = None) -> int:
     verbose = False
     code = None
     compile_mode = False
+    compile_py_mode = False
+    compile_py_dir = None
     tui = None  # None: whatever ~/.wyrm/config says; -t/--no-tui decide it
     config_mode = False
     config_assignments = []
@@ -126,6 +139,14 @@ def main(argv: list = None) -> int:
             verbose = True
         elif opt == "--compile":
             compile_mode = True
+        elif opt == "--compile-py":
+            if i + 1 >= len(argv):
+                print("wyrm: --compile-py requires an output directory argument",
+                      file=sys.stderr)
+                return 2
+            compile_py_mode = True
+            compile_py_dir = argv[i + 1]
+            i += 1
         elif opt in ("-t", "--tui"):
             tui = True
         elif opt == "--no-tui":
@@ -170,14 +191,18 @@ def main(argv: list = None) -> int:
         print("wyrm: --compile cannot be used with -c", file=sys.stderr)
         return 2
 
-    if tui and (compile_mode or code is not None or i < len(argv)):
+    if compile_py_mode and (compile_mode or code is not None):
+        print("wyrm: --compile-py cannot be used with --compile or -c", file=sys.stderr)
+        return 2
+
+    if tui and (compile_mode or compile_py_mode or code is not None or i < len(argv)):
         print("wyrm: --tui starts the interactive REPL; it takes no script",
               file=sys.stderr)
         return 2
 
     # No script and no -c: this is an interactive session, not a usage
     # error - `wyrm` alone means the REPL, like `python` alone does.
-    if code is None and not compile_mode and i >= len(argv):
+    if code is None and not compile_mode and not compile_py_mode and i >= len(argv):
         # The config file supplies the session's starting options - global,
         # then a project's own if one is found (see project.py) - and the
         # `tui` one among them stands in for --tui when neither -t nor
@@ -207,6 +232,15 @@ def main(argv: list = None) -> int:
             return 2
         filename = script_path
 
+    if compile_py_mode:
+        wyrm_modules.set_script_root(os.path.dirname(os.path.abspath(filename)))
+        try:
+            compiler_py.compile_tree(filename, compile_py_dir)
+        except compiler_py.CompileError as e:
+            print(f"wyrm: compile error: {e}", file=sys.stderr)
+            return 1
+        return 0
+
     try:
         tree = parse(src, verbose=verbose, filename=filename)
     except SyntaxError as e:
@@ -232,11 +266,33 @@ def main(argv: list = None) -> int:
     if code is None:
         wyrm_modules.set_script_root(os.path.dirname(os.path.abspath(filename)))
 
+    # `-c` has no script of its own to scan upward from, but it should still
+    # behave like a session started in the working directory: the project's
+    # `path` config (on top of ~/.wyrm/config's) becomes extra search roots,
+    # and `.wyrm/preamble.wy`, if there is one, runs first - same as the REPL
+    # (see project.py, repl.Session.__init__).
+    preamble_tree = None
+    if code is not None:
+        options, project_root = project_mod.load_options()
+        wyrm_modules.set_extra_search_paths(
+            project_mod.resolve_search_paths(options.get("path", ""), project_root))
+        wyrm_modules.set_script_root(project_root or os.getcwd())
+        preamble_src = project_mod.load_preamble(project_root)
+        if preamble_src is not None:
+            try:
+                preamble_tree = parse(preamble_src,
+                                      filename=project_mod.preamble_path(project_root))
+            except SyntaxError as e:
+                traceback.print_exception(type(e), e, None)
+                return 1
+
     ctx = Scope()
     populate_globals(ctx)
     expose(ctx, "__ARGS", tuple(script_args))
 
     try:
+        if preamble_tree is not None:
+            eval_program(preamble_tree, ctx)
         eval_program(tree, ctx)
     except Exception as e:
         print(f"wyrm: {type(e).__name__}: {e}", file=sys.stderr)

@@ -1,0 +1,26 @@
+# Exercises --compile-py's decorator pre-pass using only the native
+# @__dump/@__identity decorators (no `import static` decorator library
+# needed - see decorators_pass.py's module docstring for why a
+# wyrm-written one isn't exercised yet). Both are pure encode/decode
+# round trips over the decorated tree, so the expanded code is expected
+# to behave identically to the undecorated original.
+
+@__identity fn add(a: int, b: int) -> int:
+    return a + b
+
+@__dump fn twice(n: int) -> int:
+    return n * 2
+
+class Box:
+    slot v: int = 0
+
+    fn init(v: int):
+        this.v = v
+
+@__identity fn [Box] doubled_value() -> int:
+    return this.v * 2
+
+b := Box(5)
+sum_result := add(2, 3)
+twice_result := twice(4)
+msg_result := b!doubled_value()
