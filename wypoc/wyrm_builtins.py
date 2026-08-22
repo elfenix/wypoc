@@ -385,6 +385,49 @@ def reverse(node):
     return out
 
 
+def nreverse(container):
+    """(nreverse container) -> reverses `container` in place and returns it.
+    A pair chain is reversed by relinking cdrs in place (walking node-by-node,
+    swapping each one's cdr to point at the previously-seen node); a list is
+    reversed with Python's own in-place list.reverse(). Unlike reverse()
+    above, which always builds a fresh chain, this mutates its argument and
+    hands the same (now-reordered) object back - the wyrm counterpart to
+    Scheme's own nreverse/list.reverse! distinction from a plain reverse."""
+    if isinstance(container, list):
+        container.reverse()
+        return container
+    if container is NIL:
+        return NIL
+    if isinstance(container, Pair):
+        prev = NIL
+        node = container
+        while isinstance(node, Pair):
+            nxt = node.cdr
+            node.cdr = prev
+            prev = node
+            node = nxt
+        return prev
+    raise TypeError(f"nreverse: unsupported value type ({type(container).__name__})")
+
+
+def set_car(pair, new_car):
+    """($set_car(p, x)) -> sets p's car to x in place and returns p, the
+    mutating counterpart to car()/cons() - Scheme's set-car!."""
+    if not isinstance(pair, Pair):
+        raise TypeError(f"$set_car: not a pair (got {type(pair).__name__})")
+    pair.car = new_car
+    return pair
+
+
+def set_cdr(pair, new_cdr):
+    """($set_cdr(p, x)) -> sets p's cdr to x in place and returns p, the
+    mutating counterpart to cdr()/cons() - Scheme's set-cdr!."""
+    if not isinstance(pair, Pair):
+        raise TypeError(f"$set_cdr: not a pair (got {type(pair).__name__})")
+    pair.cdr = new_cdr
+    return pair
+
+
 def copy(x):
     """(copy x) -> a new shallow copy of x: the immediate container/instance
     is new, but anything it holds (slot values, elements, entries) is shared
@@ -512,6 +555,34 @@ def remove(d, key):
     return d.pop(key)
 
 
+def signal_connect(sig, callback):
+    """(sig ! connect(callback)) -> subscribes `callback` to signal `sig`
+    (a SignalValue - see wyrm_eval_parse_tree.py), so a later `emit` calls
+    it along with every other subscriber. A message on a value with no real
+    Class behind it, same as substr/append/remove above. Returns `sig`, so
+    a connect chains the same way append does."""
+    from wypoc.wyrm_eval_parse_tree import SignalValue
+
+    if not isinstance(sig, SignalValue):
+        raise TypeError(f"connect: not a signal (got {type(sig).__name__})")
+    sig.subscribers.append(callback)
+    return sig
+
+
+def signal_disconnect(sig, callback):
+    """(sig ! disconnect(callback)) -> undoes a previous connect(callback);
+    disconnecting a callback that isn't (or is no longer) subscribed is a
+    no-op, not an error - symmetrical with how a signal starts out with no
+    subscribers at all rather than needing one removed to be "empty"."""
+    from wypoc.wyrm_eval_parse_tree import SignalValue
+
+    if not isinstance(sig, SignalValue):
+        raise TypeError(f"disconnect: not a signal (got {type(sig).__name__})")
+    if callback in sig.subscribers:
+        sig.subscribers.remove(callback)
+    return sig
+
+
 def tuple_(*rest) -> tuple:
     """(tuple a, b, c) -> a new tuple holding the given arguments, the same
     way `fn tuple(*rest) { return rest; }` would: *rest already collects a
@@ -523,24 +594,162 @@ def tuple_(*rest) -> tuple:
 def print_(*args) -> None:
     """(print a, b, c) -> writes each argument, space-separated, to stdout,
     stringified the same way str() would (e.g. bools as true/false) - with
-    no trailing newline. See println (corelib/std/io.wy) for the
-    newline-terminated, import-required form this complements; unlike
-    println, print needs no `import std::io` since it's a builtin. Goes
-    through wyrm_io's own write (not a raw Python print()) so it's still
-    subject to the same __STDOUT handle - e.g. stdout-capturing tests that
-    call wyrm_io._reset_std_handles() see print's output too."""
+    no trailing newline. See println_ below for the newline-terminated form.
+    Goes through wyrm_io's own write (not a raw Python print()) so it's
+    still subject to the same __STDOUT handle - e.g. stdout-capturing tests
+    that call wyrm_io._reset_std_handles() see print's output too."""
     from wypoc import wyrm_io
 
     wyrm_io.wyrm_write(wyrm_io.STDOUT, " ".join(_to_str(a) for a in args))
 
 
+def println_(*args) -> None:
+    """(println a, b, c) -> like print(), but terminates the line with `\\n`.
+    A builtin so it needs no `import std::io`, unlike corelib/std/io.wy's
+    own println (kept for parity with the reference implementation's module
+    layout - either spelling reaches the same wyrm_io.STDOUT write)."""
+    from wypoc import wyrm_io
+
+    wyrm_io.wyrm_write(wyrm_io.STDOUT, " ".join(_to_str(a) for a in args) + "\n")
+
+
+def end_() -> None:
+    """`end()` - stops the current thread/process's own top-level run,
+    cleanly, without the implicit `exit()` that falling off the end of
+    main's top level would otherwise trigger (see EndSignal's docstring,
+    wyrm_eval_parse_tree.py, and cli.py's script-running path). A thread
+    spawned via `thread <module-path>` calling `end()` itself, once that
+    lands, stops just that one thread/process - not the whole program."""
+    from wypoc.wyrm_eval_parse_tree import EndSignal
+
+    raise EndSignal()
+
+
+def exit_(code: int = 0) -> None:
+    """`exit()`/`exit(code)` - stops the whole program immediately with the
+    given process exit code (0 if omitted), same as falling off the end of
+    main's top level normally does. See ExitSignal's docstring."""
+    from wypoc.wyrm_eval_parse_tree import ExitSignal
+
+    raise ExitSignal(code)
+
+
+def resolve(fut) -> "object":
+    """`resolve(fut)` - blocks until `fut` (a `task expr`'s Future - see
+    ast.TaskSpawn) is resolved, then returns its value, or re-raises
+    whatever the resolving thread failed with. Called on anything but a
+    Future, that's a usage error, not a silent pass-through."""
+    from wypoc.wyrm_eval_parse_tree import Future
+
+    if not isinstance(fut, Future):
+        raise TypeError(f"resolve: not a future (got {type(fut).__name__})")
+    return fut.wait()
+
+
+def _help_signature(node, keyword: str) -> str:
+    """`fn foo(a, b) -> int` / `class Foo(Base)` - the one-line header
+    help() leads with, for a def node (`ast.FnDef`/`ast.CoDef`/
+    `ast.ClassDef`) or a bodiless `ast.Lambda` (which has no name, params
+    aside)."""
+    from wypoc import ast_nodes as ast
+    from wypoc.symbols import _render_signature
+
+    if isinstance(node, ast.Lambda):
+        params = ", ".join(getattr(p, "name", "?") for p in node.params)
+        return f"fn ({params})"
+    if isinstance(node, ast.ClassDef):
+        bases = ", ".join(getattr(b, "name", None) or str(b) for b in node.bases)
+        return f"class {node.name}" + (f"({bases})" if bases else "")
+    return _render_signature(node, keyword)
+
+
+def _help_summary(doc) -> str:
+    """The first line of a doc comment - what a member listing shows
+    instead of the whole block."""
+    return (doc or "").splitlines()[0] if doc else "(no documentation)"
+
+
+def _help_lines(value) -> list:
+    """The lines `help(value)` writes - see help_ below for what each
+    branch covers."""
+    from wypoc import ast_nodes as ast
+    from wypoc.wyrm_eval_parse_tree import Class, ClassInstance, Coroutine, Function, Module
+
+    if isinstance(value, ClassInstance):
+        return [f"(instance of {value.cls.name})", ""] + _help_lines(value.cls)
+
+    if isinstance(value, (Function, Coroutine)):
+        keyword = "co" if isinstance(value, Coroutine) else "fn"
+        lines = [_help_signature(value.node, keyword)]
+        doc = getattr(value.node, "doc", None)
+        lines += ["", doc] if doc else ["", "(no documentation)"]
+        return lines
+
+    if isinstance(value, Class):
+        node = value.node
+        lines = [_help_signature(node, "class")]
+        lines += ["", node.doc] if node.doc else ["", "(no documentation)"]
+        members = sorted(list(value.methods.items()) + list(value.coroutines.items()), key=lambda kv: kv[0])
+        if members:
+            lines += ["", "Methods:"]
+            for name, member_node in members:
+                keyword = "co" if isinstance(member_node, ast.CoDef) else "fn"
+                lines.append(f"  {_help_signature(member_node, keyword)} - {_help_summary(member_node.doc)}")
+        return lines
+
+    if isinstance(value, Module):
+        tree = value.tree
+        lines = [f"<module {value.name}>"]
+        lines += ["", tree.doc] if tree is not None and tree.doc else ["", "(no documentation)"]
+        members = []
+        for stmt in (tree.body if tree is not None else []):
+            while isinstance(stmt, ast.Decorated):
+                stmt = stmt.inner
+            if isinstance(stmt, (ast.FnDef, ast.CoDef, ast.ClassDef)):
+                members.append(stmt)
+        if members:
+            lines += ["", "Members:"]
+            for node in sorted(members, key=lambda n: n.name):
+                keyword = ("co" if isinstance(node, ast.CoDef) else
+                           "class" if isinstance(node, ast.ClassDef) else "fn")
+                lines.append(f"  {_help_signature(node, keyword)} - {_help_summary(node.doc)}")
+        return lines
+
+    return [f"(no documentation for {type(value).__name__} value)"]
+
+
+def help_(value=None) -> None:
+    """(help) -> writes a short usage reminder.
+    (help x) -> writes x's documentation to stdout: for a `fn`/`co`, its
+    signature and doc comment; for a class, its signature/doc plus each
+    method's signature and doc summary; for a `Module` (see import_module,
+    wyrm_eval_parse_tree.py), the module's own doc comment plus every
+    top-level fn/co/class it defines, each with a one-line summary; for an
+    instance, its class's documentation. Doc comments come from the
+    sphinx/doxygen-style `#`/`#:` comment block written directly above a
+    `fn`/`class` (or the file's own leading block, for a module) - see
+    parse.py's _attach_doc_comments, the only place `.doc` gets populated
+    on an AST node."""
+    from wypoc import wyrm_io
+
+    if value is None:
+        wyrm_io.wyrm_write(wyrm_io.STDOUT, "help(x) - show documentation for a fn, co, class, module, or instance\n")
+        return
+    wyrm_io.wyrm_write(wyrm_io.STDOUT, "\n".join(_help_lines(value)) + "\n")
+
+
 def install(ctx: dict) -> None:
-    """Expose str/int/float/bool, cons/pair/car/cdr/reverse, tuple, nil,
-    copy, len, and print as wyrm-visible builtins, plus str's substr, list's
-    resize/expand/append, and dict's remove as `!`-callable messages. `pair` is `cons` under another
-    name - doc/language-spec.md's
+    """Expose str/int/float/bool, cons/pair/car/cdr/reverse/nreverse, tuple,
+    nil, copy, len, print, println, end, exit, resolve, and help as
+    wyrm-visible builtins, plus str's substr, list's resize/expand/append,
+    and dict's remove as `!`-callable messages. `pair` is `cons` under
+    another name - doc/language-spec.md's
     spelling for building an improper pair-list cell (`pair('a, 'b)`),
     since the `$[...]` pair-list literal only ever builds proper lists.
+    `$set_car`/`$set_cdr` are Scheme's set-car!/set-cdr!: they mutate a
+    Pair's car/cdr in place and return the pair, unlike cons/reverse which
+    always build something new - nreverse is the same in-place-mutation
+    idea applied to a whole chain (or a list) at once.
 
     `error` is bound to ERROR_CLASS (a real Class), not the `error()`
     Python function directly - calling it (`error("msg")`) goes through
@@ -555,23 +764,35 @@ def install(ctx: dict) -> None:
     from wypoc.wyrm_eval_parse_tree import (
         ContextualBuiltin, ERROR_CLASS, OS_ERROR_CLASS, OUT_OF_MEMORY_CLASS,
         RUNTIME_ERROR_CLASS, STOP_ITERATION_CLASS, TREE_BASE_CLASS, expose_all,
-        install_native_decorators, next_, parse_source, register_native_method,
-        send_, sexpr_value,
+        install_native_decorators, macroexpand_value, next_, parse_source,
+        register_native_method, send_, sexpr_value, str_value,
     )
 
+    # str is a PrimitiveType like int/float/bool/sym (PRIMITIVE_TYPES), but
+    # its cast is overridden with a ContextualBuiltin: a class instance that
+    # answers `__str__` controls its own rendering (see str_value), which
+    # needs the calling scope's message table the way `sexpr` does.
+    primitive_types = {**PRIMITIVE_TYPES, "str": ContextualBuiltin(str_value, "str")}
+
     expose_all(
-        ctx, **PRIMITIVE_TYPES, cons=cons, pair=cons, car=car, cdr=cdr, nil=NIL,
-        copy=copy, len=length, print=print_, error=ERROR_CLASS, reverse=reverse,
-        tuple=tuple_,
+        ctx, **primitive_types, cons=cons, pair=cons, car=car, cdr=cdr, nil=NIL,
+        copy=copy, len=length, print=print_, println=println_, error=ERROR_CLASS,
+        reverse=reverse, nreverse=nreverse,
+        **{"$set_car": set_car, "$set_cdr": set_cdr},
+        tuple=tuple_, end=end_, exit=exit_, resolve=resolve,
         OutOfMemory=OUT_OF_MEMORY_CLASS, RuntimeError=RUNTIME_ERROR_CLASS,
         OSError=OS_ERROR_CLASS, StopIteration=STOP_ITERATION_CLASS,
-        next=next_, send=send_, TreeBase=TREE_BASE_CLASS,
+        next=next_, send=send_, TreeBase=TREE_BASE_CLASS, help=help_,
         # `sexpr` is a builtin function and unqualified, deliberately not a
         # module path: that is what makes one decorator's source run against
         # either representation of a tree without even differing by an
         # import. It needs the calling scope to ask whether a class answers
         # `__sexpr`, hence the ContextualBuiltin wrapper.
         sexpr=ContextualBuiltin(sexpr_value, "sexpr"),
+        # `macroexpand(tree)` - forces an unexpanded (outside-in) nested
+        # decorator application to run, answering the fully-expanded tree.
+        # See wyrm_eval_parse_tree.expand_decorated's docstring.
+        macroexpand=ContextualBuiltin(macroexpand_value, "macroexpand"),
         # `parse(source)` - a string's own tree(s), boxed the same way
         # `foo::$ast` is, so `sexpr(parse(source))` works exactly like
         # `sexpr(foo::$ast)` does. Plain (not contextual): unlike sexpr, it
@@ -584,3 +805,5 @@ def install(ctx: dict) -> None:
     register_native_method("resize", resize, ctx)
     register_native_method("expand", expand, ctx)
     register_native_method("append", append, ctx)
+    register_native_method("connect", signal_connect, ctx)
+    register_native_method("disconnect", signal_disconnect, ctx)

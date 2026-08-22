@@ -166,6 +166,12 @@ def test_multiple_inheritance_rejected():
         compile_entry_module(parse(src), "err")
 
 
+def test_signal_member_rejected():
+    src = "class Foo:\n    signal changed(v: int)\n"
+    with pytest.raises(CompileError, match="unsupported class-body member"):
+        compile_entry_module(parse(src), "err")
+
+
 # --- Stage 3: imports / multi-file output tree / do_import chaining. Two
 # import forms exercised together: a bare `import static shapes` (corelib,
 # reached via wyrm_modules' DEFAULT_COREPATH fallback - std::io itself

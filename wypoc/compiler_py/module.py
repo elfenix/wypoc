@@ -109,11 +109,34 @@ def _is_top_level_macro_only(fndef) -> bool:
     return any(isinstance(n, ast.ThisRef) for stmt in fndef.body for n in stmt.walk())
 
 
+_PRELUDE_PATH = ("prelude",)
+
+
+def _inject_prelude(modctx: ModuleCtx, graph):
+    """Every module the interpreter loads gets corelib/prelude.wy's names
+    (`co range(...)`, etc.) seeded into its scope before its own top level
+    runs - populate_globals(module_ctx) runs for every Scope, not just the
+    entry script's (see wyrm_eval_parse_tree.py's import_module). This is
+    the compiled equivalent: a synthesized `import prelude::*`, injected
+    before the module's own (real) imports are resolved, so a name it
+    defines still wins on a collision (resolve_import runs in source
+    order, and a later import_bindings write overwrites an earlier one -
+    matching the interpreter, where a module-local definition shadows a
+    prelude name of the same one). `prelude` resolves like any other
+    module because corelib/ is wyrm_modules' own final search root (see
+    its search_paths' fallback) - no special-casing needed in graph.py.
+    Guarded against the prelude module compiling itself."""
+    if graph is None or modctx.module_path == _PRELUDE_PATH:
+        return
+    resolve_import(modctx, ast.Import(list(_PRELUDE_PATH), wildcard=True), graph)
+
+
 def _walk_toplevel(modctx: ModuleCtx, body, graph):
     """Classifies each top-level statement, collecting global-var names to
     pre-declare and compiling fn/class/import statements immediately;
     returns the list of top-level statements (in source order) that belong
     inside do_import."""
+    _inject_prelude(modctx, graph)
     message_arity = _message_arities(body)
     do_import_stmts = []
     for stmt in body:
@@ -294,11 +317,21 @@ def compile_module_with_meta(tree: ast.Program, module_path: tuple, graph) -> tu
 def compile_entry_module(tree: ast.Program, entry_name: str, graph=None) -> str:
     """Like compile_module, but appends the `if __name__ == "__main__":`
     driver an entry script gets (constructs a Machine/Context, runs an
-    asyncio loop, awaits its own do_import)."""
+    asyncio loop, awaits its own do_import).
+
+    Also seeds the module global `__ARGS` compiles to (`wy___ARGS`) from
+    `sys.argv[1:]` - the compiled equivalent of the interpreter's own
+    `expose(ctx, "__ARGS", tuple(script_args))` (see cli.py's `main`).
+    `__ARGS` is only ever read by the entry script itself (nothing so far
+    ports a library module that reads it), so seeding it once here, rather
+    than threading it through `do_import`'s signature, covers every case."""
     source = compile_module(tree, module_path=(), graph=graph)
     main_block = (
         "\n"
         "def _main() -> None:\n"
+        "    import sys\n"
+        "    global wy___ARGS\n"
+        "    wy___ARGS = tuple(sys.argv[1:])\n"
         "    machine = Machine()\n"
         "    ctx = machine.root_context()\n"
         "    asyncio.run(do_import(ctx))\n"

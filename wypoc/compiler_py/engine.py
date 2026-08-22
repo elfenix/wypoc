@@ -502,6 +502,13 @@ def resolve_overload(table: MessageTable, name: str, receivers: list) -> Overloa
 
 _UNSET = WyrmError("Unset")
 
+# A `static x = default` local's "not yet initialized" marker (see
+# statements.py's `_static_decl`) - deliberately not `_UNSET` above, since
+# that's a real wyrm value (Unset) a static local's *default* could
+# legitimately evaluate to; this one is a Python-only sentinel nothing
+# wyrm-level can ever produce.
+_STATIC_UNSET = object()
+
 
 def wy_substr(s: str, start: int, count: int) -> str:
     return s[start:start + count]

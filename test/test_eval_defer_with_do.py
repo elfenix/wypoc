@@ -43,6 +43,83 @@ def test_failing_call_returns_an_error(ctx):
     assert is_error(ctx["failing_result"].value)
 
 
+def test_defer_still_fires_once_per_level_through_a_deep_trampolined_recursion():
+    """Each level of a deep, trampolined (see wyrm_eval_parse_tree.py's
+    _run_driver/call_function) tail-recursive call registers its own
+    `defer` - this checks two things at once: that a defer still fires
+    exactly once per call level (not zero times, not once total) even
+    though the call chain no longer recurses natively, and that they still
+    fire in the right order (deepest call's scope tears down first, as its
+    ReturnSignal propagates outward one level at a time - see
+    run_scoped_block's docstring) rather than e.g. all at once at the
+    outermost call. `log` encodes the visitation order as a big base-100
+    Horner value (n can exceed 99, so "digits" overlap, but the encoding is
+    still injective for a fixed-length ordered sequence - any reordering or
+    omission changes the result) so a wrong order or a missed/duplicated
+    defer both fail the assertion, not just the count."""
+    from wypoc.parse import parse
+    from wypoc.wyrm_eval_parse_tree import Scope, eval_program
+
+    depth = 300
+    ctx = Scope()
+    eval_program(
+        parse(
+            "var count: int = 0\n"
+            "var log: int = 0\n"
+            "fn count_down(n: int) -> int:\n"
+            "    defer:\n"
+            "        count = count + 1\n"
+            "        log = log * 100 + n\n"
+            "    if n <= 0:\n"
+            "        return 0\n"
+            "    else:\n"
+            "        return count_down(n - 1)\n"
+            "\n"
+            f"var result = count_down({depth})\n"
+        ),
+        ctx,
+    )
+    assert ctx["count"].value == depth + 1
+    expected_log = 0
+    for n in range(depth + 1):  # innermost (n=0) tears down first
+        expected_log = expected_log * 100 + n
+    assert ctx["log"].value == expected_log
+
+
+def test_defer_still_fires_once_per_level_through_deep_non_tail_recursion():
+    """Same proof as test_defer_still_fires_once_per_level_through_a_deep_
+    trampolined_recursion, but for `return count_down(n - 1) + 0` - the
+    call wrapped in a BinOp - which only trampolines via _eval_expr_gen's
+    general Call handling."""
+    from wypoc.parse import parse
+    from wypoc.wyrm_eval_parse_tree import Scope, eval_program
+
+    depth = 300
+    ctx = Scope()
+    eval_program(
+        parse(
+            "var count: int = 0\n"
+            "var log: int = 0\n"
+            "fn count_down(n: int) -> int:\n"
+            "    defer:\n"
+            "        count = count + 1\n"
+            "        log = log * 100 + n\n"
+            "    if n <= 0:\n"
+            "        return 0\n"
+            "    else:\n"
+            "        return count_down(n - 1) + 0\n"
+            "\n"
+            f"var result = count_down({depth})\n"
+        ),
+        ctx,
+    )
+    assert ctx["count"].value == depth + 1
+    expected_log = 0
+    for n in range(depth + 1):
+        expected_log = expected_log * 100 + n
+    assert ctx["log"].value == expected_log
+
+
 def test_with_binding_is_immutable():
     from wypoc.parse import parse
     from wypoc.wyrm_eval_parse_tree import eval_program

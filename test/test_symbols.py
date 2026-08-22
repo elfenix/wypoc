@@ -192,3 +192,21 @@ def test_anonymous_scopes_hold_locals_without_entering_the_outline():
     assert [s.name for s in table.module_level()] == ["handler"]
     anon = next(s for s in table.all_symbols() if s.kind == symbols.ANONYMOUS)
     assert {c.name for c in anon.children} == {"event", "seen"}
+
+
+def test_signal_is_a_class_member_alongside_slots_and_methods():
+    src = (
+        "class Counter:\n"
+        "    slot count: int = 0\n"
+        "    signal changed(old: int, new: int)\n"
+        "    fn increment(by):\n"
+        "        emit changed(this.count, this.count + by)\n"
+    )
+    table = symbols.build(parse(src))
+    counter = named(table, "Counter")
+    assert {c.name: c.kind for c in counter.children} == {
+        "count": symbols.SLOT,
+        "changed": symbols.SIGNAL,
+        "increment": symbols.METHOD,
+    }
+    assert named(table, "changed").detail == "signal changed(old: int, new: int)"

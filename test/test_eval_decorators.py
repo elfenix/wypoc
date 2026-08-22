@@ -294,6 +294,30 @@ def test_the_error_names_the_decorator_and_the_use_site_line():
     assert "@nosuchthing at line 3" in str(excinfo.value)
 
 
+def test_a_deeply_recursive_decorator_body_does_not_overflow_the_python_stack():
+    """expand_decorated invokes a decorator via send_message -> call_overload
+    (see call_overload's own docstring) - the same trampoline path
+    test_eval_messages.py's message-send test exercises. Here the
+    decorator's *own* body (not the function it decorates) is what
+    recurses deeply, via `this ! countdown(n - 1)`, once, at the moment
+    `@countdown(100000) fn foo(): ...` is evaluated - proving decorator
+    invocation benefits from the trampoline with no changes needed in
+    expand_decorated itself."""
+    ctx = run(
+        "fn [TreeBase] countdown(n):\n"
+        "    if n <= 0:\n"
+        "        return this\n"
+        "    else:\n"
+        "        return this ! countdown(n - 1)\n"
+        "\n"
+        "@countdown(100000) fn foo():\n"
+        "    return 1\n"
+        "\n"
+        "result := foo()\n"
+    )
+    assert ctx["result"].value == 1
+
+
 def test_a_decorator_answering_a_non_tree_is_an_error():
     src = (
         "import static decolib\n"

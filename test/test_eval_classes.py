@@ -82,3 +82,34 @@ def test_construction_rejects_args_with_no_init(classes):
     (see instantiate())."""
     with pytest.raises(TypeError):
         instantiate(classes["Circle"], [5.0], {})
+
+
+def test_deep_constructor_chain_recursion_does_not_overflow_the_python_stack():
+    """`init` recursively constructing more instances of its own class in
+    tail position (`return counter(n - 1)`) is trampolined by
+    instantiate()/_instantiate_gen (see wyrm_eval_parse_tree.py) exactly
+    like a plain recursive fn or message send - proving instantiate() no
+    longer costs one native Python frame per level of constructor-chain
+    recursion, only per (bounded) call site."""
+    import textwrap
+
+    from wypoc.parse import parse
+    from wypoc.wyrm_eval_parse_tree import eval_program
+
+    source = textwrap.dedent("""\
+        class counter:
+            slot n: int = 0
+
+        fn [counter] init(n: int):
+            this.n = n
+            if n > 0:
+                return counter(n - 1)
+            else:
+                return this
+
+        c := counter(100000)
+        result := c.n
+        """)
+    ctx: dict = {}
+    eval_program(parse(source), ctx)
+    assert ctx["result"].value == 100000

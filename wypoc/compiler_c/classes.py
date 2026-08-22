@@ -28,8 +28,9 @@ def compile_class(classdef: ast.ClassDef, module_ident: str) -> str:
     seen = set()
     for member in classdef.body:
         if not isinstance(member, ast.SlotDef):
+            kind = "signals" if isinstance(member, ast.SignalDef) else "methods"
             err(
-                f"class '{classdef.name}': methods declared inside the class body are "
+                f"class '{classdef.name}': {kind} declared inside the class body are "
                 f"not supported by --compile", member,
             )
         if member.name in seen:

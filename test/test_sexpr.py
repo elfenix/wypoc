@@ -70,6 +70,18 @@ SHAPES = [
     ("pass", "$['pass]"),
     ("return x", "$['return, $['name, 'x]]"),
     ("with x = 1", "$['with, [$['decl, 'x, $['int, 1]]]]"),
+    ("import a::b",
+     "$['import, [$['name, 'a], $['name, 'b]], $['false], nil, nil, $['false], nil]"),
+    ("import a::b as c",
+     "$['import, [$['name, 'a], $['name, 'b]], $['false], $['name, 'c], nil, "
+     "$['false], nil]"),
+    ("import a::(x, y as z)",
+     "$['import, [$['name, 'a]], $['false], nil, "
+     "[$['import_item, 'x, nil], $['import_item, 'y, $['name, 'z]]], $['false], nil]"),
+    ("import a::* except b",
+     "$['import, [$['name, 'a]], $['false], nil, nil, $['true], [$['name, 'b]]]"),
+    ("import static a::b",
+     "$['import, [$['name, 'a], $['name, 'b]], $['true], nil, nil, $['false], nil]"),
 ]
 
 
@@ -173,7 +185,7 @@ def test_a_child_list_may_come_back_as_a_pair_list():
 CANNOT_CROSS = [
     ("co f():\n    yield 1\n", "coroutine"),
     ("class Foo:\n    slot a: int\n", "class"),
-    ("import a::b\n", "import"),
+    ("from a::b import x\n", "from-import"),
     ("x := a in b", "'in' operator"),
     ("var a, b = 1, 2", "multiple declaration"),
     ("for i in xs:\n    pass\nelse:\n    pass\n", "for/else"),

@@ -44,6 +44,11 @@ class ModuleCtx:
     # accumulated by classes.py / module.py's plain-fn promotion pass, then
     # emitted as _TABLE.register(...) calls at the top of do_import.
     messages: List[tuple] = field(default_factory=list)
+    # Bumped once per `static` local compiled anywhere in this module, to
+    # mint each one its own module-level global name (see statements.py's
+    # _static_decl) - two unrelated functions' same-named `static seed`
+    # must not share storage.
+    static_count: int = 0
 
     def add_body(self, text: str = ""):
         self.body_lines.append(text)
@@ -98,6 +103,24 @@ class FnCtx:
     # AND writes go straight to the instance attribute.
     this_var: Optional[str] = None
     slot_names: Set[str] = field(default_factory=set)  # bare wyrm slot names, this method's class
+
+    # Stack of scope-stack indices, one per currently-open while/for loop -
+    # each entry is the index (into `scopes`) of that loop's own pushed
+    # scope. Unlike an `if`/`do:` block's scope, a loop's scope (and
+    # anything nested inside it) is re-entered on every iteration but
+    # compiles to exactly one Python statement, so the python identifiers
+    # it declares are a *single* reused Python-level binding across all
+    # iterations - not a fresh one per iteration the way the interpreter's
+    # own ctx.child() is (see wyrm_eval_parse_tree.py's For/While cases). A
+    # closure (currently: only a Lambda - see expressions.py's _lambda)
+    # built inside a loop body must snapshot whatever it closes over from
+    # `scopes[loop_scope_floor[0]:]` at the point it's created, or it
+    # inherits Python's own closures-in-a-loop late-binding bug: every
+    # closure created across the loop's iterations would end up sharing the
+    # *same* underlying variable and see whatever its last-written value
+    # happens to be by the time the closure is actually called, instead of
+    # the value that was live in the iteration that created it.
+    loop_scope_floor: List[int] = field(default_factory=list)
 
     # True if this function/coroutine body contains a `defer on error:`
     # anywhere - set once, up front, by functions.py/coroutines.py (see

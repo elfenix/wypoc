@@ -21,7 +21,9 @@ from .context import FnCtx
 from .errors import err
 from .functions import compile_params
 from .naming import py_ident
-from .statements import compile_block, has_error_defer, needed_global_decls
+from .statements import (
+    compile_block, has_error_defer, needed_global_decls, needed_nonlocal_decls,
+)
 
 
 def _compile_co_body(modctx, py_name, params, body, *, this_var=None, slot_names=None):
@@ -33,6 +35,9 @@ def _compile_co_body(modctx, py_name, params, body, *, this_var=None, slot_names
     inner = FnCtx(modctx=modctx, this_var=this_var, slot_names=slot_names or set(),
                    scopes=[outer.flat_scope()], cursor_var="_cursor", indent=2,
                    is_coroutine=True, has_error_defer=has_error_defer(body))
+    nonlocal_decls = needed_nonlocal_decls(params, body)
+    if nonlocal_decls:
+        inner.emit(f"nonlocal {', '.join(nonlocal_decls)}")
     global_decls = needed_global_decls(modctx, params, body)
     if global_decls:
         inner.emit(f"global {', '.join(global_decls)}")

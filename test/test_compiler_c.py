@@ -206,6 +206,12 @@ def test_a_message_fn_is_refused():
         compile_module(parse(src), "m")
 
 
+def test_a_signal_is_refused():
+    src = "import native\n\nclass Foo:\n    signal changed(v: int)\n"
+    with pytest.raises(CompileError, match="signals declared inside the class body"):
+        compile_module(parse(src), "m")
+
+
 def test_the_bitwise_operators_lower_to_their_c_spellings():
     src = ("import native\n\n"
            "fn f(a: int, b: int) -> int:\n"

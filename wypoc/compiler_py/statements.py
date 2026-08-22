@@ -124,6 +124,22 @@ def _assigned_names(body) -> set:
     return names
 
 
+def needed_nonlocal_decls(params, body) -> list:
+    """Python's local-if-assigned-anywhere rule (see needed_global_decls's
+    docstring) applies just as much to a coroutine's nested `_body` closure
+    reassigning one of the enclosing `co`'s own *parameters* (e.g. `seed =
+    ...` inside a `while` loop, rewriting a `co lcg(seed)`'s own `seed`) -
+    `_body` is a real nested Python function, so that assignment shadows
+    the parameter with a fresh, unbound-until-assigned local unless
+    declared `nonlocal`. Returns the sorted py_ident'd parameter names that
+    need it (see coroutines.py's _compile_co_body, the only nested-closure
+    body this compiler currently generates)."""
+    param_names = {p.name for p in params
+                   if isinstance(p, (ast.Param, ast.VarPositional, ast.VarKeyword))}
+    from .naming import py_ident as _py_ident
+    return sorted(_py_ident(n) for n in (_assigned_names(body) & param_names))
+
+
 def needed_global_decls(modctx, params, body) -> list:
     """Python makes assigning to a name anywhere in a function treat that
     name as local for the *entire* function - so a plain `x = ...`
@@ -175,7 +191,9 @@ def _while(fnctx, node):
     fnctx.indent += 1
     fnctx.loop_depth += 1
     fnctx.push_scope()
+    fnctx.loop_scope_floor.append(len(fnctx.scopes) - 1)
     compile_block(fnctx, node.body)
+    fnctx.loop_scope_floor.pop()
     fnctx.pop_scope()
     fnctx.loop_depth -= 1
     fnctx.indent -= 1
@@ -197,6 +215,7 @@ def _for(fnctx, node):
     `else` clause share."""
     iterable = compile_expr(fnctx, node.iter)
     fnctx.push_scope()
+    fnctx.loop_scope_floor.append(len(fnctx.scopes) - 1)
     target = fnctx.declare(node.var)
     fnctx.emit(f"async for {target} in engine._wy_aiter({iterable}, _TABLE):")
     fnctx.indent += 1
@@ -204,6 +223,7 @@ def _for(fnctx, node):
     compile_block(fnctx, node.body)
     fnctx.loop_depth -= 1
     fnctx.indent -= 1
+    fnctx.loop_scope_floor.pop()
     if node.orelse is not None:
         fnctx.emit("else:")
         fnctx.indent += 1
@@ -276,14 +296,53 @@ def _assign_target_expr(fnctx, target):
         for attr in target.attrs:
             expr = f"({expr}).{py_ident(attr)}"
         return expr
-    err("only plain name and attribute assignment targets are supported "
-        "by --compile-py", target)
+    if isinstance(target, ast.IndexTarget):
+        base = _assign_target_expr(fnctx, target.base)
+        index = compile_expr(fnctx, target.index)
+        return f"({base})[{index}]"
+    err("only plain name, attribute and index assignment targets are "
+        "supported by --compile-py", target)
 
 
 def _var_target_name(target):
     if not isinstance(target, ast.VarTarget):
         err("unsupported var declaration target", target)
     return target.name
+
+
+@STMT_HANDLERS.register(ast.StaticDecl)
+def _static_decl(fnctx, node):
+    """`static x: T = default` - a local whose storage outlives any one
+    call, persisting across every call of *this* definition (see
+    wyrm_eval_parse_tree.py's `_static_store_for`: "tied to the AST node
+    itself... rather than to any one call's local_ctx"). This backend has
+    no per-node Python object to hang that storage on the way the
+    interpreter does, so it uses the next-closest equivalent: a dedicated
+    module-level global, minted fresh per `static` statement (so two
+    unrelated functions' same-named `static seed` don't collide - see
+    ModuleCtx.static_count), holding engine._STATIC_UNSET until the first
+    call initializes it. `global` makes this correct even inside a
+    coroutine's nested `_body` closure - unlike a `nonlocal` target (see
+    needed_nonlocal_decls), a real module global is visible at any nesting
+    depth with just `global`.
+
+    Aliasing the wyrm name directly to the global (rather than copying its
+    value into an ordinary local) is what makes an ordinary later
+    assignment (`seed = seed * 3877 + ...`) write through to the
+    persistent storage instead of just rebinding a local - resolve_read/
+    resolve_write_target both check the current scope before falling back
+    to a plain local name, so registering it there is enough."""
+    modctx = fnctx.modctx
+    modctx.static_count += 1
+    global_name = f"_wy_static_{modctx.static_count}_{py_ident(node.name)}"
+    modctx.add_body(f"{global_name} = engine._STATIC_UNSET")
+    fnctx.emit(f"global {global_name}")
+    fnctx.emit(f"if {global_name} is engine._STATIC_UNSET:")
+    fnctx.indent += 1
+    default = compile_expr(fnctx, node.default) if node.default is not None else "None"
+    fnctx.emit(f"{global_name} = {default}")
+    fnctx.indent -= 1
+    fnctx.scopes[-1][node.name] = global_name
 
 
 @STMT_HANDLERS.register(ast.VarDecl)

@@ -57,11 +57,17 @@ SECTION = "wyrm"
 #                 from the working directory for a `.wyrm/` directory (see
 #                 project.find_project_root) - set this and the scan is
 #                 skipped, the given directory is used as-is.
+#   global_cache  an opt-in directory to cache every script's parsed AST in
+#                 (see cache.py), shared across scripts instead of each
+#                 getting its own `<script_dir>/__wycache__/` (the default,
+#                 automatic, needs no config - like Python's __pycache__).
+#                 Empty (the default) leaves each script caching locally.
 OPTIONS: dict[str, Any] = {
     "compact": False,
     "tui": False,
     "path": "",
     "project_root": "",
+    "global_cache": "",
 }
 
 # What each option means, for `wyrm --config` with no assignment and for the
@@ -71,16 +77,38 @@ DESCRIPTIONS: dict[str, str] = {
     "tui": "start the REPL in its full-screen UI, as if --tui were given",
     "path": "extra module search directories, colon-separated, before WYRM_PATH",
     "project_root": "pin the project root instead of scanning for .wyrm/",
+    "global_cache": "opt-in shared AST cache directory, instead of each "
+                     "script's own __wycache__/",
 }
 
 _TRUE = {"true", "yes", "on", "1"}
 _FALSE = {"false", "no", "off", "0"}
+
+# `wyrm --no-config`: process-wide, set once at startup (cli.py) before
+# anything reads a config file. Every mode - REPL, `-c`, running a script,
+# --compile/--dump-wys/--compile-py, --check - funnels through `load`/
+# `load_overrides` below, so flipping this one flag makes all of them run on
+# plain OPTIONS defaults with no file ever touched, no project root scanned,
+# and no preamble run (project.load_options short-circuits to `root=None`
+# the same way a scan that found nothing would).
+_disabled = False
 
 
 class ConfigError(Exception):
     """A bad option name or an unusable value - raised by the parsing and
     writing entry points, where the user is right there to be told. Reading
     the file never raises (see `load`)."""
+
+
+def set_disabled(disabled: bool) -> None:
+    """`--no-config`'s effect: suppress every config file this process would
+    otherwise read for the rest of its life."""
+    global _disabled
+    _disabled = disabled
+
+
+def is_disabled() -> bool:
+    return _disabled
 
 
 def config_path() -> str:
@@ -98,6 +126,8 @@ def load(path: "str | None" = None,
     malformed TOML, unknown key, wrong-typed value - each is reported through
     `warn` (stderr by default) and otherwise ignored, so a broken config
     costs you your customisation, not your interpreter."""
+    if _disabled:
+        return dict(OPTIONS)
     options = dict(OPTIONS)
     options.update(load_overrides(path or config_path(), warn))
     return options
@@ -111,6 +141,8 @@ def load_overrides(path: str,
     project's own `.wyrm/config`) can overlay each in turn onto the one
     before it, and a file that mentions nothing doesn't reset what an
     earlier one set."""
+    if _disabled:
+        return {}
     warn = warn or _warn
     overrides: dict = {}
     try:

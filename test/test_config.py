@@ -26,12 +26,12 @@ def write(path: str, text: str) -> None:
 
 def test_no_config_file_means_the_built_in_defaults(path):
     assert not os.path.exists(path)
-    assert config.load() == {"compact": False, "tui": False, "path": "", "project_root": ""}
+    assert config.load() == {"compact": False, "tui": False, "path": "", "project_root": "", "global_cache": ""}
 
 
 def test_the_wyrm_section_supplies_a_sessions_defaults(path):
     write(path, "[wyrm]\ncompact = true\ntui = true\n")
-    assert config.load() == {"compact": True, "tui": True, "path": "", "project_root": ""}
+    assert config.load() == {"compact": True, "tui": True, "path": "", "project_root": "", "global_cache": ""}
     assert Session().options["compact"] is True
 
 
@@ -58,7 +58,7 @@ def test_a_broken_config_file_costs_the_customisation_not_the_interpreter(path):
     write(path, "[wyrm\ncompact = true\n")
     said = []
     assert config.load(warn=said.append) == {
-        "compact": False, "tui": False, "path": "", "project_root": ""}
+        "compact": False, "tui": False, "path": "", "project_root": "", "global_cache": ""}
     assert said, "and it says so rather than failing silently"
 
 
@@ -98,7 +98,7 @@ def test_writing_one_option_keeps_the_rest_of_the_file(path):
     text = open(path).read()
     assert "# my wyrm settings" in text and "# one line, please" in text
     assert "[future]" in text and "something = 1" in text
-    assert config.load() == {"compact": True, "tui": True, "path": "", "project_root": ""}
+    assert config.load() == {"compact": True, "tui": True, "path": "", "project_root": "", "global_cache": ""}
 
 
 def test_a_config_file_that_is_not_toml_is_not_overwritten(path):

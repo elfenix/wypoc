@@ -217,6 +217,108 @@ def test_uncaught_exception_pauses_with_the_stack_intact():
     assert kind == "terminated"
 
 
+def test_breakpoint_stack_and_locals_stay_correct_through_deep_trampolined_recursion():
+    """A tail-recursive call chain deep enough to need _run_driver's
+    explicit-stack trampoline (see wyrm_eval_parse_tree.py's call_function)
+    instead of native Python recursion - proving the debugger's `_call_stack`
+    (what len(...)-based stepping, breakpoints, and per-frame locals all
+    read - see debugger.py's _should_pause/locals_of) still gets pushed/
+    popped at exactly the right times, with exactly the right per-frame
+    scope, even though the underlying execution no longer looks anything
+    like nested native calls."""
+    source = (
+        "fn depth(n, acc):\n"
+        "    if n <= 0:\n"
+        "        return acc\n"
+        "    else:\n"
+        "        return depth(n - 1, acc + 1)\n"
+        "\n"
+        "var result = depth(200, 0)\n"
+    )
+    h = Harness(source)
+    h.debugger.set_breakpoints("test.wy", {2})
+
+    kind, info = h.start()
+    hits = 0
+    while kind == "stopped":
+        assert info.reason == "breakpoint"
+        assert len(h.debugger.stack) == hits + 2, "<module> frame plus one per nested depth() call"
+        frame = h.debugger.stack[-1]
+        assert frame.current_pos[0] == 2
+        locs = h.debugger.locals_of(frame)
+        assert locs["n"].value == 200 - hits
+        assert locs["acc"].value == hits
+        hits += 1
+        h.debugger.resume()
+        kind, info = h.next_event()
+    assert kind == "terminated"
+    assert hits == 201
+
+
+def test_breakpoint_stack_stays_correct_through_deep_non_tail_recursion():
+    """Same proof as test_breakpoint_stack_and_locals_stay_correct_through_
+    deep_trampolined_recursion, but for `return depth(n - 1) + 1` - the call
+    wrapped in a BinOp rather than being the bare tail expression - which
+    only trampolines via _eval_expr_gen's general Call handling, not the
+    narrower per-statement-shape handling an earlier version of the
+    trampoline had."""
+    source = (
+        "fn depth(n):\n"
+        "    if n <= 0:\n"
+        "        return 0\n"
+        "    else:\n"
+        "        return depth(n - 1) + 1\n"
+        "\n"
+        "var result = depth(200)\n"
+    )
+    h = Harness(source)
+    h.debugger.set_breakpoints("test.wy", {2})
+
+    kind, info = h.start()
+    hits = 0
+    while kind == "stopped":
+        assert info.reason == "breakpoint"
+        assert len(h.debugger.stack) == hits + 2, "<module> frame plus one per nested depth() call"
+        frame = h.debugger.stack[-1]
+        assert frame.current_pos[0] == 2
+        locs = h.debugger.locals_of(frame)
+        assert locs["n"].value == 200 - hits
+        hits += 1
+        h.debugger.resume()
+        kind, info = h.next_event()
+    assert kind == "terminated"
+    assert hits == 201
+
+
+def test_uncaught_exception_stack_is_intact_through_deep_trampolined_recursion():
+    """Same proof as test_uncaught_exception_pauses_with_the_stack_intact,
+    but at a depth that only completes via _run_driver's trampoline - the
+    once-per-exception, innermost-snapshot dedup (_last_captured_exc, see
+    eval_stmt/_eval_stmt_gen) must still capture the *whole* chain before
+    any frame is popped, even though frames are now popped by the driver's
+    loop rather than by native stack unwind."""
+    source = (
+        "fn depth(n):\n"
+        "    if n <= 0:\n"
+        "        return undeclared_name\n"
+        "    else:\n"
+        "        return depth(n - 1)\n"
+        "\n"
+        "depth(50)\n"
+    )
+    h = Harness(source)
+
+    kind, info = h.start()
+    assert kind == "stopped"
+    assert info.reason == "exception"
+    names = [frame.name for frame in info.exception_stack]
+    assert names == ["<module>"] + ["depth"] * 51
+
+    h.debugger.resume()
+    kind, info = h.next_event()
+    assert kind == "terminated"
+
+
 def test_a_breakpoint_never_touched_does_nothing():
     h = Harness("var x = 1\n")
     h.debugger.set_breakpoints("test.wy", {99})

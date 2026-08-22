@@ -6,11 +6,41 @@ eval()/exec()) rather than modeling wyrm's value representation. Types are
 ignored completely - no checking, no coercion beyond what Python does
 naturally. This is a proof-of-concept for statement/expression evaluation,
 not a real interpreter.
+
+eval_expr/eval_stmt (native, plain recursive functions) are still what
+`eval_program` and every other pre-existing entry point call directly, and
+are still what actually executes a Wyrm program - but neither is where a
+Wyrm-level *call* (a `fn` call, a `recv ! name(...)` message send, or a
+`Cls(...)` construction) recurses any more. call_function/call_overload/
+instantiate all run through _run_driver, an explicit, heap-bounded stack of
+suspended generators - _eval_expr_gen/_eval_stmt_impl_gen/
+_run_scoped_block_gen and friends, full "_gen" twins of eval_expr/
+_eval_stmt_impl/run_scoped_block that recurse into each other via
+`yield from` (safe - that nesting mirrors the expression/block's own
+already-bounded syntax structure, not Wyrm-level call-chain depth) but
+`yield` a _TailCall (see its docstring) at any Call/Message/
+MessageTupleExpr whose target is a plain Function, an ordinary
+FnDef-backed message overload, or a Class, instead of recursing into
+call_value. _run_driver turns each of those into a new stack entry rather
+than a new Python frame - so a call *anywhere* a Wyrm program can write one
+(a bare `return f(n - 1)`, buried in `f(n - 1) + 1`, as a `while` condition,
+a collection literal, an argument to another call, ...) is what stays
+heap-bounded rather than C-stack-bounded, not just the bare-tail-call shape
+an earlier version of this module supported. eval_expr/eval_stmt's own
+native recursion is only ever reached once _eval_expr_gen/_eval_stmt_impl_gen
+have already handled everything that node type needs generator-aware
+treatment - see their own docstrings for the (short) list of exceptions,
+e.g. `ClassDef`'s base-class expressions, deemed not worth the added
+surface. See _run_driver's own docstring for the full mechanism, and
+_MAX_DRIVER_DEPTH for the resulting depth's own generous ceiling.
 """
 import operator
+import sys
 import threading
+from dataclasses import fields as _dc_fields
 
 from wypoc import ast_nodes as ast
+from wypoc import cache as cache_mod
 from wypoc import sexpr
 from wypoc import wyrm_builtins
 from wypoc import wyrm_modules
@@ -19,22 +49,42 @@ from wypoc.parse import parse
 # Debugger hooks (wypoc/dap/debugger.py) - both None, and both checked
 # before use, so a plain `wyrm`/REPL run pays nothing and behaves exactly
 # as before. `_call_stack` is a debugger's own list of Frame objects that
-# this module pushes to/pops from around every call; `_stmt_hook` is
-# called at the top of every `eval_stmt`, the one place every statement
+# this module pushes to/pops from around every call - _run_driver's own
+# push/pop (see its docstring) for a trampolined call, or a plain
+# try/finally at the few remaining native call sites (CoroutineInstance._run,
+# eval_program) - so it reflects the true Wyrm-level call chain either way,
+# not just whatever's on Python's own stack. `_stmt_hook` is called at the
+# top of every `eval_stmt`/`_eval_stmt_gen`, the one place every statement
 # everywhere (module top level, fn/co bodies, if/while/for bodies - loops
-# re-enter it once per iteration via run_scoped_block) passes through.
+# re-enter it once per iteration via run_scoped_block/_run_scoped_block_gen)
+# passes through.
 _call_stack: "list | None" = None
 _stmt_hook = None
 _exception_hook = None
 _last_captured_exc = None
 
+# _run_driver's explicit call stack (see call_function/call_overload/
+# instantiate) is heap-bounded, not C-stack-bounded, so a genuinely
+# recursive Wyrm program no longer risks a native RecursionError/segfault -
+# but an *infinitely* recursive one (a bug, not deep-but-finite recursion)
+# would otherwise just grow this list forever until the process runs out of
+# memory. This is a generous infinite-recursion guard, not a realistic
+# ceiling on legitimate recursion depth - _run_driver raises a plain,
+# catchable-by-Python-except RecursionError once the explicit stack reaches
+# it, same exception type (and similar message) a native stack overflow
+# would have raised before this module gained a trampoline.
+_MAX_DRIVER_DEPTH = 1_000_000
+
 
 class Frame:
     """One entry in a debugger's explicit call stack - a wyrm-level analog
-    of a Python stack frame, since wyrm calls otherwise only exist as
-    ordinary recursive Python calls with nothing tracking them. Lives here
-    (not in wypoc/dap/debugger.py) so this module never has to import the
-    debugger package - only the reverse."""
+    of a Python stack frame. `_run_driver`'s own explicit stack (see its
+    docstring) tracks a trampolined call's suspended generator and nothing
+    more; Frame is the separate, debugger-facing record of the same
+    call - name, scope, and (once a statement inside it has run) source
+    position - kept distinct so this module never has to import the
+    debugger package (wypoc/dap/debugger.py) to use it - only the
+    reverse."""
 
     __slots__ = ("name", "scope", "current_pos")
 
@@ -156,11 +206,14 @@ class Class:
         self.closure = closure
         self.bases: list["Class"] = bases
         self.slots: dict = {}
+        self.signals: dict = {}
         self.methods: dict = {}
         self.coroutines: dict = {}
         for member in node.body:
             if isinstance(member, ast.SlotDef):
                 self.slots[member.name] = member
+            elif isinstance(member, ast.SignalDef):
+                self.signals[member.name] = member
             elif isinstance(member, ast.FnDef):
                 self.methods[member.name] = member
             elif isinstance(member, ast.CoDef):
@@ -189,6 +242,17 @@ class Class:
             result.update(base.all_slots())
         for name, slot_def in self.slots.items():
             result[name] = (slot_def, self)
+        return result
+
+    def all_signals(self) -> dict:
+        """(name -> SignalDef) in MRO order, base classes first - the
+        signal counterpart to all_slots(), used the same way: to seed every
+        signal a class inherits or declares with its own fresh SignalValue
+        at construction time (see instantiate/_instantiate_gen)."""
+        result: dict = {}
+        for base in self.bases:
+            result.update(base.all_signals())
+        result.update(self.signals)
         return result
 
     def __repr__(self):
@@ -293,6 +357,91 @@ class ClassInstance:
         return f"<{self.cls.name} {attrs}>"
 
 
+class SignalValue:
+    """One instance's own subscriber list for a `signal name(...)` member
+    (see Class.all_signals/_instantiate_gen, which seed one of these per
+    signal into every new ClassInstance's attrs, exactly where a slot's
+    value would live). Reached from wyrm code as an ordinary attribute
+    (`obj.name`, or bare `name`/`this.name` inside a method - the same
+    lookup a slot gets), and connected to via `obj.name ! connect(cb)` (see
+    register_native_method's "connect" registration in populate_globals):
+    a message on a value with no real Class behind it, the same trick
+    str's substr/list's append use."""
+
+    def __init__(self, name: str):
+        self.name = name
+        self.subscribers: list = []
+
+    def __repr__(self):
+        return f"SignalValue({self.name!r}, {len(self.subscribers)} subscriber(s))"
+
+
+class Future:
+    """What `task expr` (ast.TaskSpawn) evaluates to - a placeholder for a
+    result some other thread will eventually deliver, via `resolve_with`/
+    `fail_with`. `resolve(fut)` (wyrm_builtins.py) is the wyrm-visible way
+    to block on `.wait()`.
+
+    Only `_dispatch_remote_message`'s async branch (see its docstring)
+    ever actually resolves one via a background thread - this is not a
+    general-purpose promise type, just enough machinery for that one case."""
+
+    def __init__(self):
+        self._event = threading.Event()
+        self._value = None
+        self._error: "Exception | None" = None
+
+    def resolve_with(self, value) -> None:
+        self._value = value
+        self._event.set()
+
+    def fail_with(self, exc: Exception) -> None:
+        self._error = exc
+        self._event.set()
+
+    def wait(self):
+        """Blocks until resolved, then returns the value - or re-raises
+        whatever the resolving thread failed with."""
+        self._event.wait()
+        if self._error is not None:
+            raise self._error
+        return self._value
+
+    def __repr__(self):
+        state = "pending" if not self._event.is_set() else (
+            "failed" if self._error is not None else "resolved")
+        return f"Future({state})"
+
+
+# `task expr`'s push/pop stack of in-flight Futures (see ast.TaskSpawn's
+# eval case) - thread-local like _current_coroutine above, since a `task`
+# block's push and pop both happen on whichever thread is evaluating it,
+# and _dispatch_remote_message reads its top from that same thread, never
+# across threads (the background thread it may spin only ever holds a
+# Future reference captured *before* starting, not the stack itself).
+_task_stack = threading.local()
+
+
+def _current_task_future() -> "Future | None":
+    """The Future a `remote ! name(...)` reached right now should resolve
+    asynchronously into, or None if it's not inside any `task expr` on
+    this thread - see _dispatch_remote_message."""
+    stack = getattr(_task_stack, "frames", None)
+    return stack[-1] if stack else None
+
+
+def _push_task_future(future: "Future") -> None:
+    stack = getattr(_task_stack, "frames", None)
+    if stack is None:
+        stack = []
+        _task_stack.frames = stack
+    stack.append(future)
+
+
+def _pop_task_future() -> None:
+    _task_stack.frames.pop()
+
+
 class Coroutine:
     """A `co` definition itself (like Function, but for coroutines) - not
     yet running. Calling it (see call_value) builds a CoroutineInstance,
@@ -311,6 +460,20 @@ class Coroutine:
 
 
 _current_coroutine = threading.local()
+
+# A coroutine body runs on its own dedicated thread (see CoroutineInstance
+# below), but unlike wypoc/parse.py's own dedicated parsing thread, it was
+# started with whatever threading.stack_size() defaults to - so a deeply
+# recursive coroutine body had *less* headroom than top-level code, not
+# more. Pairs a bigger C stack with a bigger recursion-limit ceiling exactly
+# like parse.py's _run_with_big_stack, for the same reason: raising the
+# ceiling without the matching stack size trades a catchable RecursionError
+# for an uncatchable segfault. Serialized with a lock since
+# threading.stack_size() is a process-global knob affecting whatever thread
+# is created next, not just this one.
+_CO_STACK_SIZE = 64 * 1024 * 1024  # 64 MiB, matching parse.py
+_CO_RECURSION_LIMIT = 20000
+_co_thread_lock = threading.Lock()
 
 
 class CoroutineInstance:
@@ -343,6 +506,12 @@ class CoroutineInstance:
 
     def _run(self) -> None:
         _current_coroutine.instance = self
+        # See _CO_RECURSION_LIMIT's docstring: paired with this thread's
+        # bigger C stack (set by _advance_raw before starting it), not
+        # touched here. Restored in `finally` so the ceiling stays raised
+        # only for the lifetime of this thread's own execution.
+        old_limit = sys.getrecursionlimit()
+        sys.setrecursionlimit(max(old_limit, _CO_RECURSION_LIMIT))
         # Runs on this instance's own daemon thread, but push/pop stay
         # correct without extra locking: the GIL plus the _to_co/_to_caller
         # handoff mean only one of {caller thread, this thread} is ever
@@ -364,6 +533,7 @@ class CoroutineInstance:
             # iteration`), not as a raw Python traceback in the caller.
             self._result = wyrm_builtins.error(str(exc))
         finally:
+            sys.setrecursionlimit(old_limit)
             if _call_stack is not None:
                 _call_stack.pop()
             self._finished = True
@@ -394,8 +564,14 @@ class CoroutineInstance:
             return True, self._result
         if not self._started:
             self._started = True
-            self._thread = threading.Thread(target=self._run, daemon=True)
-            self._thread.start()
+            with _co_thread_lock:
+                previous_stack_size = threading.stack_size()
+                threading.stack_size(_CO_STACK_SIZE)
+                try:
+                    self._thread = threading.Thread(target=self._run, daemon=True)
+                    self._thread.start()
+                finally:
+                    threading.stack_size(previous_stack_size)
         else:
             self._in_value = send_value
             self._to_co.set()
@@ -540,12 +716,18 @@ class Module:
     registers `io` here on `std`, mirroring Python's own module.submodule
     attribute behavior)."""
 
-    def __init__(self, name: str, path: str, ctx: dict, is_package: bool):
+    def __init__(self, name: str, path: str, ctx: dict, is_package: bool, tree: "ast.Program | None" = None):
         self.name = name          # "::"-joined path, e.g. "std::io"
         self.path = path          # filesystem path to the .wy file loaded
         self.ctx = ctx             # the module's own top-level namespace
         self.is_package = is_package
         self.submodules: dict = {}
+        # The parsed source, kept around (not just its side effects in
+        # `ctx`) so help() (wyrm_builtins.py) can read the module's own doc
+        # comment and walk its top-level defs - `ctx` alone can't do that,
+        # since populate_globals binds builtins/prelude names into the same
+        # dict level as the module's own top-level names.
+        self.tree = tree
 
     def __repr__(self):
         return f"Module({self.name!r})"
@@ -576,7 +758,7 @@ def _prelude_tree() -> "ast.Program":
     return _PRELUDE_TREE
 
 
-def populate_globals(ctx: dict) -> None:
+def populate_globals(ctx: dict, name: str = "__main__") -> None:
     """Seeds a fresh scope with the globals every piece of wyrm code should
     see, regardless of whether it's the top-level script (see cli.py) or a
     module loaded via `import` (see import_module below): the __-prefixed
@@ -586,27 +768,70 @@ def populate_globals(ctx: dict) -> None:
     A module gets its own fresh `ctx` (see import_module), so without
     calling this for it too, code like corelib/std/io.wy's
     `__write(__STDOUT, value)` would see `__write` as undefined even
-    though the top-level script's scope has it."""
-    from wypoc import wyrm_builtins, wyrm_io
+    though the top-level script's scope has it. Also seeds `__dynamic__`
+    (see import_module) to `true`, so code that checks it doesn't hit a
+    NameError when run somewhere other than a `dynamic`/`static`-tagged
+    import - the top-level script itself, or a module loaded directly by
+    something other than eval_import.
+
+    Also seeds `__name__`, mirroring Python: the entry script sees
+    `__name__ == "__main__"` (the default here - every caller other than
+    import_module is populating a top-level-ish scope, e.g. the REPL, the
+    debugger, or a bare `import`less script), while a module reached via
+    `import`/`import static` sees its own fully-qualified `"::"`-joined
+    name (e.g. `"std::io"`), passed in explicitly by import_module below.
+    Unlike Python, `__name__` is always fully qualified - there's no
+    equivalent of a script run directly by relative filename ending up
+    with a bare, unqualified `__name__`."""
+    from wypoc import wyrm_builtins, wyrm_dbus, wyrm_io, wyrm_nng, wyrm_socket, wyrm_term
 
     wyrm_io.install(ctx)
     wyrm_builtins.install(ctx)
+    wyrm_dbus.install(ctx)
+    wyrm_term.install(ctx)
+    wyrm_socket.install(ctx)
+    wyrm_nng.install(ctx)
     eval_program(_prelude_tree(), ctx)
+    expose(ctx, "__dynamic__", True)
+    expose(ctx, "__name__", name)
 
 
-def import_module(path_segments, roots=None) -> Module:
+def import_module(path_segments, roots=None, dynamic: bool = True) -> Module:
     """Loads (or returns the already-cached) module for a `mod::sub::leaf`
     path. Parent packages are loaded first (so `import std::io` runs
     std/__init__.wy before std/io.wy) and register the child on their
-    `.submodules`, matching Python's own import order and behavior."""
+    `.submodules`, matching Python's own import order and behavior.
+
+    `dynamic` is exposed to the module's own top level as `__dynamic__` -
+    `false` for `import static a::b`, `true` for a plain `import a::b`
+    (see eval_import). This interpreter has no real way to run only a
+    module's declarations and defer its side-effecting statements (see
+    _adopt_messages' docstring) - `import static` still runs the whole
+    body, immediately, same as a plain import - so `__dynamic__` is a
+    stopgap: a module that wants to behave differently when it's reached
+    through `static` (skip a side effect a decorator-only load shouldn't
+    trigger, say) can guard that code with `if __dynamic__:` itself, by
+    hand, until a real load/run split exists.
+
+    Because the module only actually runs once - the first import of it,
+    whichever form that was, per `_module_cache` - `__dynamic__` reflects
+    *that* import, not necessarily the one on screen: `import static a; ...;
+    import a` leaves `a.__dynamic__` false throughout, since the static
+    import got there first and the second is just a cache hit. Each import
+    (cached or not) still refreshes `__dynamic__` to its own `dynamic`, so
+    module code that reads it lazily (inside a fn, rather than only at
+    top level) sees whichever import happened most recently - known
+    incomplete, acceptable for the POC."""
     path_segments = tuple(path_segments)
     key = "::".join(path_segments)
     if key in _module_cache:
-        return _module_cache[key]
+        mod = _module_cache[key]
+        bind("__dynamic__", dynamic, mod.ctx)
+        return mod
 
     parent = None
     if len(path_segments) > 1:
-        parent = import_module(path_segments[:-1], roots)
+        parent = import_module(path_segments[:-1], roots, dynamic)
 
     resolved = wyrm_modules.resolve_module_file(path_segments, roots)
     if resolved is None:
@@ -614,13 +839,27 @@ def import_module(path_segments, roots=None) -> Module:
         raise ImportError(f"no module named {key!r} (searched: {', '.join(searched)})")
     file_path, is_package = resolved
 
-    with open(file_path) as f:
-        src = f.read()
-    tree = parse(src)
+    # Same AST cache cli.py uses for the top-level script (wypoc/cache.py) -
+    # a hit (source unchanged since last run, by mtime) skips tokenizing and
+    # PEG-parsing entirely. Imported modules are exactly where this pays
+    # off most: corelib files like wyrm::parser::parser (600+ lines) get
+    # re-parsed on every single `import`, in every process, regardless of
+    # how many times their *content* has actually changed - measured at
+    # ~10-20% of total runtime for a script that imports the self-hosted
+    # parser. A miss just parses as usual and populates the cache for next
+    # time; any cache failure (unwritable directory, corrupt entry, ...) is
+    # invisible here since cache.load/save never raise.
+    tree = cache_mod.load(file_path)
+    if tree is None:
+        with open(file_path) as f:
+            src = f.read()
+        tree = parse(src)
+        cache_mod.save(file_path, tree)
 
     module_ctx = Scope()
-    populate_globals(module_ctx)
-    mod = Module(key, file_path, module_ctx, is_package)
+    populate_globals(module_ctx, name=key)
+    bind("__dynamic__", dynamic, module_ctx)
+    mod = Module(key, file_path, module_ctx, is_package, tree=tree)
     _module_cache[key] = mod  # cache before eval so circular imports don't infinite-loop
     eval_program(tree, module_ctx)
 
@@ -664,12 +903,24 @@ def eval_import(stmt: ast.Import, ctx: dict) -> None:
         real_path = list(stmt.path)
         bind_root = True
 
+    dynamic = not stmt.static
     if stmt.wildcard or stmt.items is not None:
-        mod = import_module(real_path)
+        mod = import_module(real_path, dynamic=dynamic)
         if stmt.wildcard:
             excluded = set(stmt.except_names or ())
             for name, var in mod.ctx.items():
-                if isinstance(name, str) and name not in excluded:  # str: skips mod.ctx's message_table sentinel entry
+                # str: skips mod.ctx's message_table sentinel entry. The
+                # `__`-prefixed names (__name__, __dynamic__, __ARGS, the
+                # low-level __open/__STDIN/... primitives populate_globals
+                # installs into every scope) are per-scope implementation
+                # details, not module-declared exports - copying them would
+                # clobber the importing scope's own __name__/__dynamic__
+                # with the imported module's, which is exactly the bug a
+                # transitive chain of wildcard imports (a::* importing
+                # b::* importing c::*, say) used to produce: the deepest
+                # module's __name__ would win everywhere up the chain.
+                if (isinstance(name, str) and not name.startswith("__")
+                        and name not in excluded):
                     bind_new(name, unwrap(var), ctx)
             dest_messages = message_table(ctx)
             for name, method in message_table(mod.ctx).items():
@@ -681,11 +932,11 @@ def eval_import(stmt: ast.Import, ctx: dict) -> None:
         return
 
     try:
-        target = import_module(real_path)
+        target = import_module(real_path, dynamic=dynamic)
     except ImportError:
         if len(real_path) < 2:
             raise
-        parent = import_module(real_path[:-1])
+        parent = import_module(real_path[:-1], dynamic=dynamic)
         _import_one(stmt.path[-1], stmt.alias or stmt.path[-1], parent, ctx)
     else:
         bind_new(stmt.alias or stmt.path[-1], target, ctx)
@@ -714,7 +965,10 @@ def _adopt_messages(mod: "Module", ctx: dict) -> None:
     closures over a live environment, no coroutines, no reaching into the
     importing module's state - is recorded, not enforced. This interpreter
     runs a module's top level when it is imported either way, so the
-    constraint buys nothing here that it buys in a compiled implementation."""
+    constraint buys nothing here that it buys in a compiled implementation.
+    `import_module`'s `__dynamic__` is the stopgap for that: a module can
+    check it and skip a side effect itself, by hand, since the interpreter
+    won't skip it for them."""
     destination = message_table(ctx)
     for name, method in message_table(mod.ctx).items():
         destination.setdefault(name, method)
@@ -746,6 +1000,117 @@ class BreakSignal(Exception):
 
 class ContinueSignal(Exception):
     """Unwinds a loop body back to the nearest enclosing while/for on `continue`."""
+
+
+class EndSignal(Exception):
+    """Raised by the `end()` builtin (wyrm_builtins.py) - unwinds all the
+    way out of eval_program, back to whichever entry point is running the
+    current thread/process's own top level (cli.py's main() for the main
+    process; wyrm_remote.py's `_remote_main` for a `thread`-spawned one -
+    see doc/language-spec.md's forthcoming "wyrm routines" section for the
+    lifecycle rule this is part of: main falling off the end of its top
+    level implicitly `exit()`s, unless it called `end()` first, in which
+    case it just stops - same as any other thread/process finishing its own
+    work does)."""
+
+
+class ExitSignal(Exception):
+    """Raised by the `exit()` builtin (wyrm_builtins.py) - unwinds out of
+    eval_program the same way EndSignal does, but the entry point that
+    catches it terminates the whole process (`sys.exit(code)`) rather than
+    just stopping cleanly."""
+
+    def __init__(self, code: int = 0):
+        self.code = code
+
+
+class WyrmLocatedError:
+    """Mixed into a *shadow* of whatever Python exception class the
+    evaluator (or a builtin) raised deep inside a statement - `_locate_exc`
+    below builds and caches one such shadow per original exception type on
+    first use (`_LOCATED_EXC_CLASSES`), e.g. `TypeError` gets shadowed by a
+    dynamically-built `type("LocatedTypeError", (WyrmLocatedError,
+    TypeError), {})`, rather than this module hand-maintaining a parallel
+    type per TypeError/NameError/ValueError/IndexError/... A `TypeError`
+    escaping evaluation is still, literally, a TypeError once shadowed -
+    `except TypeError` and `pytest.raises(TypeError, ...)` elsewhere in
+    this codebase (and in wyrm code's own `try`/`catch`-adjacent Python
+    interop, however unlikely) keep working exactly as if this feature
+    didn't exist - while `.loc` (a Span, see ast_nodes.py) and `.original`
+    (the plain, unshadowed exception `raise ... from` chains onto) ride
+    along too, and `__str__` renders both.
+
+    A parse failure already gets a location for free
+    (SyntaxError.lineno/offset - see wyrm_tokenizer.TokenizeError); nothing
+    played that role for the vast majority of exceptions the evaluator
+    raises once parsing is done, so eval_stmt/_eval_stmt_gen - the one
+    place every statement everywhere passes through (see eval_stmt's own
+    docstring) - shadow whatever escaped like this before it continues up
+    to cli.py/repl.py/a debugger.
+
+    Only the *first* (innermost) eval_stmt/_eval_stmt_gen frame to see a
+    raw exception shadows it - same "first sighting" rule
+    `_last_captured_exc` already enforced for the debugger's exception
+    hook, reused here so an exception crossing several nested statements
+    (an inner `if`'s body, a call's own body, ...) keeps the innermost,
+    most precise location rather than the outermost one it happens to
+    unwind through last."""
+
+    def __init__(self, loc, original: Exception):
+        self.loc = loc
+        self.original = original
+        self.args = original.args
+
+    def __str__(self):
+        base = f"{type(self.original).__name__}: {self.original}"
+        if not self.loc:
+            return base
+        line, col = self.loc[0], self.loc[1]
+        return f"{base} (line {line}, col {col + 1})"
+
+
+_LOCATED_EXC_CLASSES: dict = {}
+
+
+def _located_class(original_cls: type) -> type:
+    """The `WyrmLocatedError`-shadow of `original_cls`, building (and
+    caching) it on first request - see `WyrmLocatedError`'s docstring."""
+    shadow = _LOCATED_EXC_CLASSES.get(original_cls)
+    if shadow is None:
+        shadow = type(f"Located{original_cls.__name__}",
+                       (WyrmLocatedError, original_cls), {})
+        _LOCATED_EXC_CLASSES[original_cls] = shadow
+    return shadow
+
+
+# The two most common non-parse mistakes - a typo'd name (NameError) and a
+# value of the wrong shape (TypeError) - pre-built and importable by name,
+# so e.g. `except WyrmNameError` is spellable without reaching for
+# `_located_class`. Every other exception type still gets shadowed too
+# (see _locate_exc/_located_class); these are just its two busiest tenants.
+WyrmNameError = _located_class(NameError)
+WyrmTypeError = _located_class(TypeError)
+
+
+# Exceptions eval_stmt/_eval_stmt_gen never shadow: wyrm's own control-flow
+# unwinding (return/break/continue/end/exit) - a WyrmLocatedError instance
+# is excluded by its own isinstance check in _locate_exc below, not listed
+# here, since (unlike these) it isn't one fixed type.
+_UNWRAPPED_EXC_TYPES = (ReturnSignal, BreakSignal, ContinueSignal, EndSignal, ExitSignal)
+
+
+def _locate_exc(stmt, exc: BaseException) -> BaseException:
+    """The exception eval_stmt/_eval_stmt_gen should actually propagate for
+    `exc`, having just escaped evaluating `stmt`: `exc` itself, unchanged,
+    for wyrm's own control-flow signals, an already-shadowed
+    WyrmLocatedError, or anything that isn't an Exception at all
+    (KeyboardInterrupt, SystemExit, GeneratorExit - not the evaluator's
+    concern to annotate); a new instance of `exc`'s own type shadowed with
+    a `.loc`/`.original`, tagged with `stmt.pos`, otherwise."""
+    if (not isinstance(exc, Exception) or isinstance(exc, _UNWRAPPED_EXC_TYPES)
+            or isinstance(exc, WyrmLocatedError)):
+        return exc
+    return _located_class(type(exc))(stmt.pos, exc)
 
 
 def _safe_div(a, b):
@@ -919,9 +1284,14 @@ def message_table(ctx: dict) -> dict:
 
 
 def lookup(name: str, ctx: dict):
-    if name not in ctx:
+    # A single ctx.get() - not the `name not in ctx` + `ctx[name]` pair this
+    # used to be - since both walk the same Scope.parent chain via get_cell
+    # (see Scope's docstring): the old form paid for that walk twice on
+    # every lookup, the single hottest call in the interpreter.
+    cell = ctx.get(name)
+    if cell is None:
         raise NameError(f"undefined variable {name!r}")
-    value = unwrap(ctx[name])
+    value = unwrap(cell)
     if value is UNSET:
         raise NameError(f"variable {name!r} is declared but has no value yet")
     return value
@@ -930,9 +1300,10 @@ def lookup(name: str, ctx: dict):
 def is_defined(name: str, ctx: dict) -> bool:
     """`defined('foo)`/`?=`'s "already defined and not of error type" check
     (see doc/language-spec.md's Variables section)."""
-    if name not in ctx:
+    cell = ctx.get(name)
+    if cell is None:
         return False
-    value = unwrap(ctx[name])
+    value = unwrap(cell)
     if value is UNSET:
         return False
     return not wyrm_builtins.is_error(value)
@@ -1020,16 +1391,17 @@ def _static_store_for(node) -> dict:
     return store
 
 
-def _bind_params(node, local_ctx: dict, positional, kwargs, display_name: str) -> None:
-    """Binds a fn/co's params/*args/**kwargs into local_ctx (already seeded
-    with whatever closure/this/slots the caller wants visible). Shared by
-    _bind_params_and_run (ordinary fn/message calls, which also run the
-    body immediately) and instantiate_coroutine (which binds params up
-    front but only runs the body lazily, on first next()/send())."""
-    kwargs = dict(kwargs)
-    positional = list(positional)
-    local_ctx["__statics__"] = _static_store_for(node)
-
+def _param_shape(node):
+    """`node.params` (a fn/co/lambda's declared parameter list) sorted once
+    into (plain_params, var_positional_name, var_keyword_name) and cached on
+    the node - same identity-caching pattern as _static_store_for above.
+    This shape is fixed by the node's own syntax, so re-deriving it on every
+    single call (as _bind_params used to) was pure repeated work: a rule
+    like a packrat parser's `peek`/`mark`/`advance` gets called thousands of
+    times over one parse, and its param list never changes between them."""
+    shape = getattr(node, "_param_shape", None)
+    if shape is not None:
+        return shape
     plain_params = []
     var_positional_name = None
     var_keyword_name = None
@@ -1040,6 +1412,22 @@ def _bind_params(node, local_ctx: dict, positional, kwargs, display_name: str) -
             var_keyword_name = p.name
         else:
             plain_params.append(p)
+    shape = (plain_params, var_positional_name, var_keyword_name)
+    node._param_shape = shape
+    return shape
+
+
+def _bind_params(node, local_ctx: dict, positional, kwargs, display_name: str) -> None:
+    """Binds a fn/co's params/*args/**kwargs into local_ctx (already seeded
+    with whatever closure/this/slots the caller wants visible). Shared by
+    _build_call_activation (ordinary fn/message calls, driven by
+    _run_driver - see call_function/call_overload) and
+    instantiate_coroutine (which binds params up front but only runs the
+    body lazily, on first next()/send())."""
+    kwargs = dict(kwargs)
+    local_ctx["__statics__"] = _static_store_for(node)
+
+    plain_params, var_positional_name, var_keyword_name = _param_shape(node)
 
     pos_index = 0
     for p in plain_params:
@@ -1070,35 +1458,971 @@ def _bind_params(node, local_ctx: dict, positional, kwargs, display_name: str) -
         raise TypeError(f"{display_name}() got unexpected keyword argument(s): {unexpected}")
 
 
-def _bind_params_and_run(node, local_ctx: dict, positional, kwargs, display_name: str):
-    """Shared by call_function and call_overload: binds params (see
-    _bind_params) then runs the body and unwinds ReturnSignal.
-    run_scoped_block (not plain eval_block) so a `defer` registered
-    directly in the call's own top-level scope fires when the call
-    returns - see doc/language-spec.md's Defer section.
+class _TailCall:
+    """Yielded by _eval_expr_gen at any `f(...)` / `recv ! name(...)` /
+    `Cls(...)` call site whose target is a plain user Function, an ordinary
+    FnDef-backed message overload, or a Class - wherever it appears in an
+    expression, not just in statement-tail position (`return f(...)`,
+    `f(n - 1) + 1`, `while f(n):`, an argument to another call, ... all
+    reach this the same way). The driver (_run_driver) turns this into a
+    new activation pushed onto its own explicit stack instead of a native
+    recursive call, so a chain of such calls (however deep - self-recursion,
+    mutual recursion, a decorator invoking the body it decorates, ...) grows
+    a Python list, not the C stack. `build` is a zero-argument callable
+    answering the _CallActivation to push - _make_call_activation for a
+    plain Call, _make_overload_activation for a message send,
+    _make_instantiate_activation for a construction - deferred rather than
+    built eagerly so a failure while binding params (e.g. wrong argument
+    count) is raised at the point _run_driver actually calls it, where the
+    driver can catch it and deliver it back to the caller like any other
+    exception a call raises (see _run_driver)."""
 
-    A body that falls off the end (no `return` reached) answers whatever
-    run_scoped_block computed - the value of the last statement executed,
-    per doc/language-spec.md's "If no explicit 'return' is used, the value
-    of the last statement is used." This used to be hardcoded to None,
-    silently discarding that value for every fn/message with an implicit
-    return - e.g. `fn g(x) -> int: x + 1` answered nil instead of x + 1."""
-    _bind_params(node, local_ctx, positional, kwargs, display_name)
-    if _call_stack is not None:
-        _call_stack.append(Frame(display_name, local_ctx))
+    __slots__ = ("build",)
+
+    def __init__(self, build):
+        self.build = build
+
+
+class _CallActivation:
+    """One entry on _run_driver's explicit stack: a suspended generator -
+    _run_scoped_block_gen for a Function/overload call's body, or
+    _instantiate_gen for a `Cls(...)` construction - plus whether it pushed
+    its own debugger Frame (a call body always does; _instantiate_gen never
+    does, matching instantiate()'s current behaviour where only the `init`
+    call it may make shows up in the stack, not instantiation itself), so
+    _run_driver knows whether popping this activation should pop
+    _call_stack too."""
+
+    __slots__ = ("gen", "pushed_frame")
+
+    def __init__(self, gen, pushed_frame: bool):
+        self.gen = gen
+        self.pushed_frame = pushed_frame
+
+
+def _eval_args_gen(arg_nodes, ctx: dict):
+    """The generator-driven twin of eval_args - each argument expression is
+    evaluated via `yield from _eval_expr_gen(...)` instead of a native
+    `eval_expr(...)` call, so a call nested inside an argument expression
+    (`f(g(x))`) is trampolined too, not just `f`'s own call."""
+    positional = []
+    kwargs = {}
+    for a in arg_nodes:
+        if isinstance(a, ast.Kwarg):
+            kwargs[a.name] = yield from _eval_expr_gen(a.value, ctx)
+        elif isinstance(a, ast.SpreadPos):
+            spread = yield from _eval_expr_gen(a.value, ctx)
+            positional.extend(spread)
+        elif isinstance(a, ast.SpreadKw):
+            spread = yield from _eval_expr_gen(a.value, ctx)
+            kwargs.update(spread)
+        else:
+            value = yield from _eval_expr_gen(a, ctx)
+            positional.append(value)
+    return positional, kwargs
+
+
+def _eval_tail_message_gen(name: str, receivers: list, args_node, ctx: dict):
+    """Shared by _eval_expr_gen's `ast.Message`/`ast.MessageTupleExpr`
+    cases (called only when there's an actual call, i.e. `args_node is not
+    None`): resolves the overload and either yields a _TailCall (an
+    ordinary FnDef-backed overload - the message-send analogue of a Call to
+    a plain Function) or calls it immediately (NativeBody/CoDef, neither of
+    which recurse into further Wyrm-level call depth the way a body of Wyrm
+    statements can - see call_overload)."""
+    overload = _resolve_message(name, receivers, ctx)
+    positional, kwargs = yield from _eval_args_gen(args_node, ctx)
+    if isinstance(overload.node, NativeBody):
+        this_value = receivers[0] if len(receivers) == 1 else tuple(receivers)
+        return overload.node.fn(this_value, *positional, **kwargs)
+    if isinstance(overload.node, ast.CoDef):
+        this_value = receivers[0] if len(receivers) == 1 else tuple(receivers)
+        return instantiate_coroutine(overload.node, overload.closure, positional, kwargs, this_value)
+    value = yield _TailCall(lambda: _make_overload_activation(overload, receivers, positional, kwargs))
+    return value
+
+
+def _eval_if_gen(node: "ast.If", ctx: dict):
+    """The generator-driven twin of _eval_if - shared, like _eval_if
+    itself, by `if` as a statement and `if` as an expression."""
+    cond = yield from _eval_expr_gen(node.cond, ctx)
+    if cond:
+        value = yield from _run_block_gen(node.body, ctx)
+        return value
+    for clause in node.elifs:
+        cond = yield from _eval_expr_gen(clause.cond, ctx)
+        if cond:
+            value = yield from _run_block_gen(clause.body, ctx)
+            return value
+    if node.orelse is not None:
+        value = yield from _run_block_gen(node.orelse, ctx)
+        return value
+    return None
+
+
+# ---------------------------------------------------------------------
+# _eval_expr_gen's dispatch tables
+# ---------------------------------------------------------------------
+#
+# Two tables, both indexed by node.TAG (see ast_nodes.Node.__init_subclass__)
+# instead of the isinstance chain _eval_expr_gen used to open with:
+#
+#   _EXPR_SIMPLE_DISPATCH  a node kind that never recurses into a
+#                          sub-expression or a call - Name, a literal,
+#                          `this`, ... - so its handler is a *plain*
+#                          function, called directly (no `yield from`, no
+#                          generator object created for it).
+#   _EXPR_GEN_DISPATCH     everything else - a generator function, entered
+#                          via `yield from` exactly as its code did when it
+#                          was inlined in _eval_expr_gen directly.
+#
+# The split matters because _eval_expr_gen is itself a generator function
+# (it contains `yield`), so every call to it already pays one generator
+# object's creation - unavoidable as long as callers write
+# `yield from _eval_expr_gen(...)`. Routing a *simple* case through a
+# second `yield from` (into its own generator handler) would double that
+# cost for no reason; calling its handler as a plain function keeps it to
+# the one unavoidable generator plus an O(1) array lookup. A *gen* case was
+# already going to need its own suspension points, so no extra generator is
+# introduced versus the old inlined code - dispatch just moves from an
+# isinstance chain to an array index.
+
+
+def _expr_name(node, ctx):
+    return lookup(node.id, ctx)
+
+
+def _expr_thisref(node, ctx):
+    return lookup("this", ctx)
+
+
+def _expr_symbol(node, ctx):
+    return wyrm_builtins.Symbol(node.name)
+
+
+def _expr_num(node, ctx):
+    return eval_number_literal(node.value)
+
+
+def _expr_str(node, ctx):
+    return eval_string_literal(node.value)
+
+
+def _expr_char(node, ctx):
+    return eval_char_literal(node.value)
+
+
+def _expr_bool(node, ctx):
+    return node.value
+
+
+def _expr_ellipsis(node, ctx):
+    return wyrm_builtins.ELLIPSIS
+
+
+def _expr_lambda(node, ctx):
+    return Function(None, node, ctx)
+
+
+def _expr_threadspawn(node, ctx):
+    from wypoc.wyrm_remote import spawn_module_process
+    return spawn_module_process(node.path)
+
+
+def _expr_defined(node, ctx):
+    if not isinstance(node.symbol, ast.Symbol):
+        raise TypeError("defined() takes a symbol literal, e.g. defined('foo)")
+    return is_defined(node.symbol.name, ctx)
+
+
+def _expr_binop(node, ctx):
+    if node.op == "and":
+        left = yield from _eval_expr_gen(node.left, ctx)
+        if not left:
+            return left
+        value = yield from _eval_expr_gen(node.right, ctx)
+        return value
+    if node.op == "or":
+        left = yield from _eval_expr_gen(node.left, ctx)
+        if left:
+            return left
+        value = yield from _eval_expr_gen(node.right, ctx)
+        return value
+    left = yield from _eval_expr_gen(node.left, ctx)
+    right = yield from _eval_expr_gen(node.right, ctx)
     try:
+        return BINOPS[node.op](left, right)
+    except KeyError:
+        raise NotImplementedError(f"unsupported binary op: {node.op}")
+
+
+def _expr_do(node, ctx):
+    value = yield from _run_block_gen(node.body, ctx)
+    return value
+
+
+def _expr_attr(node, ctx):
+    obj = yield from _eval_expr_gen(node.obj, ctx)
+    if isinstance(obj, CoroutineInstance) and node.name == "value":
+        if not obj._finished:
+            return wyrm_builtins.error(f"coroutine {obj.node.name!r} has not finished")
+        return obj._result
+    if isinstance(obj, ClassInstance):
+        return lookup(node.name, obj.attrs)
+    from wypoc.wyrm_remote import RemoteModule
+    if isinstance(obj, RemoteModule):
+        return obj.signal(node.name)
+    raise NotImplementedError(f"'.' is only supported on class instances right now (got {type(obj).__name__})")
+
+
+def _expr_call(node, ctx):
+    func = yield from _eval_expr_gen(node.func, ctx)
+    positional, kwargs = yield from _eval_args_gen(node.args, ctx)
+    if isinstance(func, ContextualBuiltin):
+        return func.fn(ctx, *positional, **kwargs)
+    if isinstance(func, Function):
+        value = yield _TailCall(lambda: _make_call_activation(func, positional, kwargs))
+        return value
+    if isinstance(func, Class):
+        value = yield _TailCall(lambda: _make_instantiate_activation(func, positional, kwargs))
+        return value
+    return call_value(func, positional, kwargs)
+
+
+def _expr_if(node, ctx):
+    value = yield from _eval_if_gen(node, ctx)
+    return value
+
+
+def _expr_message(node, ctx):
+    receiver = yield from _eval_expr_gen(node.obj, ctx)
+    from wypoc.wyrm_remote import RemoteModule
+    if isinstance(receiver, RemoteModule):
+        return _dispatch_remote_message(receiver, node.name, node.args, ctx)
+    if node.args is None:
+        return BoundMessage([receiver], _resolve_message(node.name, [receiver], ctx))
+    value = yield from _eval_tail_message_gen(node.name, [receiver], node.args, ctx)
+    return value
+
+
+def _expr_typecheck(node, ctx):
+    value = yield from _eval_expr_gen(node.value, ctx)
+    return any(_matches_type(value, t, ctx) for t in node.types)
+
+
+def _expr_index(node, ctx):
+    obj = yield from _eval_expr_gen(node.obj, ctx)
+    idx = yield from _eval_expr_gen(node.index, ctx)
+    if isinstance(obj, str):
         try:
-            return run_scoped_block(node.body, local_ctx)
-        except ReturnSignal as ret:
-            return ret.value
+            return ord(obj[idx])
+        except IndexError as exc:
+            return wyrm_builtins.error(str(exc))
+    if isinstance(obj, dict):
+        return obj.get(idx, UNSET)
+    try:
+        return obj[idx]
+    except (IndexError, TypeError, KeyError) as exc:
+        return wyrm_builtins.error(str(exc))
+
+
+def _expr_decorated(node, ctx):
+    expanded = expand_decorated(node, ctx, as_statement=False)
+    value = yield from _eval_expr_gen(expanded, ctx)
+    return value
+
+
+def _expr_catch(node, ctx):
+    value = yield from _eval_expr_gen(node.value, ctx)
+    if not wyrm_builtins.is_error(value):
+        return value
+    if isinstance(node.handler, ast.Return):
+        handler_value = None
+        if node.handler.value is not None:
+            handler_value = yield from _eval_expr_gen(node.handler.value, ctx)
+        raise ReturnSignal(handler_value)
+    value = yield from _eval_expr_gen(node.handler, ctx)
+    return value
+
+
+def _expr_tuple(node, ctx):
+    items = []
+    for item in node.items:
+        value = yield from _eval_expr_gen(item, ctx)
+        items.append(value)
+    return tuple(items)
+
+
+def _expr_array(node, ctx):
+    items = []
+    for item in node.items:
+        value = yield from _eval_expr_gen(item, ctx)
+        items.append(value)
+    return items
+
+
+def _expr_dict(node, ctx):
+    result = {}
+    for e in node.entries:
+        key = yield from _eval_expr_gen(e.key, ctx)
+        value = yield from _eval_expr_gen(e.value, ctx)
+        result[key] = value
+    return result
+
+
+def _expr_pair(node, ctx):
+    elements = []
+    for item in node.elements:
+        value = yield from _eval_expr_gen(item, ctx)
+        elements.append(value)
+    result = wyrm_builtins.NIL
+    for value in reversed(elements):
+        result = wyrm_builtins.Pair(value, result)
+    return result
+
+
+def _expr_unaryop(node, ctx):
+    val = yield from _eval_expr_gen(node.operand, ctx)
+    if node.op == "neg":
+        return -val
+    if node.op == "pos":
+        return +val
+    if node.op == "inv":
+        return ~val
+    if node.op == "not":
+        return not val
+    raise NotImplementedError(f"unsupported unary op: {node.op}")
+
+
+def _expr_astref(node, ctx):
+    target = yield from _eval_expr_gen(node.obj, ctx)
+    definition = getattr(target, "node", None)
+    if definition is None:
+        raise TypeError(
+            f"'::${node.field}' needs a fn, co or class definition "
+            f"(got {type(target).__name__})"
+        )
+    return tree_box(definition)
+
+
+def _expr_scope(node, ctx):
+    obj = yield from _eval_expr_gen(node.obj, ctx)
+    if isinstance(obj, Module):
+        if node.name in obj.submodules:
+            return obj.submodules[node.name]
+        return lookup(node.name, obj.ctx)
+    raise NotImplementedError(f"'::' is only supported on modules right now (got {type(obj).__name__})")
+
+
+def _expr_messagetupleexpr(node, ctx):
+    receivers = []
+    for e in node.items:
+        value = yield from _eval_expr_gen(e, ctx)
+        receivers.append(value)
+    if node.args is None:
+        return BoundMessage(receivers, _resolve_message(node.name, receivers, ctx))
+    value = yield from _eval_tail_message_gen(node.name, receivers, node.args, ctx)
+    return value
+
+
+def _expr_taskspawn(node, ctx):
+    future = Future()
+    _push_task_future(future)
+    try:
+        yield from _eval_expr_gen(node.expr, ctx)
     finally:
-        if _call_stack is not None:
+        _pop_task_future()
+    return future
+
+
+def _expr_setifunset(node, ctx):
+    if isinstance(node.target, ast.Name):
+        cell = ctx.get_cell(node.target.id)
+        if cell is None:
+            raise NameError(
+                f"'?=' target {node.target.id!r} is not declared "
+                f"(declare it first with 'var' or 'static')"
+            )
+        if cell.value is not UNSET and not wyrm_builtins.is_error(cell.value):
+            return cell.value
+        value = yield from _eval_expr_gen(node.value, ctx)
+        cell.value = value
+        return value
+    try:
+        current = yield from _eval_expr_gen(node.target, ctx)
+    except NameError:
+        current = UNSET
+    if current is not UNSET and not wyrm_builtins.is_error(current):
+        return current
+    value = yield from _eval_expr_gen(node.value, ctx)
+    return value
+
+
+def _expr_yield(node, ctx):
+    if node.from_:
+        sub = yield from _eval_expr_gen(node.value, ctx)
+        return _yield_from(sub)
+    value = (yield from _eval_expr_gen(node.value, ctx)) if node.value is not None else None
+    return _yield_value(value)
+
+
+def _expr_try(node, ctx):
+    value = yield from _eval_expr_gen(node.value, ctx)
+    if wyrm_builtins.is_error(value):
+        raise ReturnSignal(value)
+    return value
+
+
+_EXPR_SIMPLE_HANDLERS = {
+    ast.Name: _expr_name,
+    ast.ThisRef: _expr_thisref,
+    ast.Symbol: _expr_symbol,
+    ast.Num: _expr_num,
+    ast.Str: _expr_str,
+    ast.Char: _expr_char,
+    ast.Bool: _expr_bool,
+    ast.EllipsisExpr: _expr_ellipsis,
+    ast.Lambda: _expr_lambda,
+    ast.ThreadSpawn: _expr_threadspawn,
+    ast.Defined: _expr_defined,
+}
+
+_EXPR_GEN_HANDLERS = {
+    ast.BinOp: _expr_binop,
+    ast.Do: _expr_do,
+    ast.Attr: _expr_attr,
+    ast.Call: _expr_call,
+    ast.If: _expr_if,
+    ast.Message: _expr_message,
+    ast.TypeCheck: _expr_typecheck,
+    ast.Index: _expr_index,
+    ast.Decorated: _expr_decorated,
+    ast.Catch: _expr_catch,
+    ast.Tuple: _expr_tuple,
+    ast.Array: _expr_array,
+    ast.Dict: _expr_dict,
+    ast.Pair: _expr_pair,
+    ast.UnaryOp: _expr_unaryop,
+    ast.AstRef: _expr_astref,
+    ast.Scope: _expr_scope,
+    ast.MessageTupleExpr: _expr_messagetupleexpr,
+    ast.TaskSpawn: _expr_taskspawn,
+    ast.SetIfUnset: _expr_setifunset,
+    ast.Yield: _expr_yield,
+    ast.Try: _expr_try,
+}
+
+_EXPR_SIMPLE_DISPATCH = [None] * ast.Node._next_tag
+_EXPR_GEN_DISPATCH = [None] * ast.Node._next_tag
+for _cls, _fn in _EXPR_SIMPLE_HANDLERS.items():
+    _EXPR_SIMPLE_DISPATCH[_cls.TAG] = _fn
+for _cls, _fn in _EXPR_GEN_HANDLERS.items():
+    _EXPR_GEN_DISPATCH[_cls.TAG] = _fn
+del _cls, _fn
+
+
+def _eval_expr_gen(node, ctx: dict):
+    """The generator-driven twin of eval_expr - a full mirror, case for
+    case: every case that recurses into a sub-expression does so via
+    `yield from _eval_expr_gen(...)` instead of a native `eval_expr(...)`
+    call, and `ast.Call`/`ast.Message`/`ast.MessageTupleExpr` yield a
+    _TailCall (see _TailCall's docstring) instead of recursing into
+    call_value/call_function/call_overload when the resolved callable is a
+    plain user Function, a Class, or an ordinary FnDef-backed message
+    overload - so a call *anywhere* inside an expression tree (not just in
+    bare statement-tail position - `f(n - 1) + 1`, not only
+    `return f(n - 1)`) is trampolined by _run_driver.
+
+    Safe to recurse into itself via `yield from` for expression-internal
+    structure (an operand, an argument, a collection element, ...): that
+    nesting is bounded by the expression's own (already-parsed, therefore
+    already-bounded - see wypoc/parse.py's own big-stack workaround for the
+    *parser's* version of this same shape of problem) syntax depth, not by
+    Wyrm-level call-chain depth - the same reasoning that already lets
+    _eval_stmt_impl_gen/_eval_if_gen recurse into nested if/while/do blocks
+    via `yield from` rather than pushing a new _run_driver activation for
+    them.
+
+    Dispatches on `node.TAG` against the two tables above rather than an
+    isinstance chain - see their docstring for why simple/gen are split."""
+    tag = node.TAG
+    simple = _EXPR_SIMPLE_DISPATCH[tag]
+    if simple is not None:
+        return simple(node, ctx)
+    handler = _EXPR_GEN_DISPATCH[tag]
+    if handler is None:
+        raise NotImplementedError(f"cannot evaluate {type(node).__name__}")
+    value = yield from handler(node, ctx)
+    return value
+
+
+def _eval_stmt_impl_gen(stmt, ctx: dict):
+    """The generator-driven twin of _eval_stmt_impl - a full mirror (via
+    _eval_expr_gen/_run_scoped_block_gen/_eval_if_gen in place of
+    eval_expr/run_scoped_block/_eval_if), so a Wyrm-level call reachable
+    from *any* expression in a trampolined call's body - not just a bare
+    tail-position call - is trampolined by _run_driver. Only the handful of
+    statement kinds with no expression-evaluation/nested-block involvement
+    at all (Import, FromImport, Pass, Continue, Break, a `defer`'s own
+    registration) or whose expressions are vanishingly unlikely to contain
+    deep recursion and not worth the added surface (FnDef/CoDef's
+    class-target lookups, ClassDef's base-class expressions) still fall
+    through to the native _eval_stmt_impl."""
+    # Ordered by measured call frequency (see _eval_expr_gen's reordering
+    # note above) - ExprStmt/VarDecl/If/Return/Assign dominate, so they lead.
+    if isinstance(stmt, ast.ExprStmt):
+        value = yield from _eval_expr_gen(stmt.value, ctx)
+        return value
+    if isinstance(stmt, ast.VarDecl):
+        # `var`, and the `:=` shorthand (see actions.make_assignment_stmt) -
+        # always declares fresh name(s) in the *current* scope; error if any
+        # target is already declared there (shadowing an enclosing scope's
+        # name of the same name is fine - see doc/language-spec.md's
+        # Variables section). No initializer -> each target is Unset.
+        if stmt.values is None:
+            for t in stmt.targets:
+                ctx.declare_new(t.name, UNSET)
+            return
+        values = []
+        for v in stmt.values:
+            value = yield from _eval_expr_gen(v, ctx)
+            values.append(value)
+        if len(stmt.targets) == 1 and len(values) == 1:
+            ctx.declare_new(stmt.targets[0].name, values[0])
+        elif len(stmt.targets) == len(values):
+            for t, v in zip(stmt.targets, values):
+                ctx.declare_new(t.name, v)
+        else:
+            raise ValueError(
+                f"declaration target/value count mismatch: "
+                f"{len(stmt.targets)} targets, {len(values)} values"
+            )
+        return
+    if isinstance(stmt, ast.Assign):
+        targets = stmt.targets
+        if stmt.op == "?=":
+            # Each target/value pair short-circuits independently: a
+            # NameTarget whose current value isn't an error keeps it
+            # without evaluating that value expression at all - see
+            # doc/language-spec.md's "set if unset" operator. The target
+            # must already be declared (a forward `var`, or `static`).
+            if len(targets) != len(stmt.values):
+                raise ValueError(
+                    f"assignment target/value count mismatch: "
+                    f"{len(targets)} targets, {len(stmt.values)} values"
+                )
+            for t, v_node in zip(targets, stmt.values):
+                if isinstance(t, ast.NameTarget):
+                    cell = ctx.get_cell(t.name)
+                    if cell is None:
+                        raise NameError(
+                            f"'?=' target {t.name!r} is not declared "
+                            f"(declare it first with 'var' or 'static')"
+                        )
+                    if cell.value is not UNSET and not wyrm_builtins.is_error(cell.value):
+                        continue
+                    cell.value = yield from _eval_expr_gen(v_node, ctx)
+                else:
+                    value = yield from _eval_expr_gen(v_node, ctx)
+                    assign_target(t, value, ctx)
+            return
+        values = []
+        for v in stmt.values:
+            value = yield from _eval_expr_gen(v, ctx)
+            values.append(value)
+        if len(targets) == 1 and len(values) == 1:
+            assign_target(targets[0], values[0], ctx)
+        elif len(targets) == len(values):
+            for t, v in zip(targets, values):
+                assign_target(t, v, ctx)
+        else:
+            raise ValueError(
+                f"assignment target/value count mismatch: "
+                f"{len(targets)} targets, {len(values)} values"
+            )
+        return
+    if isinstance(stmt, ast.StaticDecl):
+        store = ctx.get("__statics__")
+        if store is None:
+            raise TypeError("'static' is only valid inside a fn/co body (or a class body)")
+        if stmt.name not in store:
+            value = UNSET
+            if stmt.default is not None:
+                value = yield from _eval_expr_gen(stmt.default, ctx)
+            store[stmt.name] = Variable(value)
+        # Alias, don't copy: later plain assignment (`foo = foo + 1`) or
+        # `?=` mutates this same Variable in place (see bind()), so the
+        # write is visible through `store` on the next call too.
+        ctx[stmt.name] = store[stmt.name]
+        return
+    if isinstance(stmt, ast.If):
+        value = yield from _eval_if_gen(stmt, ctx)
+        return value
+    if isinstance(stmt, ast.Return):
+        value = None
+        if stmt.value is not None:
+            value = yield from _eval_expr_gen(stmt.value, ctx)
+        raise ReturnSignal(value)
+    if isinstance(stmt, ast.Yield):
+        # A bare `yield 1` / `yield from sub()` line (yield_stmt, not
+        # wrapped in ExprStmt - see wyrm.gram). Same suspension as the
+        # expression form; the yielded-back-in value is just discarded.
+        if stmt.from_:
+            value = yield from _eval_expr_gen(stmt.value, ctx)
+            _yield_from(value)
+        else:
+            value = None
+            if stmt.value is not None:
+                value = yield from _eval_expr_gen(stmt.value, ctx)
+            _yield_value(value)
+        return
+    if isinstance(stmt, ast.While):
+        # A fresh child scope per iteration, matching `for`'s per-iteration
+        # scoping below - a `var`/`:=` local declared in the body doesn't
+        # collide with the same declaration on the next iteration, and a
+        # `defer` inside the body fires at the end of *that* iteration
+        # (see run_scoped_block).
+        while (yield from _eval_expr_gen(stmt.cond, ctx)):
+            try:
+                yield from _run_block_gen(stmt.body, ctx)
+            except ContinueSignal:
+                continue
+            except BreakSignal:
+                break
+        return
+    if isinstance(stmt, ast.For):
+        # The loop variable is itself a declaration, fresh per iteration and
+        # scoped to that iteration's body - a closure created in one
+        # iteration captures that iteration's own binding, and the name is
+        # entirely out of scope once the loop ends (an outer variable of the
+        # same name is shadowed for the loop's duration, unaffected by it) -
+        # see doc/language-spec.md's "for" section. A `defer` inside the
+        # body fires at the end of that iteration (see run_scoped_block).
+        iterable = yield from _eval_expr_gen(stmt.iter, ctx)
+        broke = False
+        last_iter_scope = None
+        for item in _iter_values(iterable, ctx):
+            iter_scope = ctx.child()
+            iter_scope.declare_new(stmt.var, item)
+            last_iter_scope = iter_scope
+            try:
+                yield from _run_scoped_block_gen(stmt.body, iter_scope)
+            except ContinueSignal:
+                continue
+            except BreakSignal:
+                broke = True
+                break
+        if not broke and stmt.orelse is not None:
+            else_scope = last_iter_scope.child() if last_iter_scope is not None else ctx.child()
+            if last_iter_scope is None:
+                else_scope.declare_new(stmt.var, UNSET)
+            yield from _run_scoped_block_gen(stmt.orelse, else_scope)
+        return
+    if isinstance(stmt, (ast.WithSimple, ast.WithBlock)):
+        # `with` declares an immutable binding in the current scope - see
+        # doc/language-spec.md's "immutable bindings". `with_block` is
+        # sugar for several `with_stmt_simple`s in a row.
+        bindings = [stmt] if isinstance(stmt, ast.WithSimple) else stmt.bindings
+        for binding in bindings:
+            value = yield from _eval_expr_gen(binding.value, ctx)
+            cell = ctx.declare_new(binding.name, value)
+            cell.immutable = True
+        return
+    if isinstance(stmt, ast.Decorated):
+        expanded = expand_decorated(stmt, ctx, as_statement=True)
+        value = yield from _eval_stmt_gen(expanded, ctx)
+        return value
+    return _eval_stmt_impl(stmt, ctx)
+
+
+def _eval_stmt_gen(stmt, ctx: dict):
+    """The generator-driven twin of eval_stmt - identical debugger-hook and
+    location-tagging wrapper (_stmt_hook up front, _exception_hook's
+    once-per-exception/innermost-sighting dedup, _locate_exc's location
+    tag - see eval_stmt's own docstring) around _eval_stmt_impl_gen instead
+    of _eval_stmt_impl."""
+    if _stmt_hook is not None:
+        _stmt_hook(stmt, ctx)
+    global _last_captured_exc
+    try:
+        value = yield from _eval_stmt_impl_gen(stmt, ctx)
+        return value
+    except (ReturnSignal, BreakSignal, ContinueSignal):
+        raise
+    except BaseException as exc:
+        if exc is _last_captured_exc:
+            raise
+        if _exception_hook is not None and _call_stack is not None:
+            _exception_hook(exc, list(_call_stack), stmt.pos)
+        located = _locate_exc(stmt, exc)
+        _last_captured_exc = located
+        if located is exc:
+            raise
+        raise located from exc
+
+
+# A body containing any of these, at its own top level (not inside a
+# further-nested block - those get their own scope decision independently),
+# writes directly into whichever scope it runs in: a `var`/`:=` or `with`
+# declares a name there, `static` aliases one, `defer` registers a
+# teardown callback on it. A body with none of these can safely run in
+# whatever scope its caller already has - see _body_needs_scope. A
+# `Decorated` statement is treated as "maybe" (conservatively requires a
+# scope) since what it expands to isn't known without running the
+# decorator.
+_SCOPE_REQUIRING_STMT_TYPES = (
+    ast.VarDecl, ast.WithSimple, ast.WithBlock, ast.StaticDecl, ast.Defer,
+    ast.Decorated,
+)
+
+# Keyed by id(body) - safe because every `body` this is ever called with is
+# a list embedded in the (persistent, never-freed-while-running) parsed
+# AST, so its id can't be reused out from under this cache mid-run.
+_body_needs_scope_cache: dict = {}
+
+
+def _body_needs_scope(body: list) -> bool:
+    """Whether running `body` needs a fresh child Scope of its own, or can
+    just run directly in whatever scope its caller already has - see
+    _SCOPE_REQUIRING_STMT_TYPES. Measured on a self-hosted-parser workload,
+    ~60% of `do:`/`if`/`while` block executions declare nothing at all: the
+    fresh Scope (and the extra parent-chain hop it adds to every lookup
+    inside) was pure overhead for those. Cached per body list, since the
+    scan only needs to happen once per distinct body in the tree."""
+    key = id(body)
+    cached = _body_needs_scope_cache.get(key)
+    if cached is None:
+        cached = any(isinstance(s, _SCOPE_REQUIRING_STMT_TYPES) for s in body)
+        _body_needs_scope_cache[key] = cached
+    return cached
+
+
+def _eval_block_gen(stmts, ctx: dict):
+    """The generator-driven twin of eval_block."""
+    value = None
+    for stmt in stmts:
+        value = yield from _eval_stmt_gen(stmt, ctx)
+    return value
+
+
+def _run_block_gen(body, ctx: dict):
+    """Runs `body` against `ctx`, creating a fresh child scope via
+    _run_scoped_block_gen only if _body_needs_scope says it's actually
+    needed - otherwise just `_eval_block_gen`s it directly in `ctx`,
+    skipping both the Scope allocation and the extra parent-chain hop it
+    would otherwise add to every name lookup inside. Used wherever a block
+    used to get an unconditional `ctx.child()` for a body that, in the
+    common case, never declares anything: `do:`, each `if`/`elif`/`else`
+    branch, and a `while` body. NOT used for a `for` body (its iter_scope
+    is needed regardless, to hold the loop variable) or a call's own frame
+    (a different, always-needed scope)."""
+    if _body_needs_scope(body):
+        value = yield from _run_scoped_block_gen(body, ctx.child())
+    else:
+        value = yield from _eval_block_gen(body, ctx)
+    return value
+
+
+def _run_scoped_block_gen(body, scope: "Scope"):
+    """The generator-driven twin of run_scoped_block - same defer/
+    exit-reason logic (see run_scoped_block's own docstring), just around a
+    `yield from _eval_block_gen(...)` instead of a native `eval_block(...)`
+    call, so a call anywhere inside `body` (including inside a nested
+    if/while/for/do - see _eval_stmt_impl_gen) can still suspend up to
+    _run_driver instead of recursing."""
+    try:
+        value = yield from _eval_block_gen(body, scope)
+    except ReturnSignal as ret:
+        if scope.defers:
+            _run_defers(scope, wyrm_builtins.is_error(ret.value))
+        raise
+    except (BreakSignal, ContinueSignal):
+        if scope.defers:
+            _run_defers(scope, False)
+        raise
+    except BaseException:
+        if scope.defers:
+            _run_defers(scope, True)
+        raise
+    else:
+        if scope.defers:
+            _run_defers(scope, False)
+        return value
+
+
+def _build_call_activation(node, local_ctx: dict, positional, kwargs, display_name: str) -> _CallActivation:
+    """Builds one _run_driver stack entry for running `node`'s (a FnDef or
+    Lambda) body in `local_ctx` - binds params (may raise - e.g. wrong
+    argument count - *before* any Frame is pushed, so a failed call never
+    shows up in the debugger's stack), pushes a debugger Frame, and primes
+    the call body's _run_scoped_block_gen generator (not run yet -
+    _run_driver's own loop does that)."""
+    _bind_params(node, local_ctx, positional, kwargs, display_name)
+    pushed_frame = _call_stack is not None
+    if pushed_frame:
+        _call_stack.append(Frame(display_name, local_ctx))
+    return _CallActivation(_run_scoped_block_gen(node.body, local_ctx), pushed_frame)
+
+
+def _make_call_activation(fn: Function, positional, kwargs) -> _CallActivation:
+    """_build_call_activation for a plain Call to a Function - see
+    call_function."""
+    return _build_call_activation(fn.node, fn.closure.child(), positional, kwargs, fn.name or "<lambda>")
+
+
+def _make_overload_activation(overload: MethodOverload, receivers: list, positional, kwargs) -> _CallActivation:
+    """_build_call_activation for an ordinary (FnDef-backed, not
+    NativeBody/CoDef) message overload - the same `this`/slot seeding
+    call_overload's own non-trampolined branch does, see call_overload."""
+    this_value = receivers[0] if len(receivers) == 1 else tuple(receivers)
+    local_ctx = overload.closure.child()
+    if len(receivers) == 1 and isinstance(receivers[0], ClassInstance):
+        local_ctx.update(receivers[0].attrs)
+    bind_new("this", this_value, local_ctx)
+    return _build_call_activation(overload.node, local_ctx, positional, kwargs, overload.node.name)
+
+
+def _instantiate_gen(cls: "Class", positional, kwargs):
+    """The generator-driven twin of instantiate - identical in every way
+    (see instantiate's own docstring for the full RAII/ERROR_CLASS
+    behaviour) except the init-overload call, if any, is a _TailCall
+    (handled by _run_driver, same as any other call - see _TailCall)
+    instead of a native call_overload - so a constructor that recursively
+    builds more instances, anywhere in `init`'s body (`return
+    counter(n - 1)`, `counter(n - 1).total + 1`, ...) is trampolined
+    instead of growing the Python stack once per level."""
+    if cls is ERROR_CLASS:
+        if kwargs or len(positional) != 1:
+            raise TypeError("error(...) takes exactly one positional argument (the message)")
+        return wyrm_builtins.error(positional[0])
+
+    all_slots = cls.all_slots()
+    all_signals = cls.all_signals()
+    clash = all_slots.keys() & all_signals.keys()
+    if clash:
+        # Both live in the same instance.attrs namespace (see SignalValue's
+        # docstring) - unlike a slot and a message, which occupy genuinely
+        # separate tables (message_table vs. attrs) and can share a name on
+        # purpose, a slot and a signal of the same name would otherwise
+        # silently clobber each other here (whichever loop below runs
+        # last wins), own or inherited either way.
+        raise TypeError(
+            f"{cls.name!r}: {', '.join(sorted(clash))!r} names both a slot and a "
+            "signal - they share one instance namespace, so pick different names"
+        )
+
+    inst = ClassInstance(cls)
+    for slot_name, (slot_def, owner) in all_slots.items():
+        if slot_def.default is not None:
+            value = eval_expr(slot_def.default, owner.closure)
+        else:
+            value = _zero_value(slot_def.type)
+        inst.attrs[slot_name] = Variable(value)
+    for signal_name in all_signals:
+        # Each instance gets its own subscriber list - a signal isn't
+        # shared class-wide state any more than a slot's value is (see
+        # SignalValue).
+        inst.attrs[signal_name] = Variable(SignalValue(signal_name))
+
+    method = _lookup_dunder(cls, "init")
+    overload = _try_resolve_overload(method, [inst]) if method is not None else None
+    if overload is not None:
+        result = yield _TailCall(lambda: _make_overload_activation(overload, [inst], positional, kwargs))
+        if wyrm_builtins.is_error(result):
+            return result
+        return inst
+    if positional or kwargs:
+        raise TypeError(f"{cls.name}(...) takes no arguments (no applicable 'init')")
+    return inst
+
+
+def _make_instantiate_activation(cls: "Class", positional, kwargs) -> _CallActivation:
+    """_instantiate_gen wrapped as a _run_driver activation - never pushes
+    its own debugger Frame (see _CallActivation's docstring)."""
+    return _CallActivation(_instantiate_gen(cls, positional, kwargs), False)
+
+
+def _run_driver(build_initial):
+    """Runs one Function call, message send, or class instantiation to
+    completion without native Python recursion for any further such calls
+    reachable from it anywhere in its body's statements/expressions (see
+    _eval_expr_gen) - the trampoline call_function, call_overload, and
+    instantiate all run through instead of recursing natively. `build_initial` is
+    a zero-argument callable answering the first _CallActivation to run
+    (_make_call_activation, _make_overload_activation, or
+    _make_instantiate_activation) - deferred, like every _TailCall's own
+    `build`, so a params-binding failure on the very first call is raised
+    here rather than by the caller before this function is even entered,
+    keeping every call site (call_function, call_overload, instantiate) and
+    every nested _TailCall handled identically.
+
+    Maintains its own explicit stack of _CallActivation objects
+    (heap-bounded, not C-stack-bounded); each activation is a suspended
+    _run_scoped_block_gen generator for one call's body. A _TailCall
+    yielded by the top activation pushes a new one instead of recursing; an
+    activation finishing (StopIteration, i.e. its body ran off the end, or
+    a ReturnSignal, i.e. an explicit `return`) pops it and feeds its value
+    into the new top via .send(); an activation raising any other
+    exception pops it and re-raises that same exception *into* the new top
+    via .throw(), at the exact point it yielded the _TailCall - so it's
+    seen there exactly as if the original, native recursive call had
+    raised it directly (defers still run via _run_scoped_block_gen's own
+    try/except, and the debugger's exception hook still fires exactly
+    once, at the innermost sighting - see _eval_stmt_gen)."""
+    stack = [build_initial()]
+    send_value = None
+    throw_exc = None
+    while stack:
+        top = stack[-1]
+        try:
+            if throw_exc is not None:
+                exc, throw_exc = throw_exc, None
+                step = top.gen.throw(exc)
+            else:
+                value, send_value = send_value, None
+                step = top.gen.send(value)
+        except StopIteration as stop:
+            result = stop.value
+        except ReturnSignal as ret:
+            result = ret.value
+        except BaseException as exc:
+            if top.pushed_frame:
+                _call_stack.pop()
+            stack.pop()
+            if not stack:
+                raise
+            throw_exc = exc
+            continue
+        else:
+            # step is the _TailCall the top activation just yielded - start
+            # the callee's own activation. If building it (binding params)
+            # fails, or the explicit stack has grown past _MAX_DRIVER_DEPTH
+            # (see its docstring), that failure belongs to the *caller*
+            # (deliver it back at the yield point, same as a native call
+            # raising there would), not to this driver call directly.
+            try:
+                if len(stack) >= _MAX_DRIVER_DEPTH:
+                    raise RecursionError(
+                        f"wyrm-level call depth exceeded {_MAX_DRIVER_DEPTH} "
+                        "(likely infinite recursion)"
+                    )
+                activation = step.build()
+            except BaseException as exc:
+                throw_exc = exc
+                continue
+            stack.append(activation)
+            continue
+        if top.pushed_frame:
             _call_stack.pop()
+        stack.pop()
+        if not stack:
+            return result
+        send_value = result
+    raise AssertionError("unreachable")  # pragma: no cover
 
 
 def call_function(fn: Function, positional, kwargs):
-    local_ctx = fn.closure.child()
-    return _bind_params_and_run(fn.node, local_ctx, positional, kwargs, fn.name or "<lambda>")
+    return _run_driver(lambda: _make_call_activation(fn, positional, kwargs))
 
 
 def call_overload(overload: MethodOverload, receivers: list, positional, kwargs):
@@ -1107,7 +2431,13 @@ def call_overload(overload: MethodOverload, receivers: list, positional, kwargs)
     ClassInstance receiver, its slot Variables are also seeded directly
     into local scope, so the body can read/write them by bare name (e.g.
     `radius`) as well as via `this.radius` - see doc/language-spec.md's
-    "slot name directly accesses the internal storage"."""
+    "slot name directly accesses the internal storage". An ordinary
+    FnDef-backed overload (not NativeBody/CoDef, neither of which run a
+    body of further Wyrm statements) goes through the same _run_driver
+    trampoline call_function uses - this is also what makes a decorator
+    invocation (expand_decorated's send_message call) and any other
+    send_message/dispatch_message caller trampolined for free, with no
+    changes needed there: they all fall through to this one function."""
     this_value = receivers[0] if len(receivers) == 1 else tuple(receivers)
     if isinstance(overload.node, NativeBody):
         return overload.node.fn(this_value, *positional, **kwargs)
@@ -1117,14 +2447,23 @@ def call_overload(overload: MethodOverload, receivers: list, positional, kwargs)
         # running a body, exactly like calling a bare `co` does (see
         # instantiate_coroutine/call_value's Coroutine branch).
         return instantiate_coroutine(overload.node, overload.closure, positional, kwargs, this_value)
-    local_ctx = overload.closure.child()
-    if len(receivers) == 1 and isinstance(receivers[0], ClassInstance):
-        local_ctx.update(receivers[0].attrs)
-    bind_new("this", this_value, local_ctx)
-    return _bind_params_and_run(overload.node, local_ctx, positional, kwargs, overload.node.name)
+    return _run_driver(lambda: _make_overload_activation(overload, receivers, positional, kwargs))
 
 
 def call_value(func, positional, kwargs):
+    # `callable(func)` first, ahead of the Class/Function/Coroutine/
+    # BoundMessage isinstance checks below: measured on a self-hosted-parser
+    # workload, >97% of calls reaching this function (through corelib
+    # combinator code built on plain pair-list primitives - car/cdr/cons/
+    # length/reverse/...) are a bare Python callable exposed via
+    # expose()/bind_new, arriving here only because _expr_call/eval_expr's
+    # Call case already special-cases ContextualBuiltin/Function/Class
+    # before ever falling through to call_value. None of
+    # Class/Function/Coroutine/BoundMessage/PrimitiveType define __call__,
+    # so this reordering can't misroute any of them - callable() is simply
+    # False for all of them, same as before.
+    if callable(func):
+        return func(*positional, **kwargs)
     if isinstance(func, Class):
         return instantiate(func, positional, kwargs)
     if isinstance(func, Function):
@@ -1137,8 +2476,6 @@ def call_value(func, positional, kwargs):
         if kwargs or len(positional) != 1:
             raise TypeError(f"{func.name}() takes exactly one positional argument")
         return func.cast(positional[0])
-    if callable(func):
-        return func(*positional, **kwargs)
     raise TypeError(f"{func!r} is not callable")
 
 
@@ -1213,6 +2550,42 @@ def _try_resolve_overload(method: "Method", receivers: list) -> "MethodOverload 
         return None
 
 
+def _dispatch_remote_message(receiver, name: str, args_node, ctx: dict):
+    """`remote ! name(...)` for a `wyrm_remote.RemoteModule` receiver - a
+    blocking IPC round trip (see RemoteModule.call), not a local overload
+    resolution, so this bypasses dispatch_message/_resolve_message
+    entirely rather than trying to make a remote call look like one more
+    MethodOverload kind. No no-parens `remote ! name` form yet (there's no
+    local overload to return as a BoundMessage) - a known gap, not a
+    silent one.
+
+    When this is reached from inside a `task expr` on the current thread
+    (see _current_task_future/ast.TaskSpawn), the call goes asynchronous:
+    a plain background thread does the actual blocking round trip and
+    resolves the in-flight Future with its result (or failure) instead of
+    this thread blocking - the *only* thing that thread does. Outside a
+    `task`, this is exactly the synchronous call Phase 4 always was."""
+    if args_node is None:
+        raise NotImplementedError(
+            f"'{receiver.name} ! {name}' (no parens) isn't supported for a "
+            f"remote module yet - call it with parens: remote ! {name}(...)"
+        )
+    positional, kwargs = eval_args(args_node, ctx)
+    future = _current_task_future()
+    if future is not None:
+        def _resolve_in_background():
+            try:
+                result = receiver.call(name, positional, kwargs)
+            except Exception as exc:
+                future.fail_with(exc)
+            else:
+                future.resolve_with(result)
+
+        threading.Thread(target=_resolve_in_background, daemon=True).start()
+        return None
+    return receiver.call(name, positional, kwargs)
+
+
 def dispatch_message(name: str, receivers: list, args_node, ctx: dict):
     """Shared by `recv ! name(...)`, `recv ! name`, and `(a, b) ! name(...)`:
     looks up the generic function in the message namespace (message_table -
@@ -1228,9 +2601,23 @@ def dispatch_message(name: str, receivers: list, args_node, ctx: dict):
 
 
 def _resolve_message(name: str, receivers: list, ctx: dict) -> MethodOverload:
-    method = message_table(ctx).get(name)
-    if method is None:
-        raise NameError(f"no message named {name!r}")
+    """Looks `name` up in whichever message table actually owns it: a
+    single `Module` receiver (`mod ! name(...)`) resolves against *that
+    module's own* message_table (module_ctx), not the sender's - a
+    module's `fn []`/`signal` declarations are addressed by which module
+    defines them, not multi-dispatched across every importer's shared
+    namespace the way class methods are. Anything else (a ClassInstance,
+    or no receiver at all) resolves against the sender's own message_table
+    as before - unchanged."""
+    if len(receivers) == 1 and isinstance(receivers[0], Module):
+        mod = receivers[0]
+        method = message_table(mod.ctx).get(name)
+        if method is None:
+            raise NameError(f"module {mod.name!r} has no message named {name!r}")
+    else:
+        method = message_table(ctx).get(name)
+        if method is None:
+            raise NameError(f"no message named {name!r}")
     return resolve_overload(method, receivers)
 
 
@@ -1293,8 +2680,87 @@ def sexpr_value(ctx: dict, value):
     if isinstance(value, ClassInstance) and has_message_for("__sexpr", [value], ctx):
         return send_message("__sexpr", [value], [], {}, ctx)
     if is_tree_box(value):
-        return sexpr.encode(lookup(_TREE_SLOT, value.attrs))
+        return sexpr.encode(_fully_expanded(lookup(_TREE_SLOT, value.attrs), ctx))
     return value
+
+
+def _fully_expanded(node, ctx: dict):
+    """`node`, run through expand_decorated until it is no longer an
+    unexpanded `Decorated` - what `sexpr()` and `macroexpand()` both answer,
+    so a decorator that doesn't care about outside-in visibility can just
+    call `sexpr(this)` and get the same fully-resolved tree this interpreter
+    always handed decorators before the outside-in model."""
+    while isinstance(node, ast.Decorated):
+        node = expand_decorated(node, ctx, as_statement=_decorated_is_statement(node))
+    return node
+
+
+def str_value(ctx: dict, value):
+    """`str(value)` - the bare rendering (see wyrm_builtins._to_str), except
+    a class instance that answers `__str__` controls its own rendering
+    first: `str(elem)` becomes `elem ! __str__()`, falling back to the
+    built-in bare rendering for anything else - same "ask first, only the
+    class's own answer is final" shape as sexpr_value's `__sexpr` hook."""
+    if isinstance(value, ClassInstance) and has_message_for("__str__", [value], ctx):
+        return send_message("__str__", [value], [], {}, ctx)
+    return wyrm_builtins._to_str(value)
+
+
+def macroexpand_value(ctx: dict, value):
+    """`macroexpand(tree)` - if `tree` (a TreeBase box) holds an unexpanded
+    decorator application, runs it (and keeps running while the answer is
+    still one), answering the boxed, fully-expanded tree; anything else
+    passes through unchanged. Mirrors Common Lisp's `macroexpand`, and is
+    what an outer decorator calls to explicitly pull in an inner one it was
+    handed raw (see expand_decorated) instead of leaving it unexpanded."""
+    if not is_tree_box(value):
+        raise TypeError(f"macroexpand() expects a tree (got {type(value).__name__})")
+    node = lookup(_TREE_SLOT, value.attrs)
+    return tree_box(_fully_expanded(node, ctx))
+
+
+def expand_decorators(program: ast.Program, ctx: dict) -> ast.Program:
+    """`program`, with every `Decorated` node it contains - at any depth,
+    statement or expression position - replaced by what it fully expands to
+    (see expand_decorated). This is wys.py's "decorators run at compile
+    time" pass: a file it writes must carry no `'decorator`/`'decorated`
+    node, since it's meant to be readable by a host with no decorator
+    machinery at all.
+
+    A top-level `import`/`from-import` is executed for real, in the order it
+    appears, so a `static` decorator module has actually run - and its
+    messages are reachable - by the time a decorator after it expands,
+    exactly as running the program normally would arrange (see
+    expand_decorated's NameError case). Nothing else at the top level, or
+    nested within it, is executed - only walked, looking for `Decorated`
+    nodes to expand - so a decorator inside a function body that's never
+    called this way still expands (unlike the interpreter's own lazy,
+    first-call expansion), while the function's own side effects don't run
+    at compile time. `ctx` should already have whatever populate_globals
+    provides."""
+    for i, stmt in enumerate(program.body):
+        if isinstance(stmt, (ast.Import, ast.FromImport)):
+            eval_stmt(stmt, ctx)
+        else:
+            program.body[i] = _expand_decorators_in(stmt, ctx)
+    return program
+
+
+def _expand_decorators_in(node, ctx: dict):
+    if isinstance(node, ast.Decorated):
+        return _expand_decorators_in(_fully_expanded(node, ctx), ctx)
+    if isinstance(node, ast.Node):
+        for f in _dc_fields(node):
+            if ast._is_pos_field(f.name):
+                continue
+            value = getattr(node, f.name)
+            if isinstance(value, ast.Node):
+                setattr(node, f.name, _expand_decorators_in(value, ctx))
+            elif isinstance(value, list):
+                for i, item in enumerate(value):
+                    if isinstance(item, ast.Node):
+                        value[i] = _expand_decorators_in(item, ctx)
+    return node
 
 
 def register_native_method(name: str, fn, ctx: dict, arity: int = 1) -> None:
@@ -1439,6 +2905,18 @@ _STATEMENT_NODES = (
 )
 
 
+def _decorated_is_statement(node: ast.Decorated) -> bool:
+    """Whether `node` sits in statement position, judged from the shape of
+    its innermost (peeling through any further unexpanded `Decorated`
+    layers) `inner` - the same thing a node's position in the parsed tree
+    already fixes, so this just reads it back off the tree rather than
+    tracking it separately."""
+    inner = node.inner
+    while isinstance(inner, ast.Decorated):
+        inner = inner.inner
+    return isinstance(inner, _STATEMENT_NODES)
+
+
 def expand_decorated(node: ast.Decorated, ctx: dict, as_statement: bool):
     """`@dec(args) X` -> the tree that gets evaluated in X's place.
 
@@ -1449,9 +2927,14 @@ def expand_decorated(node: ast.Decorated, ctx: dict, as_statement: bool):
     call. What the decorator answers is therefore fixed for the life of the
     parsed tree, exactly as a compile-time rewrite would be.
 
-    Nesting resolves innermost first - `@a @b X` is `@a (@b X)` - so the
-    outer decorator is handed whatever the inner one answered, not the
-    original tree.
+    Nesting is outside-in, like Common Lisp macroexpansion: `@a @b X` hands
+    `a` the *raw*, unexpanded `Decorated(b, X)` as `this` - `a` never sees
+    `b`'s answer unless it asks for it (via the `macroexpand()` builtin,
+    which runs exactly this function). This is what lets an outer decorator
+    inspect, rewrite, duplicate or discard an inner decorator application
+    instead of always receiving an already-resolved tree; the common case of
+    "just give me the resolved tree" is `sexpr(this)`, which auto-expands
+    any `Decorated` it finds on the way to encoding (see sexpr_value).
 
     The decorator itself is an ordinary message send on the boxed tree, so
     dispatch, multiple dispatch and native messages all behave exactly as
@@ -1464,8 +2947,6 @@ def expand_decorated(node: ast.Decorated, ctx: dict, as_statement: bool):
 
     decorator = node.decorator
     inner = node.inner
-    if isinstance(inner, ast.Decorated):
-        inner = expand_decorated(inner, ctx, as_statement)
 
     try:
         positional, kwargs = eval_args(decorator.args, ctx)
@@ -1483,7 +2964,13 @@ def expand_decorated(node: ast.Decorated, ctx: dict, as_statement: bool):
             f"{exc} (a decorator must be reachable through `import static`)",
         ) from None
 
-    if isinstance(result, _STATEMENT_NODES):
+    # A result that is itself an unexpanded `Decorated` (a decorator that
+    # answered another decorator application rather than resolving it) is
+    # neither statement nor expression yet - eval_stmt/eval_expr expand it
+    # the next time they reach it, same as any other `Decorated` node.
+    if isinstance(result, ast.Decorated):
+        pass
+    elif isinstance(result, _STATEMENT_NODES):
         if not as_statement:
             raise _decorator_error(
                 decorator,
@@ -1538,30 +3025,15 @@ def instantiate(cls: Class, positional, kwargs) -> "ClassInstance | WyrmError":
     doc/language-spec.md's "Errors / RAII" example).
 
     ERROR_CLASS is special-cased: it has no `init` (it's a builtin, not
-    wyrm-defined), so `error("msg")` is handled directly here instead."""
-    if cls is ERROR_CLASS:
-        if kwargs or len(positional) != 1:
-            raise TypeError("error(...) takes exactly one positional argument (the message)")
-        return wyrm_builtins.error(positional[0])
+    wyrm-defined), so `error("msg")` is handled directly here instead.
 
-    inst = ClassInstance(cls)
-    for slot_name, (slot_def, owner) in cls.all_slots().items():
-        if slot_def.default is not None:
-            value = eval_expr(slot_def.default, owner.closure)
-        else:
-            value = _zero_value(slot_def.type)
-        inst.attrs[slot_name] = Variable(value)
-
-    method = _lookup_dunder(cls, "init")
-    overload = _try_resolve_overload(method, [inst]) if method is not None else None
-    if overload is not None:
-        result = call_overload(overload, [inst], positional, kwargs)
-        if wyrm_builtins.is_error(result):
-            return result
-        return inst
-    if positional or kwargs:
-        raise TypeError(f"{cls.name}(...) takes no arguments (no applicable 'init')")
-    return inst
+    Runs through _run_driver/_instantiate_gen (the same trampoline
+    call_function/call_overload use) rather than doing the work inline, so
+    a constructor that recursively builds more instances anywhere in
+    `init`'s body - `return counter(n - 1)`, `counter(n - 1).total + 1`,
+    ... - is trampolined exactly like any other call instead of growing
+    the Python stack once per level."""
+    return _run_driver(lambda: _make_instantiate_activation(cls, positional, kwargs))
 
 
 def _lookup_dunder(cls: Class, name: str) -> "Method | None":
@@ -1690,12 +3162,12 @@ def _eval_if(node: "ast.If", ctx: dict) -> "object":
     collides with a redeclare error against) another branch or the
     enclosing scope - see doc/language-spec.md's Variables section."""
     if eval_expr(node.cond, ctx):
-        return run_scoped_block(node.body, ctx.child())
+        return _run_block(node.body, ctx)
     for clause in node.elifs:
         if eval_expr(clause.cond, ctx):
-            return run_scoped_block(clause.body, ctx.child())
+            return _run_block(clause.body, ctx)
     if node.orelse is not None:
-        return run_scoped_block(node.orelse, ctx.child())
+        return _run_block(node.orelse, ctx)
     return None
 
 
@@ -1762,7 +3234,7 @@ def eval_expr(node, ctx: dict):
         # an expression: its value is that of the last statement executed
         # in its body (run_scoped_block also arms any `defer`s registered
         # directly in it) - see doc/language-spec.md's "do" section.
-        return run_scoped_block(node.body, ctx.child())
+        return _run_block(node.body, ctx)
     if isinstance(node, ast.If):
         # `if` used as an expression (e.g. `a := if check { 3 } else { 4 }`)
         # - same node, and same value rule, as the if_stmt case in
@@ -1842,13 +3314,30 @@ def eval_expr(node, ctx: dict):
             return obj._result
         if isinstance(obj, ClassInstance):
             return lookup(node.name, obj.attrs)
+        from wypoc.wyrm_remote import RemoteModule
+        if isinstance(obj, RemoteModule):
+            return obj.signal(node.name)
         raise NotImplementedError(f"'.' is only supported on class instances right now (got {type(obj).__name__})")
     if isinstance(node, ast.Message):
         receiver = eval_expr(node.obj, ctx)
+        from wypoc.wyrm_remote import RemoteModule
+        if isinstance(receiver, RemoteModule):
+            return _dispatch_remote_message(receiver, node.name, node.args, ctx)
         return dispatch_message(node.name, [receiver], node.args, ctx)
     if isinstance(node, ast.MessageTupleExpr):
         receivers = [eval_expr(e, ctx) for e in node.items]
         return dispatch_message(node.name, receivers, node.args, ctx)
+    if isinstance(node, ast.ThreadSpawn):
+        from wypoc.wyrm_remote import spawn_module_process
+        return spawn_module_process(node.path)
+    if isinstance(node, ast.TaskSpawn):
+        future = Future()
+        _push_task_future(future)
+        try:
+            eval_expr(node.expr, ctx)
+        finally:
+            _pop_task_future()
+        return future
     if isinstance(node, ast.ThisRef):
         return lookup("this", ctx)
     if isinstance(node, ast.Defined):
@@ -1914,29 +3403,37 @@ def eval_stmt(stmt, ctx: dict) -> "object":
     breakpoint/step hook and its exception-stack capture attach (both
     `None`, and both checked before use, when nothing is debugging - see
     the `_call_stack`/`_stmt_hook`/`_exception_hook` globals near the top of
-    this module). The statement itself is dispatched by `_eval_stmt_impl`,
-    below."""
+    this module), and also where a raw exception gets tagged with its wyrm
+    source location (see WyrmLocatedError/_locate_exc above) regardless of
+    whether a debugger is attached. The statement itself is dispatched by
+    `_eval_stmt_impl`, below."""
     if _stmt_hook is not None:
         _stmt_hook(stmt, ctx)
-    if _call_stack is None:
-        return _eval_stmt_impl(stmt, ctx)
+    global _last_captured_exc
     try:
         return _eval_stmt_impl(stmt, ctx)
     except (ReturnSignal, BreakSignal, ContinueSignal):
         # Ordinary control flow (every `return`/`break`/`continue` is one
-        # of these), not an error - nothing for a debugger to report.
+        # of these), not an error - nothing for a debugger to report, and
+        # nothing to tag with a location either.
         raise
     except BaseException as exc:
         # Only the *first* eval_stmt frame to see a given exception object
         # captures it - by the time it's re-raised through an outer
         # eval_stmt, _call_stack has already been popped back by the
-        # enclosing call's `finally` (see _bind_params_and_run), so only
-        # the innermost sighting still has the full stack to snapshot.
-        global _last_captured_exc
-        if _exception_hook is not None and exc is not _last_captured_exc:
-            _last_captured_exc = exc
+        # enclosing call's Frame teardown (_run_driver's pop, or a
+        # trampolined call's own _eval_stmt_gen - see its docstring), so
+        # only the innermost sighting still has the full stack to snapshot
+        # (or, for _locate_exc below, the innermost/most precise pos).
+        if exc is _last_captured_exc:
+            raise
+        if _exception_hook is not None and _call_stack is not None:
             _exception_hook(exc, list(_call_stack), stmt.pos)
-        raise
+        located = _locate_exc(stmt, exc)
+        _last_captured_exc = located
+        if located is exc:
+            raise
+        raise located from exc
 
 
 def _eval_stmt_impl(stmt, ctx: dict) -> "object":
@@ -2064,7 +3561,7 @@ def _eval_stmt_impl(stmt, ctx: dict) -> "object":
         # (see run_scoped_block).
         while eval_expr(stmt.cond, ctx):
             try:
-                run_scoped_block(stmt.body, ctx.child())
+                _run_block(stmt.body, ctx)
             except ContinueSignal:
                 continue
             except BreakSignal:
@@ -2118,10 +3615,29 @@ def _eval_stmt_impl(stmt, ctx: dict) -> "object":
             cell.immutable = True
         return
     if isinstance(stmt, ast.FnDef):
-        signature = None if stmt.class_target is None else tuple(
-            _lookup_class(n, ctx) for n in stmt.class_target
-        )
+        if stmt.class_target is None:
+            signature = None
+        elif stmt.class_target == []:
+            # `fn [] name(...)` - explicitly the wildcard/"empty type"
+            # overload register_overload's own docstring describes (the one
+            # a bare `fn` only gets *promoted* to implicitly) - a module
+            # message handler, reachable as `mod ! name(...)` from outside
+            # (see _resolve_message's Module branch) without being tied to
+            # any class the way `fn [SomeClass] name(...)` is.
+            signature = (None,)
+        else:
+            signature = tuple(_lookup_class(n, ctx) for n in stmt.class_target)
         register_overload(stmt.name, signature, stmt, ctx, ctx)
+        return
+    if isinstance(stmt, ast.SignalDef):
+        # Module-scope counterpart of a class's per-instance signal (see
+        # SignalValue, _instantiate_gen) - one shared SignalValue for the
+        # whole module rather than one per instance, since a module is
+        # already a singleton. `emit`/`connect`/`disconnect` need no
+        # changes: both already work against any SignalValue wherever it's
+        # bound (see ast.Emit below and register_native_method's wildcard
+        # "connect"/"disconnect" registration).
+        bind_new(stmt.name, SignalValue(stmt.name), ctx)
         return
     if isinstance(stmt, ast.CoDef):
         # A tagged `co [Cls, ...] name(...)` is a message like a tagged
@@ -2149,6 +3665,18 @@ def _eval_stmt_impl(stmt, ctx: dict) -> "object":
         for co_name, co_node in cls.coroutines.items():
             register_overload(co_name, (cls,), co_node, cls.closure, ctx)
         return
+    if isinstance(stmt, ast.Emit):
+        sig = lookup(stmt.name, ctx)
+        if not isinstance(sig, SignalValue):
+            raise TypeError(f"emit {stmt.name!r}: not a signal (got {type(sig).__name__})")
+        positional, kwargs = eval_args(stmt.args, ctx)
+        # A snapshot, not the live list: a subscriber that connects or
+        # disconnects itself (or another callback) mid-emit shouldn't change
+        # who this particular emit reaches - the same "who was subscribed
+        # when it fired" guarantee Qt's own signals give.
+        for callback in list(sig.subscribers):
+            call_value(callback, positional, kwargs)
+        return
     raise NotImplementedError(f"cannot evaluate statement {type(stmt).__name__}")
 
 
@@ -2163,6 +3691,13 @@ def eval_block(stmts, ctx: dict) -> "object":
     for stmt in stmts:
         value = eval_stmt(stmt, ctx)
     return value
+
+
+def _run_block(body, ctx: dict):
+    """The native twin of _run_block_gen - see its docstring."""
+    if _body_needs_scope(body):
+        return run_scoped_block(body, ctx.child())
+    return eval_block(body, ctx)
 
 
 def _run_defers(scope: "Scope", is_error_exit: bool) -> None:

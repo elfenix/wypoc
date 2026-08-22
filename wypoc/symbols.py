@@ -56,6 +56,7 @@ COROUTINE = "coroutine"
 METHOD = "method"
 CLASS = "class"
 SLOT = "slot"
+SIGNAL = "signal"
 VARIABLE = "variable"
 CONSTANT = "constant"
 PARAM = "param"
@@ -229,6 +230,10 @@ def _render_slot(node: ast.SlotDef) -> str:
     return text
 
 
+def _render_signal(node: ast.SignalDef) -> str:
+    return f"signal {node.name}({', '.join(_render_param(p) for p in node.params)})"
+
+
 def _render_import(node: ast.Import) -> str:
     text = "import " + "::".join(node.path)
     if node.wildcard:
@@ -275,6 +280,12 @@ class _Builder:
                 detail=_render_slot(node), container=container))
             self.visit_expr(node.default, parent, container)
             self.reference_type(node.type)
+        elif isinstance(node, ast.SignalDef):
+            self.add(parent, Symbol(
+                node.name, SIGNAL, node.name_pos, node.pos, node,
+                detail=_render_signal(node), container=container))
+            for p in node.params:
+                self.reference_type(p.type)
         elif isinstance(node, ast.VarDecl):
             for target in node.targets:
                 detail = f"var {target.name}"
@@ -452,7 +463,7 @@ class _Builder:
         elif isinstance(node, (ast.FnDef, ast.CoDef, ast.ClassDef, ast.VarDecl,
                                ast.StaticDecl, ast.For, ast.Import, ast.FromImport,
                                ast.WithSimple, ast.WithBinding, ast.WithBlock,
-                               ast.SlotDef)):
+                               ast.SlotDef, ast.SignalDef)):
             # A declaration reached through a nested block (an `if` body,
             # a `do:` expression) - hand it back to the statement path so
             # it's recorded as a declaration rather than walked over.

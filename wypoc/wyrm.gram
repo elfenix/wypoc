@@ -10,11 +10,13 @@ from wypoc.ast_nodes import (
     AttrTarget, Assign, VarTarget, VarDecl, StaticDecl, TypeExpr, WithSimple,
     WithBinding, WithBlock, Import, ImportItem, FromImport, Param,
     VarPositional, VarKeyword, FnDef, CoDef, ClassDef, SlotOption, SlotDef,
+    SignalDef, Emit,
     Num, Str, Char, Bool, Symbol, EllipsisExpr, Name, AstRef, ThisRef,
     SuperCall, Defined,
     Lambda, Do, Array, Pair, Tuple, DictEntry, Dict, MessageTupleExpr,
     Kwarg, SpreadPos, SpreadKw, UnaryOp, BinOp, SetIfUnset, Call, Index,
     Attr, Message, Scope, Defer, Try, Catch, TypeCheck, Decorator, Decorated,
+    ThreadSpawn, TaskSpawn,
 )
 """
 
@@ -143,6 +145,8 @@ simple_stmt[object]:
     | import_stmt
     | return_stmt
     | yield_stmt
+    | emit_stmt
+    | signal_def
     | pass_stmt
     | continue_stmt
     | break_stmt
@@ -198,6 +202,16 @@ yield_stmt[object]:
     | 'yield' 'from' e=expression { Yield(e, True, LOCATIONS) }
     | 'yield' e=expression { Yield(e, LOCATIONS) }
     | 'yield' { Yield(None, LOCATIONS) }
+
+# ---- signals -------------------------------------------------------------
+# `emit name(args...)`: `name` is looked up exactly like a bare slot
+# reference (see ast_nodes.Emit) - a call-shaped statement, not an
+# expression, so it can't be nested (`x := emit foo()` is a syntax error,
+# matching how `emit` reads as a statement-only keyword in the grammar
+# review this followed).
+
+emit_stmt[object]:
+    | 'emit' n=NAME "(" args=arg_list? ")" { Emit(n.string, args or [], name_pos=tok_pos(n), LOCATIONS) }
 
 # ---- if statement ------------------------------------------------------
 
@@ -396,14 +410,27 @@ name_list[object]:
 
 fn_def[object]:
     | 'fn' cls=class_target n=NAME "(" params=param_list? ")" ret=("->" ann_type)? body=block {
-          FnDef(names(cls), n.string, params or [], ret[1] if ret else None, body,
-                class_target_pos=spans(cls), name_pos=tok_pos(n), LOCATIONS) }
+          FnDef(names(cls[0]), n.string, params or [], ret[1] if ret else None, body,
+                class_target_pos=spans(cls[0]), name_pos=tok_pos(n), LOCATIONS) }
     | 'fn' n=NAME "(" params=param_list? ")" ret=("->" ann_type)? body=block {
           FnDef(None, n.string, params or [], ret[1] if ret else None, body,
                 name_pos=tok_pos(n), LOCATIONS) }
 
+# The empty-bracket form, `fn [] name(...)`, produces `class_target=[]` -
+# distinct from the bare `fn name(...)` form's `class_target=None` above.
+# It marks a module-level message handler (dispatched via `mod ! name(...)`
+# rather than tagged to any class) - see eval_stmt/register_overload's
+# handling of an empty (as opposed to absent) class_target.
+#
+# Both alternatives wrap their list in a 1-tuple (never falsy, even for the
+# empty-bracket case) rather than returning it bare - same reason
+# class_block does (see its own comment): pegen's generated code
+# truthiness-checks a required capture, and a plain `[]` result would make
+# the whole alternative look like a failed match. Callers unwrap with
+# `cls[0]`.
 class_target[object]:
-    | "[" first=NAME rest=("," NAME)* "]" { [first] + tail(rest) }
+    | "[" first=NAME rest=("," NAME)* "]" { ([first] + tail(rest),) }
+    | "[" "]" { ([],) }
 
 param_list[object]:
     | first=param rest=("," param)* { [first] + tail(rest) }
@@ -439,9 +466,9 @@ co_params[object]:
 
 co_def[object]:
     | 'co' cls=class_target n=NAME "(" cp=co_params? ")" ret=("->" ann_type)? body=block {
-          CoDef(names(cls), n.string, cp[1] if cp else [], cp[0] if cp else None,
+          CoDef(names(cls[0]), n.string, cp[1] if cp else [], cp[0] if cp else None,
                 ret[1] if ret else None, body,
-                class_target_pos=spans(cls), name_pos=tok_pos(n), LOCATIONS) }
+                class_target_pos=spans(cls[0]), name_pos=tok_pos(n), LOCATIONS) }
     | 'co' n=NAME "(" cp=co_params? ")" ret=("->" ann_type)? body=block {
           CoDef(None, n.string, cp[1] if cp else [], cp[0] if cp else None,
                 ret[1] if ret else None, body, name_pos=tok_pos(n), LOCATIONS) }
@@ -470,6 +497,7 @@ class_member_brace[object]:
     | m=fn_def NEWLINE* { m }
     | m=co_def NEWLINE* { m }
     | m=slot_def NEWLINE* { m }
+    | m=signal_def NEWLINE* { m }
     | m=static_stmt NEWLINE* { m }
 
 class_member_item[object]:
@@ -477,12 +505,24 @@ class_member_item[object]:
     | m=co_def NEWLINE? { m }
     | m=slot_def NEWLINE { m }
     | m=slot_def { m }
+    | m=signal_def NEWLINE { m }
+    | m=signal_def { m }
     | m=static_stmt NEWLINE? { m }
 
 slot_def[object]:
     | 'slot' n=NAME ty=(":" ann_type)? dflt=("=" assign_expr)? opts=('with' slot_options)? {
           SlotDef(n.string, ty[1] if ty else None, dflt[1] if dflt else None,
                   opts[1] if opts else None, name_pos=tok_pos(n), LOCATIONS) }
+
+# `signal name(item: int, item: str)` - same param_list fn_def itself uses
+# (see ast_nodes.SignalDef), documenting a signature nothing enforces at
+# runtime, purely so a reader (or a future compiler backend) knows what
+# `emit name(...)` is expected to pass. Also reachable as a plain
+# `simple_stmt` (see above), so a module's own top level can declare one
+# too - eval_stmt's `ast.SignalDef` case is what makes that meaningful.
+signal_def[object]:
+    | 'signal' n=NAME "(" params=param_list? ")" {
+          SignalDef(n.string, params or [], name_pos=tok_pos(n), LOCATIONS) }
 
 slot_options[object]:
     | ":" NEWLINE INDENT opts=slot_option_list DEDENT { opts }
@@ -604,6 +644,13 @@ unary_expr[object]:
     | "+" e=unary_expr { UnaryOp('pos', e, LOCATIONS) }
     | "~" e=unary_expr { UnaryOp('inv', e, LOCATIONS) }
     | 'not' e=unary_expr { UnaryOp('not', e, LOCATIONS) }
+    # `task expr` - a Future for `expr`'s eventual result (see
+    # wyrm_eval_parse_tree.py's ast.TaskSpawn case and the module-level
+    # task stack it pushes/pops around evaluating `expr`). Only a
+    # `remote ! name(...)` call inside `expr` actually goes asynchronous
+    # (see _dispatch_remote_message) - this is deliberately narrow, not a
+    # general-purpose async mechanism; see that function's docstring.
+    | 'task' e=unary_expr { TaskSpawn(e, LOCATIONS) }
     | power_expr
 
 power_expr[object]:
@@ -672,6 +719,12 @@ primary[object]:
     # `literal` rule (symbols no longer have one of their own - see above)
     # and eval_expr rejects any other literal kind there.
     | 'defined' "(" s=literal ")" { Defined(s, LOCATIONS) }
+    # `thread a::b::c` spawns `a::b::c` fresh on its own OS process (see
+    # wyrm_remote.py) - an expression, not a call, since there's no
+    # existing "launch on a new execution context" call syntax to reuse (a
+    # `co`-defined function is invoked with ordinary call syntax; `thread`
+    # takes a module path instead, the same operand `import` takes).
+    | 'thread' m=module_path { ThreadSpawn(names(m), path_pos=spans(m), LOCATIONS) }
     | lambda_expr
     | do_expr
     | if_expr

@@ -4,6 +4,8 @@ EXPR_HANDLERS. Unlike compiler_c, a call can appear directly in expression
 position with no hoisting needed - `await foo(x)` is itself a valid Python
 expression - so this module is considerably simpler than its C counterpart.
 """
+from typing import Dict
+
 from wypoc import ast_nodes as ast
 
 from . import literals
@@ -207,6 +209,15 @@ def _array(fnctx, node):
     return "[" + ", ".join(compile_expr(fnctx, item) for item in node.items) + "]"
 
 
+@EXPR_HANDLERS.register(ast.Dict)
+def _dict(fnctx, node):
+    entries = ", ".join(
+        f"{compile_expr(fnctx, entry.key)}: {compile_expr(fnctx, entry.value)}"
+        for entry in node.entries
+    )
+    return "{" + entries + "}"
+
+
 @EXPR_HANDLERS.register(ast.Tuple)
 def _tuple(fnctx, node):
     items = [compile_expr(fnctx, item) for item in node.items]
@@ -266,12 +277,36 @@ def _lambda(fnctx, node):
     plain reference to that nested function's name, which an ordinary
     Python closure captures from the enclosing scope with no extra
     plumbing (unlike this backend's class instances, which carry their
-    slots explicitly)."""
+    slots explicitly).
+
+    When the lambda is built inside a while/for loop, "the enclosing
+    scope" includes names that are only a single, reused Python binding
+    across every iteration (see context.FnCtx.loop_scope_floor) - closing
+    over one of those directly would give every lambda built across the
+    loop's iterations the same, Python-late-bound value (whatever that
+    variable holds by the time the lambda is actually called) rather than
+    the value live in the iteration that built it. Wrapping the nested
+    `async def` in a plain sync factory whose parameters default to those
+    names (`def _capture1(wy_i=wy_i): ...`) snapshots them the moment the
+    factory itself runs - once per iteration, exactly when the wyrm-level
+    closure is created - the same trick a human writes by hand for this
+    exact problem in Python."""
     from .context import FnCtx
     from .functions import compile_params
     from .statements import compile_block
 
     name = fnctx.new_tmp("_lambda")
+    captures: Dict[str, str] = {}
+    if fnctx.loop_scope_floor:
+        for scope in fnctx.scopes[fnctx.loop_scope_floor[0]:]:
+            captures.update(scope)
+
+    if captures:
+        factory = fnctx.new_tmp("_capture")
+        params = ", ".join(f"{py_name}={py_name}" for py_name in captures.values())
+        fnctx.emit(f"def {factory}({params}):")
+        fnctx.indent += 1
+
     inner = FnCtx(modctx=fnctx.modctx, this_var=fnctx.this_var,
                   slot_names=fnctx.slot_names, scopes=[fnctx.flat_scope()],
                   indent=fnctx.indent + 1, is_coroutine=fnctx.is_coroutine,
@@ -280,6 +315,13 @@ def _lambda(fnctx, node):
     fnctx.emit(f"async def {name}({param_str}):")
     compile_block(inner, node.body)
     fnctx.lines.extend(inner.lines)
+
+    if captures:
+        fnctx.emit(f"return {name}")
+        fnctx.indent -= 1
+        call = fnctx.new_tmp("_lambda")
+        fnctx.emit(f"{call} = {factory}()")
+        return call
     return name
 
 

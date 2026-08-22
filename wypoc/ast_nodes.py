@@ -54,6 +54,13 @@ def _is_pos_field(name: str) -> bool:
     return name == "pos" or name.endswith("_pos")
 
 
+def _is_hidden_field(name: str) -> bool:
+    """Fields __str__ leaves out - position spans (too noisy) and `doc`
+    (can be many lines of prose, would drown out the tree shape the same
+    way a span would)."""
+    return _is_pos_field(name) or name == "doc"
+
+
 def _fmt(v) -> str:
     if isinstance(v, Node):
         return str(v)
@@ -71,11 +78,27 @@ def _fmt(v) -> str:
 class Node:
     """Base class: gives every dataclass node a recursive, readable __str__."""
 
+    # Every concrete node subclass gets a small, dense int tag, assigned in
+    # class-definition order - a "bytecode value" for the node's own kind.
+    # The evaluator dispatches on `node.TAG` (an O(1) array index) instead
+    # of an `isinstance` chain - see wyrm_eval_parse_tree.py's
+    # _EXPR_SIMPLE_DISPATCH/_EXPR_GEN_DISPATCH. Auto-assigned rather than
+    # hand-numbered so adding/removing/reordering node classes here can
+    # never desync a tag from its class; the numbering is only ever used
+    # within one process's lifetime (never serialized), so it doesn't need
+    # to be stable across runs.
+    _next_tag = 0
+
+    def __init_subclass__(cls, **kwargs):
+        super().__init_subclass__(**kwargs)
+        cls.TAG = Node._next_tag
+        Node._next_tag += 1
+
     def __str__(self) -> str:
         parts = [
             f"{f.name}={_fmt(getattr(self, f.name))}"
             for f in fields(self)
-            if not _is_pos_field(f.name)
+            if not _is_hidden_field(f.name)
         ]
         return f"{type(self).__name__}({', '.join(parts)})"
 
@@ -110,6 +133,7 @@ class Node:
 class Program(Node):
     body: list
     pos: Span = None
+    doc: Optional[str] = None
 
 
 @dataclass
@@ -375,6 +399,31 @@ class FromImport(Node):
     pos: Span = None
 
 
+@dataclass
+class ThreadSpawn(Node):
+    """`thread a::b::c` - spawns `a::b::c` fresh on its own OS process (see
+    wyrm_remote.py), evaluating to a RemoteModule value. Same `path`/
+    `path_pos` shape as Import - `wyrm_modules.resolve_module_file` resolves
+    it, never `import_module`'s cache (a `thread`-spawned module runs in a
+    process of its own, not the caller's)."""
+    path: list
+    path_pos: Optional[list] = None
+    pos: Span = None
+
+
+@dataclass
+class TaskSpawn(Node):
+    """`task expr` - evaluates to a Future for `expr`'s eventual result
+    (see wyrm_eval_parse_tree.py's ast.TaskSpawn case and
+    _dispatch_remote_message). Deliberately narrow: only a
+    `remote ! name(...)` call reached while evaluating `expr` actually
+    goes asynchronous - anything else in `expr` just runs synchronously,
+    with its own return value discarded (the Future is never resolved by
+    it)."""
+    expr: "Expr"
+    pos: Span = None
+
+
 # ---------------------------------------------------------------------
 # Functions / coroutines
 # ---------------------------------------------------------------------
@@ -412,6 +461,7 @@ class FnDef(Node):
     class_target_pos: Optional[list] = None
     name_pos: Span = None
     pos: Span = None
+    doc: Optional[str] = None
 
 
 @dataclass
@@ -425,6 +475,7 @@ class CoDef(Node):
     class_target_pos: Optional[list] = None
     name_pos: Span = None
     pos: Span = None
+    doc: Optional[str] = None
 
 
 # ---------------------------------------------------------------------
@@ -438,6 +489,7 @@ class ClassDef(Node):
     body: list
     name_pos: Span = None
     pos: Span = None
+    doc: Optional[str] = None
 
 
 @dataclass
@@ -453,6 +505,33 @@ class SlotDef(Node):
     type: Optional[TypeExpr]
     default: Optional["Expr"]
     options: Optional[list]
+    name_pos: Span = None
+    pos: Span = None
+
+
+@dataclass
+class SignalDef(Node):
+    """`signal name(item: int, item: str)` - a class member alongside slots
+    (see wyrm.gram's class_member_item/class_member_brace), giving each
+    instance its own subscriber list under that name (see
+    wyrm_eval_parse_tree.Class.all_signals/SignalValue). `params` reuses
+    fn_def's own param_list grammar rule/Param nodes purely as a documented
+    signature - nothing type-checks an `emit` call's arguments against it,
+    the same way an ordinary `fn`'s param types aren't enforced at runtime."""
+    name: str
+    params: list
+    name_pos: Span = None
+    pos: Span = None
+
+
+@dataclass
+class Emit(Node):
+    """`emit name(args...)` - looks `name` up exactly like a bare slot
+    reference (this.name or plain name inside a method body - see
+    wyrm_eval_parse_tree.eval_stmt's Emit case), then synchronously calls
+    every subscriber connected to it."""
+    name: str
+    args: list
     name_pos: Span = None
     pos: Span = None
 

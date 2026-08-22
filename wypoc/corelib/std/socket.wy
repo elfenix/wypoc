@@ -1,0 +1,55 @@
+# Minimal BSD socket primitives, over the __sock_* natives the interpreter
+# exposes (wypoc: wypoc/wyrm_socket.py). IPv4 tcp/udp only, all calls
+# blocking - see that module's own docstring for the full rationale.
+#
+# tcp server:
+#   s := socket::create("tcp")
+#   socket::bind(s, "", 9000)
+#   socket::listen(s, 16)
+#   conn := socket::accept(s)          # [handle, peer_host, peer_port]
+#   data := socket::recv(conn[0], 4096)
+#   socket::send(conn[0], "hello")
+#   socket::close(conn[0])
+#
+# tcp client:
+#   c := socket::create("tcp")
+#   socket::connect(c, "127.0.0.1", 9000)
+#   socket::send(c, "hi")
+#   reply := socket::recv(c, 4096)
+#   socket::close(c)
+#
+# udp:
+#   s := socket::create("udp")
+#   socket::bind(s, "", 9001)
+#   msg := socket::recvfrom(s, 4096)   # [data, from_host, from_port]
+#   socket::sendto(s, "reply", msg[1], msg[2])
+
+fn create(kind) -> int:
+    return __sock_create(kind)
+
+fn bind(handle, host, port):
+    return __sock_bind(handle, host, port)
+
+fn listen(handle, backlog):
+    return __sock_listen(handle, backlog)
+
+fn accept(handle):
+    return __sock_accept(handle)
+
+fn connect(handle, host, port):
+    return __sock_connect(handle, host, port)
+
+fn send(handle, data) -> int:
+    return __sock_send(handle, data)
+
+fn recv(handle, size) -> str:
+    return __sock_recv(handle, size)
+
+fn sendto(handle, data, host, port) -> int:
+    return __sock_sendto(handle, data, host, port)
+
+fn recvfrom(handle, size):
+    return __sock_recvfrom(handle, size)
+
+fn close(handle):
+    return __sock_close(handle)

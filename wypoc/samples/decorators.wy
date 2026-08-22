@@ -190,8 +190,11 @@ println("guarded zero: " + guarded(10, 0))
 
 println("nested fn: " + str(nests()))
 
-# Nesting resolves innermost first, so the outer decorator sees whatever the
-# inner one answered.
+# Nesting is outside-in: @__dump receives @__identity's *un*expanded
+# application raw (a 'decorated node, not a 'fn), and prints it that way.
+# The compiled result is unaffected - __dump answers `this` unchanged, and
+# that answer is fully expanded (via sexpr()'s auto-expand) on its way back
+# in, same as any other decorator's answer.
 @__dump @__identity fn nested(x):
     return x
 

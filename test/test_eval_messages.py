@@ -64,3 +64,77 @@ def test_this_binding(ctx):
     assert isinstance(bound, BoundMessage) and bound.receivers == [c], (
         "c!area (no call) is a BoundMessage holding [c] as receivers"
     )
+
+
+def test_str_prefers_a_class_instances___str___message():
+    """`str(elem)` asks first whether elem's class answers `__str__` (same
+    "ask first, class's own answer is final" shape as `sexpr()`'s `__sexpr`
+    hook - see wyrm_eval_parse_tree.str_value) and only falls back to the
+    built-in bare rendering when it doesn't."""
+    import textwrap
+
+    from wypoc.parse import parse
+    from wypoc.wyrm_eval_parse_tree import eval_program
+    from wypoc import wyrm_builtins
+
+    source = textwrap.dedent("""\
+        class Point:
+            slot x: int = 0
+            slot y: int = 0
+
+        fn [Point] __str__() -> str:
+            return "Point(" + str(x) + ", " + str(y) + ")"
+
+        class Plain:
+            slot v: int = 0
+
+        p := Point()
+        p.x = 3
+        p.y = 4
+        p_str := str(p)
+
+        plain := Plain()
+        plain.v = 5
+        plain_str := str(plain)
+        """)
+    ctx: dict = {}
+    wyrm_builtins.install(ctx)
+    eval_program(parse(source), ctx)
+    assert ctx["p_str"].value == "Point(3, 4)", "str(p) dispatches to Point's __str__"
+    assert ctx["plain_str"].value == "<Plain v=5>", (
+        "a class with no __str__ overload falls back to the default bare rendering"
+    )
+
+
+def test_deep_tail_recursive_message_send_does_not_overflow_the_python_stack():
+    """A `return this ! step(...)` tail call - an ordinary FnDef-backed
+    overload, not NativeBody/CoDef - is trampolined by _run_driver exactly
+    like call_function's plain-Call case (see wyrm_eval_parse_tree.py's
+    call_overload/_make_overload_activation), so a self-recursive message
+    send chain grows a Python list, not the C stack, same as
+    test_eval_functions.py's plain-Call equivalent."""
+    import textwrap
+
+    from wypoc.parse import parse
+    from wypoc.wyrm_eval_parse_tree import eval_program
+    from wypoc import wyrm_builtins
+
+    source = textwrap.dedent("""\
+        class counter:
+            slot n: int = 0
+
+        fn [counter] step(acc: int) -> int:
+            if n <= 0:
+                return acc
+            else:
+                n = n - 1
+                return this ! step(acc + 1)
+
+        c := counter()
+        c.n = 100000
+        result := c ! step(0)
+        """)
+    ctx: dict = {}
+    wyrm_builtins.install(ctx)
+    eval_program(parse(source), ctx)
+    assert ctx["result"].value == 100000

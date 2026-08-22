@@ -16,8 +16,8 @@ TokenInfo = tokenize.TokenInfo
 
 KEYWORDS = {
     "and", "break", "catch", "class", "co", "continue", "defer", "defined",
-    "do", "elif", "else", "false", "fn", "for", "from", "getter", "if", "import",
-    "in", "is", "not", "or", "pass", "return", "setter",
+    "do", "elif", "else", "emit", "false", "fn", "for", "from", "getter", "if", "import",
+    "in", "is", "not", "or", "pass", "return", "setter", "signal",
     "slot", "static", "super", "this", "true", "try", "undefined",
     "var", "while", "with", "yield",
 }

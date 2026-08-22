@@ -1,0 +1,32 @@
+class Counter:
+    slot count: int = 0
+    signal changed(old: int, new: int)
+
+    fn increment(by):
+        old := this.count
+        this.count = this.count + by
+        emit changed(old, this.count)
+
+class Base:
+    signal ping()
+
+class Sub(Base):
+    slot x: int = 0
+
+log := []
+
+fn on_change(old, new):
+    log ! append([old, new])
+
+c := Counter()
+c.changed ! connect(on_change)
+c!increment(5)
+c!increment(3)
+after_two_emits := copy(log)
+
+c.changed ! disconnect(on_change)
+c!increment(1)
+after_disconnect := copy(log)
+
+sub := Sub()
+inherited_signal := sub.ping

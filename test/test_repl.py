@@ -170,16 +170,18 @@ def test_set_compact_returns_to_one_line_results():
 
 def test_compact_is_off_to_begin_with():
     assert Session().options == {
-        "compact": False, "tui": False, "path": "", "project_root": ""}
+        "compact": False, "tui": False, "path": "", "project_root": "", "global_cache": ""}
 
 
 def test_bare_set_lists_the_options_and_their_state():
     session = Session()
     assert run_command(session, ":set") == (
-        "message", "compact  off\npath  (not set)\nproject_root  (not set)\ntui  off")
+        "message", "compact  off\nglobal_cache  (not set)\npath  (not set)\n"
+                    "project_root  (not set)\ntui  off")
     run_command(session, ":set compact")
     assert run_command(session, ":set") == (
-        "message", "compact  on\npath  (not set)\nproject_root  (not set)\ntui  off")
+        "message", "compact  on\nglobal_cache  (not set)\npath  (not set)\n"
+                    "project_root  (not set)\ntui  off")
 
 
 def test_an_unknown_option_is_reported_rather_than_ignored():
@@ -188,7 +190,7 @@ def test_an_unknown_option_is_reported_rather_than_ignored():
     assert kind == "message"
     assert "unknown option 'colour'" in message and "compact" in message
     assert session.options == {
-        "compact": False, "tui": False, "path": "", "project_root": ""}, \
+        "compact": False, "tui": False, "path": "", "project_root": "", "global_cache": ""}, \
         "and nothing was changed"
 
 
@@ -243,6 +245,7 @@ def test_path_option_is_registered_as_an_extra_search_root(tmp_path):
     from wypoc import wyrm_modules
     lib = tmp_path / "lib"
     lib.mkdir()
-    Session(options={"compact": False, "tui": False, "path": "lib", "project_root": ""},
+    Session(options={"compact": False, "tui": False, "path": "lib", "project_root": "",
+                      "global_cache": ""},
             project_root=str(tmp_path))
     assert str(lib) in wyrm_modules.search_paths()

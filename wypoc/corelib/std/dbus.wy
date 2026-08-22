@@ -1,0 +1,46 @@
+# Session-bus export for wyrm objects, over the __dbus_* primitives the
+# interpreter exposes (wypoc: wypoc/wyrm_dbus.py, an optional dependency on
+# the `dbus-fast` package - see pyproject.toml's `dbus` extra). Start the
+# interpreter with `wyrm --dbus-session` so the connection is already up
+# before this module's own callers run; connect_session() below exists for
+# a script that wants to defer or retry that instead.
+#
+# Workflow:
+#
+#   dbus::register_class("com.example.Counter", Counter)   # cls -> iface
+#   obj := Counter()
+#   dbus::register_object("/com/example/Counter", obj)     # exports obj
+#   dbus::run()                                             # blocks, serves calls
+#
+# What crosses onto the bus for a registered object: any slot whose current
+# value is a bool/int/float/str becomes a read/write D-Bus property; any
+# message with an overload targeting the object's own class (inherited ones
+# included) becomes a D-Bus method, called exactly as `obj ! name(...)`
+# would call it; any `signal` (inherited ones included) becomes a D-Bus
+# signal, wired up automatically by register_object - an ordinary
+# `emit name(...)` inside the class fires it, no extra step needed.
+
+fn connect_session() -> int:
+    return __dbus_connect_session()
+
+fn connected() -> int:
+    return __dbus_connected()
+
+fn request_name(name):
+    return __dbus_request_name(name)
+
+fn register_class(interface_name, cls):
+    return __dbus_register_class(interface_name, cls)
+
+# Bound directly, not wrapped in an `fn` of its own: __dbus_register_object
+# needs the *calling* scope's message table (a class's methods live in the
+# message table of whatever module defined the class - see
+# wyrm_eval_parse_tree.ContextualBuiltin), and wrapping it in a call of this
+# module's own would hand it dbus.wy's module scope instead of the caller's.
+register_object := __dbus_register_object
+
+fn run():
+    return __dbus_run()
+
+fn stop():
+    return __dbus_stop()

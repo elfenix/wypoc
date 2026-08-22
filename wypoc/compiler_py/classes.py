@@ -74,9 +74,14 @@ def _default_expr(modctx, slot: ast.SlotDef) -> str:
         # point rather than emitting something subtly wrong.
         err(f"slot '{slot.name}': this default is too complex for "
             "--compile-py yet (needs multiple statements to evaluate)", slot)
-    if isinstance(slot.default, (ast.Call, ast.Message, ast.MessageTupleExpr)):
+    if isinstance(slot.default, (ast.Call, ast.Message, ast.MessageTupleExpr,
+                                  ast.Array, ast.Dict)):
         # Evaluated at class-construction time, not Python class-definition
-        # (module-import) time - e.g. `slot id: int = next_id()`.
+        # (module-import) time - e.g. `slot id: int = next_id()`. Array/Dict
+        # literals need this for a different reason: a dataclass field's
+        # default must not be a mutable object shared across every
+        # instance (Python raises on `list`/`dict` literal defaults for
+        # exactly this reason) - the factory gives each instance its own.
         return f"field(default_factory=lambda: ({value}))"
     return value
 

@@ -23,6 +23,7 @@ DEFAULT_COREPATH = os.path.join(_WYPOC_DIR, "corelib")
 
 _script_root: "str | None" = None
 _extra_paths: list = []
+_include_paths: list = []
 
 
 def set_extra_search_paths(paths) -> list:
@@ -33,6 +34,21 @@ def set_extra_search_paths(paths) -> list:
     global _extra_paths
     previous = _extra_paths
     _extra_paths = list(paths)
+    return previous
+
+
+def set_include_paths(paths) -> list:
+    """Registers `-I` command-line search directories (cli.py) - checked
+    even before `_extra_paths` (the config `path` option), and always
+    before WYRM_PATH itself, in the order they were given: `wyrm -Ia -Ib
+    script.wy` with `WYRM_PATH=c` searches `a`, then `b`, then `c`. Kept as
+    given, not resolved to absolute paths, the same way WYRM_PATH's own
+    entries are left for resolve_module_file's os.path.join/os.path.isfile
+    to resolve against the working directory. Returns the previous list, so
+    a caller (tests) can restore it."""
+    global _include_paths
+    previous = _include_paths
+    _include_paths = list(paths)
     return previous
 
 
@@ -55,16 +71,17 @@ def script_root() -> "str | None":
 
 
 def search_paths(env: dict = None) -> list:
-    """The search roots, in order: the extra paths registered by
-    `set_extra_search_paths` (the REPL's `path` config option), then
-    WYRM_PATH's entries (colon-separated), then the running script's own
-    directory if one is registered (see set_script_root), then the default
-    corelib directory as a fallback. Reads `env` (os.environ by default)
-    fresh on every call - nothing here is cached at import time - so tests
-    can override WYRM_PATH without needing to patch this module."""
+    """The search roots, in order: the `-I` paths registered by
+    `set_include_paths` (cli.py's -I option), then the extra paths
+    registered by `set_extra_search_paths` (the REPL's `path` config
+    option), then WYRM_PATH's entries (colon-separated), then the running
+    script's own directory if one is registered (see set_script_root), then
+    the default corelib directory as a fallback. Reads `env` (os.environ by
+    default) fresh on every call - nothing here is cached at import time -
+    so tests can override WYRM_PATH without needing to patch this module."""
     env = os.environ if env is None else env
     raw = env.get("WYRM_PATH", "")
-    paths = list(_extra_paths) + [p for p in raw.split(":") if p]
+    paths = list(_include_paths) + list(_extra_paths) + [p for p in raw.split(":") if p]
     if _script_root is not None:
         paths.append(_script_root)
     paths.append(DEFAULT_COREPATH)

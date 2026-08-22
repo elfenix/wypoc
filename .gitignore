@@ -4,6 +4,7 @@
 .idea
 .cache
 __pycache__
+__wycache__
 benchmark/
 uv.lock
 .wyrm
@@ -11,6 +12,7 @@ uv.lock
 *~
 *.swp
 *.bak
+*.wyc
 .pytest_cache
 CMakeSettings.json
 cmake-build-*

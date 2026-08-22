@@ -1,0 +1,41 @@
+# Minimal nng (nanomsg-next-gen) bindings, over the __nng_* natives the
+# interpreter exposes (wypoc: wypoc/wyrm_nng.py, an optional dependency on
+# the `pynng` package - see pyproject.toml's `nng` extra).
+#
+# pub/sub:
+#   pub := nng::open("pub0")
+#   nng::listen(pub, "tcp://127.0.0.1:5555")
+#   nng::send(pub, "hello")
+#
+#   sub := nng::open("sub0")
+#   nng::dial(sub, "tcp://127.0.0.1:5555")
+#   nng::subscribe(sub, "")            # "" means every topic
+#   msg := nng::recv(sub, -1)          # blocks until one arrives
+#
+# request/reply, push/pull, pair, and bus (many-to-many) sockets work the
+# same way - open() the protocol, listen() on one side and dial() on the
+# other, then send()/recv().
+
+fn open(protocol) -> int:
+    return __nng_open(protocol)
+
+fn listen(handle, url):
+    return __nng_listen(handle, url)
+
+fn dial(handle, url):
+    return __nng_dial(handle, url)
+
+fn send(handle, data):
+    return __nng_send(handle, data)
+
+# recv(handle, timeout_ms) -> the next message, or nil if timeout_ms
+# elapses first with nothing arriving. A negative timeout blocks
+# indefinitely.
+fn recv(handle, timeout_ms):
+    return __nng_recv(handle, timeout_ms)
+
+fn subscribe(handle, topic):
+    return __nng_subscribe(handle, topic)
+
+fn close(handle):
+    return __nng_close(handle)

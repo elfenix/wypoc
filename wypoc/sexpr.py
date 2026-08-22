@@ -82,8 +82,9 @@ _CANNOT_CROSS = {
     ast.Yield: "a yield cannot cross into a decorator yet",
     ast.ClassDef: "a class cannot cross into a decorator yet",
     ast.SlotDef: "a slot cannot cross into a decorator yet",
-    ast.Import: "an import cannot cross into a decorator yet",
-    ast.FromImport: "an import cannot cross into a decorator yet",
+    ast.SignalDef: "a signal cannot cross into a decorator yet",
+    ast.Emit: "an emit cannot cross into a decorator yet",
+    ast.FromImport: "a from-import cannot cross into a decorator yet",
     ast.SuperCall: "super() cannot cross into a decorator yet",
     ast.Lambda: "an anonymous fn cannot cross into a decorator yet",
     ast.Char: "a character literal cannot cross into a decorator yet",
@@ -91,7 +92,6 @@ _CANNOT_CROSS = {
     ast.MessageTupleExpr: "a tuple message send cannot cross into a decorator yet",
     ast.SetIfUnset: "'?=' as an expression cannot cross into a decorator yet",
     ast.AstRef: "a $ast reference cannot cross into a decorator yet",
-    ast.Decorated: "a decorator cannot cross into a decorator yet",
     ast.Kwarg: "a keyword argument cannot cross into a decorator yet",
     ast.SpreadPos: "a spread argument cannot cross into a decorator yet",
     ast.SpreadKw: "a spread argument cannot cross into a decorator yet",
@@ -141,6 +141,13 @@ class Row:
 
 
 ROWS = (
+    # --- whole compilation units --------------------------------------------
+    # Not something a decorator ever receives (a decorator is handed one
+    # statement or expression, never a whole file) - this row exists for
+    # wys.py, which serializes an entire `ast.Program` the same way sexpr.py
+    # already serializes one node, by reading the same table.
+    Row(ast.Program, "program", F("body", NODES)),
+
     # --- literals and names ------------------------------------------------
     # `'int`/`'float`/`'str` are irregular: those nodes hold raw token text
     # (see "Strings and numbers" below), so they live in _ENCODERS/_DECODERS.
@@ -187,6 +194,17 @@ ROWS = (
     # --- definitions -------------------------------------------------------
     Row(ast.Param, "param", F("name", SYM), F("type", NODE),
         defaults={"default": None}),
+
+    # --- decorators ----------------------------------------------------
+    # An unexpanded decorator application, crossing raw - this is what makes
+    # `macroexpand()` possible: an outer decorator's `this` can itself be a
+    # `'decorated` node (see wyrm_eval_parse_tree.expand_decorated, which no
+    # longer pre-expands a stacked decorator's inner before boxing it).
+    # `has_parens`/positions are decoded with sensible defaults since the
+    # format has no field for them - they only ever affected parsing.
+    Row(ast.Decorator, "decorator", F("name", SYM), F("args", NODES),
+        defaults={"has_parens": True}),
+    Row(ast.Decorated, "decorated", F("decorator", NODE), F("inner", NODE)),
 )
 
 _ROWS_BY_CLASS: dict = {}
@@ -515,6 +533,27 @@ def _encode_fn(tree: ast.FnDef):
                 [encode(s) for s in tree.body])
 
 
+def _encode_import(tree: ast.Import):
+    """`'import`: path, then the four ways an import can narrow what it
+    binds (alias / items / wildcard / except_names - mutually exclusive per
+    ast_nodes.Import's docstring, so at most one of the three positions past
+    `static` is ever non-nil) plus `static`. Booleans as plain fields is the
+    one deliberate exception to "no boolean fields" in this table - `static`
+    and `wildcard` don't correspond to distinct node *shapes` the way every
+    other flag in this format does, so splitting them into kinds would only
+    multiply the rows without adding a distinction worth making."""
+    path = [node("name", Symbol(p)) for p in tree.path]
+    alias = node("name", Symbol(tree.alias)) if tree.alias else NIL
+    items = ([node("import_item", Symbol(i.name),
+                    node("name", Symbol(i.alias)) if i.alias else NIL)
+              for i in tree.items] if tree.items else NIL)
+    except_names = ([node("name", Symbol(n)) for n in tree.except_names]
+                     if tree.except_names else NIL)
+    return node("import", path, node("true") if tree.static else node("false"),
+                alias, items, node("true") if tree.wildcard else node("false"),
+                except_names)
+
+
 _ENCODERS = {
     ast.Num: _encode_num,
     ast.Str: _encode_str,
@@ -529,6 +568,7 @@ _ENCODERS = {
     ast.WithBinding: _encode_with_binding,
     ast.Defer: _encode_defer,
     ast.FnDef: _encode_fn,
+    ast.Import: _encode_import,
     ast.TypeExpr: _encode_type,
     ast.ThisRef: lambda tree: node("name", Symbol("this")),
     ast.Name: lambda tree: (node("nil") if tree.id == "nil"
@@ -785,11 +825,46 @@ def _decode_fn(kind: str, fields: list):
     )
 
 
+def _decode_flag(value, kind: str, field: str) -> bool:
+    flag_kind, flag_fields = _fields_of(value)
+    if flag_kind == "true":
+        return True
+    if flag_kind == "false":
+        return False
+    raise SexprError(f"'{kind}'s {field} must be 'true or 'false")
+
+
+def _decode_import_item(entry):
+    entry_kind, entry_fields = _fields_of(entry)
+    if entry_kind != "import_item":
+        raise SexprError("an import's items are 'import_item nodes")
+    name, alias = _expect(entry_fields, 2, "import_item")
+    if not isinstance(name, Symbol):
+        raise SexprError("'import_item's name must be a symbol")
+    return ast.ImportItem(name.name,
+                          _decode_dispatch_name(alias) if alias not in (NIL, None) else None)
+
+
+def _decode_import(kind: str, fields: list):
+    path, static, alias, items, wildcard, except_names = _expect(fields, 6, kind)
+    path_names = [_decode_dispatch_name(p) for p in _as_list(path, "'import's path")]
+    alias_v = _decode_dispatch_name(alias) if alias not in (NIL, None) else None
+    items_v = ([_decode_import_item(i) for i in _as_list(items, "'import's items")]
+               if items not in (NIL, None) else None)
+    except_v = ([_decode_dispatch_name(n)
+                for n in _as_list(except_names, "'import's except_names")]
+                if except_names not in (NIL, None) else None)
+    return ast.Import(path_names, alias_v, items_v,
+                      _decode_flag(wildcard, kind, "wildcard"),
+                      _decode_flag(static, kind, "static"), except_v)
+
+
 _DECODERS = {
     "int": _decode_num,
     "float": _decode_num,
     "str": _decode_str,
     "nil": lambda kind, fields: ast.Name("nil"),
+    "import": _decode_import,
     "binop": _decode_binop,
     "unop": _decode_unop,
     "catch": _decode_catch,

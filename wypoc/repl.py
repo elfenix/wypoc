@@ -38,6 +38,7 @@ from wypoc.parse import parse
 from wypoc.wyrm_tokenizer import TokenizeError, generate_tokens
 from wypoc.wyrm_eval_parse_tree import (
     Scope,
+    WyrmLocatedError,
     eval_stmt,
     expose,
     lookup,
@@ -141,6 +142,19 @@ def is_incomplete(source: str) -> bool:
     """
     if not source.strip():
         return False
+
+    # A `#`/`#:` doc comment (see parse.py's _attach_doc_comments) only
+    # attaches to whatever follows it *within the same parse() call* - so
+    # if every line typed so far is a comment (or blank), keep prompting
+    # rather than submitting the comment on its own, which would parse to
+    # an empty statement and leave the fn/class typed next with no doc.
+    # wyrm_tokenizer.py discards comments before they ever become tokens,
+    # so this has to be a raw-line check, not a token one.
+    lines = source.split("\n")
+    if any(line.strip().startswith("#") for line in lines) and all(
+        not line.strip() or line.strip().startswith("#") for line in lines
+    ):
+        return True
 
     try:
         tokens = list(generate_tokens(source))
@@ -334,7 +348,12 @@ class Session:
             except KeyboardInterrupt:
                 error = "interrupted"
             except Exception as e:  # noqa: BLE001 - a REPL survives everything
-                error = f"{type(e).__name__}: {e}"
+                # A shadowed exception (WyrmLocatedError) already renders as
+                # "OrigType: message (line L, col C)" (see its __str__) -
+                # printing its own dynamically-built shadow type name (e.g.
+                # "LocatedTypeError") in front of that would just be noise,
+                # so it's reported bare rather than as "type(e).__name__: e".
+                error = str(e) if isinstance(e, WyrmLocatedError) else f"{type(e).__name__}: {e}"
         output = out.getvalue()
 
         if error is not None:

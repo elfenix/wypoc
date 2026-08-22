@@ -79,6 +79,11 @@ def load_options(start: "str | None" = None, warn=None) -> tuple:
     resolving `path`): `~/.wyrm/config` first, then the project's own
     `.wyrm/config` overlaid on top of it - closer to the work wins."""
     options = config_mod.load(warn=warn)
+    if config_mod.is_disabled():
+        # --no-config: no file, global or project, is read - and with none
+        # read, there is nothing to scan upward looking for either (see
+        # config_mod.set_disabled's docstring).
+        return options, None
     root = find_project_root(start, configured=options.get("project_root") or None)
     path = project_config_path(root)
     if path:
