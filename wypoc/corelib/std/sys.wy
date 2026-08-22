@@ -1,0 +1,9 @@
+# Process-level info, over the __argv/__environ primitives the interpreter
+# exposes (wypoc: wypoc/wyrm_sys.py). `argv` is the script's own arguments -
+# the same values __ARGS holds at the top level, just reachable from any
+# module's scope (see wyrm_sys.py's docstring for why the two are separate).
+# `env` is a snapshot of the process environment, not a live view - editing
+# it doesn't change the real environment.
+
+argv := __argv()
+env := __environ()

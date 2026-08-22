@@ -783,7 +783,7 @@ def populate_globals(ctx: dict, name: str = "__main__") -> None:
     Unlike Python, `__name__` is always fully qualified - there's no
     equivalent of a script run directly by relative filename ending up
     with a bare, unqualified `__name__`."""
-    from wypoc import wyrm_builtins, wyrm_dbus, wyrm_io, wyrm_nng, wyrm_socket, wyrm_term
+    from wypoc import wyrm_builtins, wyrm_dbus, wyrm_io, wyrm_nng, wyrm_socket, wyrm_sys, wyrm_term
 
     wyrm_io.install(ctx)
     wyrm_builtins.install(ctx)
@@ -791,6 +791,7 @@ def populate_globals(ctx: dict, name: str = "__main__") -> None:
     wyrm_term.install(ctx)
     wyrm_socket.install(ctx)
     wyrm_nng.install(ctx)
+    wyrm_sys.install(ctx)
     eval_program(_prelude_tree(), ctx)
     expose(ctx, "__dynamic__", True)
     expose(ctx, "__name__", name)
