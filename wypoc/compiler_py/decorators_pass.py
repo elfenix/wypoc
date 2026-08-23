@@ -39,9 +39,9 @@ def _muted_io():
     reaching a not-yet-expanded decorator - doesn't visibly execute twice
     (once here, once when the generated Python actually runs). Every I/O
     path funnels through wyrm_io._handles eventually - both the ctx-bound
-    `__write` builtin and native decorators like `@__dump`, which call
-    wyrm_builtins.print_ directly - so patching handles here, rather than
-    rebinding names in a scope dict, catches all of it in one place."""
+    `__write` builtin and native decorators like `@__dump`, which write via
+    wyrm_io directly - so patching handles here, rather than rebinding
+    names in a scope dict, catches all of it in one place."""
     from wypoc import wyrm_io
 
     previous = dict(wyrm_io._handles)

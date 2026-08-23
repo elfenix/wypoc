@@ -81,30 +81,35 @@ class PrimitiveType:
         return f"PrimitiveType({self.name!r})"
 
 
-def _to_str(value) -> str:
+def _to_str(value, ctx: dict | None = None) -> str:
     """`str(value)` - the "bare" rendering, where a str/symbol contributes
     its own characters and nothing else. Containers render their elements
     in *repr* mode instead (see _repr_str), so `str("hi")` is `hi` while
     `str(["hi"])` is `['hi']`, matching the reference implementation's
-    single `append_value(sb, v, repr)` with its one repr flag."""
-    return _format(value, repr_mode=False)
+    single `append_value(sb, v, repr)` with its one repr flag.
+
+    `ctx` is the calling scope's message table, threaded down so a class
+    instance nested inside a container can still answer its own `__str__`
+    (see _format) - the same hook str_value applies at the top level, just
+    passed along instead of asked for again."""
+    return _format(value, repr_mode=False, ctx=ctx)
 
 
-def _repr_str(value) -> str:
+def _repr_str(value, ctx: dict | None = None) -> str:
     """The rendering a value gets when it appears *inside* a container:
     strings quoted, symbols quote-prefixed, everything else as in _to_str."""
-    return _format(value, repr_mode=True)
+    return _format(value, repr_mode=True, ctx=ctx)
 
 
-def display(value) -> str:
+def display(value, ctx: dict | None = None) -> str:
     """How a value is echoed back when it's the value of something the user
     asked for directly - the REPL's answer line (see wypoc/repl.py). Same
     rendering a value gets inside a container, so `"hi"` echoes as `'hi'`
     and is told apart from the symbol `'hi` and the bare characters `hi`."""
-    return _repr_str(value)
+    return _repr_str(value, ctx=ctx)
 
 
-def _format(value, repr_mode: bool) -> str:
+def _format(value, repr_mode: bool, ctx: dict | None = None) -> str:
     if value is None or value is NIL:
         # One `nil`, spelled the way the language spells it. wypoc's NIL is
         # also the empty pair list (`$[]`), and a fn that falls off its end
@@ -125,21 +130,30 @@ def _format(value, repr_mode: bool) -> str:
         parts = []
         node = value
         while isinstance(node, Pair):
-            parts.append(_format(node.car, True))
+            parts.append(_format(node.car, True, ctx))
             node = node.cdr
-        tail = "" if node is NIL or node is None else f" . {_format(node, True)}"
+        tail = "" if node is NIL or node is None else f" . {_format(node, True, ctx)}"
         return f"$[{', '.join(parts)}{tail}]"
     if isinstance(value, list):
-        return "[" + ", ".join(_format(v, True) for v in value) + "]"
+        return "[" + ", ".join(_format(v, True, ctx) for v in value) + "]"
     if isinstance(value, tuple):
-        inner = ", ".join(_format(v, True) for v in value)
+        inner = ", ".join(_format(v, True, ctx) for v in value)
         return f"({inner},)" if len(value) == 1 else f"({inner})"
     if isinstance(value, dict):
         return "{" + ", ".join(
-            f"{_format(k, True)}: {_format(v, True)}" for k, v in value.items()
+            f"{_format(k, True, ctx)}: {_format(v, True, ctx)}" for k, v in value.items()
         ) + "}"
     if isinstance(value, WyrmError):
         return f"error({value.what})"
+    if ctx is not None:
+        # A class instance that answers `__str__` controls its own
+        # rendering here too, not just at the top level (str_value) - a
+        # Token nested inside a parsed `$[...]` tree should print the same
+        # way whether it's handed to str() directly or found inside a
+        # container being printed.
+        from wypoc.wyrm_eval_parse_tree import ClassInstance, has_message_for, send_message
+        if isinstance(value, ClassInstance) and has_message_for("__str__", [value], ctx):
+            return send_message("__str__", [value], [], {}, ctx)
     return str(value)
 
 
@@ -591,26 +605,30 @@ def tuple_(*rest) -> tuple:
     return rest
 
 
-def print_(*args) -> None:
+def print_(ctx: dict, *args) -> None:
     """(print a, b, c) -> writes each argument, space-separated, to stdout,
-    stringified the same way str() would (e.g. bools as true/false) - with
-    no trailing newline. See println_ below for the newline-terminated form.
-    Goes through wyrm_io's own write (not a raw Python print()) so it's
-    still subject to the same __STDOUT handle - e.g. stdout-capturing tests
-    that call wyrm_io._reset_std_handles() see print's output too."""
+    stringified the same way str() would (e.g. bools as true/false, and a
+    class instance that answers `__str__` controlling its own rendering -
+    see str_value) - with no trailing newline. See println_ below for the
+    newline-terminated form. Goes through wyrm_io's own write (not a raw
+    Python print()) so it's still subject to the same __STDOUT handle - e.g.
+    stdout-capturing tests that call wyrm_io._reset_std_handles() see
+    print's output too."""
     from wypoc import wyrm_io
+    from wypoc.wyrm_eval_parse_tree import str_value
 
-    wyrm_io.wyrm_write(wyrm_io.STDOUT, " ".join(_to_str(a) for a in args))
+    wyrm_io.wyrm_write(wyrm_io.STDOUT, " ".join(str_value(ctx, a) for a in args))
 
 
-def println_(*args) -> None:
+def println_(ctx: dict, *args) -> None:
     """(println a, b, c) -> like print(), but terminates the line with `\\n`.
     A builtin so it needs no `import std::io`, unlike corelib/std/io.wy's
     own println (kept for parity with the reference implementation's module
     layout - either spelling reaches the same wyrm_io.STDOUT write)."""
     from wypoc import wyrm_io
+    from wypoc.wyrm_eval_parse_tree import str_value
 
-    wyrm_io.wyrm_write(wyrm_io.STDOUT, " ".join(_to_str(a) for a in args) + "\n")
+    wyrm_io.wyrm_write(wyrm_io.STDOUT, " ".join(str_value(ctx, a) for a in args) + "\n")
 
 
 def end_() -> None:
@@ -776,7 +794,10 @@ def install(ctx: dict) -> None:
 
     expose_all(
         ctx, **primitive_types, cons=cons, pair=cons, car=car, cdr=cdr, nil=NIL,
-        copy=copy, len=length, print=print_, println=println_, error=ERROR_CLASS,
+        copy=copy, len=length,
+        print=ContextualBuiltin(print_, "print"),
+        println=ContextualBuiltin(println_, "println"),
+        error=ERROR_CLASS,
         reverse=reverse, nreverse=nreverse,
         **{"$set_car": set_car, "$set_cdr": set_cdr},
         tuple=tuple_, end=end_, exit=exit_, resolve=resolve,

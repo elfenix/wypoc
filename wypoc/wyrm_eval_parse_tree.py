@@ -2704,7 +2704,7 @@ def str_value(ctx: dict, value):
     class's own answer is final" shape as sexpr_value's `__sexpr` hook."""
     if isinstance(value, ClassInstance) and has_message_for("__str__", [value], ctx):
         return send_message("__str__", [value], [], {}, ctx)
-    return wyrm_builtins._to_str(value)
+    return wyrm_builtins._to_str(value, ctx)
 
 
 def macroexpand_value(ctx: dict, value):
@@ -2995,7 +2995,9 @@ def _decorator_dump(this, *args, **kwargs):
     exercises the wire format without needing a decorator written in wyrm
     (and therefore without needing `import static`) - see doc/sexpr-spec.md's
     "Trying it"."""
-    wyrm_builtins.print_(wyrm_builtins._to_str(
+    from wypoc import wyrm_io
+
+    wyrm_io.wyrm_write(wyrm_io.STDOUT, wyrm_builtins._to_str(
         sexpr.encode(lookup(_TREE_SLOT, this.attrs))) + "\n")
     return this
 
