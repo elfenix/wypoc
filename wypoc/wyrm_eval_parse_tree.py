@@ -680,9 +680,13 @@ class Method:
     form, an external `fn [Cls, ...] name(...)`, or a class-body method
     (which registers itself here too - see eval_stmt's ClassDef handling)."""
 
-    def __init__(self, name: str):
+    def __init__(self, name: str, owner: "str | None" = None):
         self.name = name
         self.overloads: list[MethodOverload] = []
+        # The module that first defined this message - purely diagnostic
+        # (an _AmbiguousMessage collision names its two candidates with it),
+        # not consulted for dispatch or extension.
+        self.owner = owner
 
     def add_overload(self, signature: tuple, node, closure: dict) -> None:
         for i, existing in enumerate(self.overloads):
@@ -693,6 +697,23 @@ class Method:
 
     def __repr__(self):
         return f"Method({self.name!r}, {len(self.overloads)} overload(s))"
+
+
+class _AmbiguousMessage:
+    """Placeholder `message_table` entry for a name that two distinct,
+    independently-owned messages both landed on unqualified in the same
+    scope (e.g. two `import ...::*`s that happen to collide) - see
+    doc/addendum.md's "Message identity across modules". Unqualified use of
+    the name is an error pointing at `mod::name`; `mod::name` itself
+    resolves straight against the naming module's own message_table and
+    never sees this placeholder at all."""
+
+    def __init__(self, first: str, second: str):
+        self.first = first
+        self.second = second
+
+    def __repr__(self):
+        return f"_AmbiguousMessage({self.first!r}, {self.second!r})"
 
 
 class BoundMessage:
@@ -924,9 +945,14 @@ def eval_import(stmt: ast.Import, ctx: dict) -> None:
                         and name not in excluded):
                     bind_new(name, unwrap(var), ctx)
             dest_messages = message_table(ctx)
+            local_owner = None
+            try:
+                local_owner = lookup("__name__", ctx)
+            except NameError:
+                pass
             for name, method in message_table(mod.ctx).items():
                 if name not in excluded:
-                    dest_messages[name] = method
+                    _merge_message(dest_messages, name, method, local_owner=local_owner)
         else:
             for item in stmt.items:
                 _import_one(item.name, item.alias or item.name, mod, ctx)
@@ -946,6 +972,48 @@ def eval_import(stmt: ast.Import, ctx: dict) -> None:
 
     if bind_root and len(stmt.path) > 1:
         bind_new(stmt.path[0], _module_cache[stmt.path[0]], ctx)
+
+
+def _merge_message(destination: dict, name: str, method, dest_name: "str | None" = None,
+                    local_owner: "str | None" = None) -> None:
+    """Brings `method` (an imported module's canonical `Method` object - by
+    reference, never copied) into `destination`'s (an importer's
+    message_table) namespace under `dest_name` (or `name` if the import
+    isn't renaming it) - the shared step behind `import a::b::*`,
+    `import static`, and a single named `import a::b::(msg)`.
+
+    A second import of the *same* canonical object (re-importing, or two
+    wildcard imports that both reach it) is a no-op. A name this importing
+    module (`local_owner`) already defines itself always wins - imports
+    never shadow local definitions, matching register_overload's "a local
+    fn always wins over an ambiguous import" rule for the symmetric case.
+    Otherwise, two *different* canonical objects landing on the same
+    destination name is the collision doc/addendum.md's "Message identity
+    across modules" makes a hard error to use unqualified: the entry
+    becomes an _AmbiguousMessage, resolved only by `mod::name`."""
+    dest_name = dest_name or name
+    existing = destination.get(dest_name)
+    if (isinstance(method, Method) and method.owner is None
+            and isinstance(existing, Method) and existing.owner is None):
+        # Both sides are native-registered (owner is only ever set for a
+        # user-code `fn` - see register_overload), e.g. `append`: every
+        # module's own populate_globals() already installed an equivalent,
+        # separately-built Method for it, so there's nothing to import and
+        # no real collision - just two identical builtins, not two distinct
+        # protocols that happen to share a name.
+        return
+    if existing is None:
+        destination[dest_name] = method
+    elif existing is method:
+        pass
+    elif isinstance(existing, Method) and local_owner is not None and existing.owner == local_owner:
+        pass  # the importing module's own definition wins
+    elif isinstance(existing, _AmbiguousMessage):
+        pass  # already ambiguous; a third collision doesn't change the diagnosis
+    else:
+        first = existing.owner if isinstance(existing, Method) else None
+        second = method.owner if isinstance(method, Method) else None
+        destination[dest_name] = _AmbiguousMessage(first or "?", second or "?")
 
 
 def _adopt_messages(mod: "Module", ctx: dict) -> None:
@@ -971,8 +1039,13 @@ def _adopt_messages(mod: "Module", ctx: dict) -> None:
     check it and skip a side effect itself, by hand, since the interpreter
     won't skip it for them."""
     destination = message_table(ctx)
+    local_owner = None
+    try:
+        local_owner = lookup("__name__", ctx)
+    except NameError:
+        pass
     for name, method in message_table(mod.ctx).items():
-        destination.setdefault(name, method)
+        _merge_message(destination, name, method, local_owner=local_owner)
 
 
 def _import_one(name: str, dest_name: str, mod: "Module", ctx: dict) -> None:
@@ -985,7 +1058,12 @@ def _import_one(name: str, dest_name: str, mod: "Module", ctx: dict) -> None:
     method = message_table(mod.ctx).get(name)
     if method is None:
         raise NameError(f"undefined variable {name!r}")
-    message_table(ctx)[dest_name] = method
+    local_owner = None
+    try:
+        local_owner = lookup("__name__", ctx)
+    except NameError:
+        pass
+    _merge_message(message_table(ctx), name, method, dest_name, local_owner=local_owner)
 
 
 class ReturnSignal(Exception):
@@ -1523,7 +1601,7 @@ def _eval_args_gen(arg_nodes, ctx: dict):
     return positional, kwargs
 
 
-def _eval_tail_message_gen(name: str, receivers: list, args_node, ctx: dict):
+def _eval_tail_message_gen(name: str, receivers: list, args_node, ctx: dict, module: "str | None" = None):
     """Shared by _eval_expr_gen's `ast.Message`/`ast.MessageTupleExpr`
     cases (called only when there's an actual call, i.e. `args_node is not
     None`): resolves the overload and either yields a _TailCall (an
@@ -1531,7 +1609,7 @@ def _eval_tail_message_gen(name: str, receivers: list, args_node, ctx: dict):
     a plain Function) or calls it immediately (NativeBody/CoDef, neither of
     which recurse into further Wyrm-level call depth the way a body of Wyrm
     statements can - see call_overload)."""
-    overload = _resolve_message(name, receivers, ctx)
+    overload = _resolve_message(name, receivers, ctx, module)
     positional, kwargs = yield from _eval_args_gen(args_node, ctx)
     if isinstance(overload.node, NativeBody):
         this_value = receivers[0] if len(receivers) == 1 else tuple(receivers)
@@ -1699,10 +1777,12 @@ def _expr_message(node, ctx):
     receiver = yield from _eval_expr_gen(node.obj, ctx)
     from wypoc.wyrm_remote import RemoteModule
     if isinstance(receiver, RemoteModule):
+        if node.module is not None:
+            raise NotImplementedError("a module-qualified message (mod::name) isn't supported on a `thread` receiver")
         return _dispatch_remote_message(receiver, node.name, node.args, ctx)
     if node.args is None:
-        return BoundMessage([receiver], _resolve_message(node.name, [receiver], ctx))
-    value = yield from _eval_tail_message_gen(node.name, [receiver], node.args, ctx)
+        return BoundMessage([receiver], _resolve_message(node.name, [receiver], ctx, node.module))
+    value = yield from _eval_tail_message_gen(node.name, [receiver], node.args, ctx, node.module)
     return value
 
 
@@ -2587,47 +2667,66 @@ def _dispatch_remote_message(receiver, name: str, args_node, ctx: dict):
     return receiver.call(name, positional, kwargs)
 
 
-def dispatch_message(name: str, receivers: list, args_node, ctx: dict):
+def dispatch_message(name: str, receivers: list, args_node, ctx: dict, module: "str | None" = None):
     """Shared by `recv ! name(...)`, `recv ! name`, and `(a, b) ! name(...)`:
     looks up the generic function in the message namespace (message_table -
     entirely separate from the variable namespace `lookup`/`ctx` indexes),
     resolves the best-matching overload for the given receivers, and either
     calls it immediately (args_node is a list, even an empty one for
     `name()`) or returns a BoundMessage (args_node is None, i.e.
-    `recv ! name` with no call parens)."""
+    `recv ! name` with no call parens). `module`, if given, is the `mod` of
+    a `recv ! mod::name(...)` qualified selector - see _resolve_message."""
     if args_node is None:
-        return BoundMessage(receivers, _resolve_message(name, receivers, ctx))
+        return BoundMessage(receivers, _resolve_message(name, receivers, ctx, module))
     positional, kwargs = eval_args(args_node, ctx)
-    return send_message(name, receivers, positional, kwargs, ctx)
+    return send_message(name, receivers, positional, kwargs, ctx, module)
 
 
-def _resolve_message(name: str, receivers: list, ctx: dict) -> MethodOverload:
-    """Looks `name` up in whichever message table actually owns it: a
-    single `Module` receiver (`mod ! name(...)`) resolves against *that
-    module's own* message_table (module_ctx), not the sender's - a
-    module's `fn []`/`signal` declarations are addressed by which module
-    defines them, not multi-dispatched across every importer's shared
-    namespace the way class methods are. Anything else (a ClassInstance,
-    or no receiver at all) resolves against the sender's own message_table
-    as before - unchanged."""
-    if len(receivers) == 1 and isinstance(receivers[0], Module):
+def _resolve_message(name: str, receivers: list, ctx: dict, module: "str | None" = None) -> MethodOverload:
+    """Looks `name` up in whichever message table actually owns it.
+
+    `module` is `recv ! mod::name(...)`'s qualifier: it resolves `name`
+    directly against `mod`'s own canonical message, bypassing the receiving
+    module's local visibility entirely - the mechanism doc/addendum.md's
+    "Message identity across modules" names for disambiguating two
+    same-named messages that collide when both are imported unqualified.
+
+    Otherwise: a single `Module` receiver (`mod ! name(...)`) resolves
+    against *that module's own* message_table (module_ctx), not the
+    sender's - a module's `fn []`/`signal` declarations are addressed by
+    which module defines them, not multi-dispatched across every importer's
+    shared namespace the way class methods are. Anything else (a
+    ClassInstance, or no receiver at all) resolves against the sender's own
+    message_table as before - unchanged."""
+    if module is not None:
+        mod = lookup(module, ctx)
+        if not isinstance(mod, Module):
+            raise TypeError(f"{module!r} does not name a module (got {type(mod).__name__})")
+        method = message_table(mod.ctx).get(name)
+        if method is None:
+            raise NameError(f"module {mod.name!r} has no message named {name!r}")
+    elif len(receivers) == 1 and isinstance(receivers[0], Module):
         mod = receivers[0]
         method = message_table(mod.ctx).get(name)
         if method is None:
             raise NameError(f"module {mod.name!r} has no message named {name!r}")
     else:
         method = message_table(ctx).get(name)
+        if isinstance(method, _AmbiguousMessage):
+            raise NameError(
+                f"{name!r} is ambiguous: imported from both {method.first!r} and "
+                f"{method.second!r} - disambiguate with `recv ! mod::{name}(...)`")
         if method is None:
             raise NameError(f"no message named {name!r}")
     return resolve_overload(method, receivers)
 
 
-def send_message(name: str, receivers: list, positional, kwargs, ctx: dict):
+def send_message(name: str, receivers: list, positional, kwargs, ctx: dict, module: "str | None" = None):
     """dispatch_message with the arguments already evaluated - what a
     decorator invocation needs (its arguments are evaluated before the tree
     is built, see expand_decorated) and what a special-method hook like
     `__sexpr` needs (it takes none)."""
-    overload = _resolve_message(name, receivers, ctx)
+    overload = _resolve_message(name, receivers, ctx, module)
     return call_overload(overload, receivers, positional, kwargs)
 
 
@@ -2637,7 +2736,7 @@ def has_message_for(name: str, receivers: list, ctx: dict) -> bool:
     overwhelming case (nothing answers) costs a lookup rather than a caught
     error."""
     method = message_table(ctx).get(name)
-    if method is None:
+    if method is None or isinstance(method, _AmbiguousMessage):
         return False
     return _try_resolve_overload(method, receivers) is not None
 
@@ -2806,11 +2905,23 @@ def register_overload(name: str, signature, node, closure: dict, target_ctx: dic
     existing overloads), since that's the arity actually in use."""
     messages = message_table(target_ctx)
     method = messages.get(name)
+    if isinstance(method, _AmbiguousMessage):
+        # A local definition always wins over an ambiguous pair of imports:
+        # it can't coherently extend either import candidate, so it starts
+        # a fresh, locally-owned message under `name`, the same as if
+        # nothing had been imported at all - see _AmbiguousMessage's
+        # docstring.
+        method = None
     if signature is None and method is None:
         bind(name, Function(name, node, closure), target_ctx)
         return
     if method is None:
-        method = Method(name)
+        owner = None
+        try:
+            owner = lookup("__name__", target_ctx)
+        except NameError:
+            pass
+        method = Method(name, owner)
         existing = unwrap(target_ctx[name]) if name in target_ctx else None
         if isinstance(existing, Function):
             wildcard_arity = len(signature) if signature is not None else 1
@@ -2819,6 +2930,16 @@ def register_overload(name: str, signature, node, closure: dict, target_ctx: dic
     if signature is None:
         wildcard_arity = len(method.overloads[0].signature) if method.overloads else 1
         signature = (None,) * wildcard_arity
+        # A bare `fn` always keeps (or gains) its own plain variable binding
+        # alongside the wildcard overload, regardless of whether the message
+        # already existed before this `fn` was seen - see this function's
+        # docstring on "a variable and a message of the same name coexist".
+        # Without this, a bare `fn` defined *after* a same-named message was
+        # already registered (e.g. a class's `fn [Cls] name` before a later
+        # top-level `fn name`) would only be reachable via `!`, while the
+        # opposite definition order left it plain-callable too - an
+        # order-dependent asymmetry rather than a real distinction.
+        bind(name, Function(name, node, closure), target_ctx)
     method.add_overload(signature, node, closure)
 
 
@@ -3325,8 +3446,10 @@ def eval_expr(node, ctx: dict):
         receiver = eval_expr(node.obj, ctx)
         from wypoc.wyrm_remote import RemoteModule
         if isinstance(receiver, RemoteModule):
+            if node.module is not None:
+                raise NotImplementedError("a module-qualified message (mod::name) isn't supported on a `thread` receiver")
             return _dispatch_remote_message(receiver, node.name, node.args, ctx)
-        return dispatch_message(node.name, [receiver], node.args, ctx)
+        return dispatch_message(node.name, [receiver], node.args, ctx, node.module)
     if isinstance(node, ast.MessageTupleExpr):
         receivers = [eval_expr(e, ctx) for e in node.items]
         return dispatch_message(node.name, receivers, node.args, ctx)

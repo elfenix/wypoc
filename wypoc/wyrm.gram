@@ -677,6 +677,17 @@ attr_op[object]:
     | "." n=NAME { (lambda node, name=n.string, np=tok_pos(n): Attr(node, name, name_pos=np, pos=np)) }
 
 message_op[object]:
+    # `recv ! mod::name(...)` - a module-qualified message selector, tried
+    # before the plain form so a trailing "::" isn't swallowed as the start
+    # of some other postfix op. See doc/addendum.md's "Message identity
+    # across modules": this is how a name ambiguous between two imports gets
+    # disambiguated.
+    | "!" mod=NAME "::" n=NAME "(" args=arg_list? ")" {
+          (lambda node, module=mod.string, name=n.string, a=(args or []), np=tok_pos(n):
+              Message(node, name, a, module=module, name_pos=np, LOCATIONS)) }
+    | "!" mod=NAME "::" n=NAME {
+          (lambda node, module=mod.string, name=n.string, np=tok_pos(n):
+              Message(node, name, None, module=module, name_pos=np, LOCATIONS)) }
     | "!" n=NAME "(" args=arg_list? ")" {
           (lambda node, name=n.string, a=(args or []), np=tok_pos(n):
               Message(node, name, a, name_pos=np, LOCATIONS)) }

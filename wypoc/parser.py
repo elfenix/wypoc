@@ -2241,10 +2241,42 @@ class GeneratedParser(Parser):
 
     @memoize
     def message_op(self) -> Optional[object]:
-        # message_op: "!" NAME "(" arg_list? ")" | "!" NAME
+        # message_op: "!" NAME "::" NAME "(" arg_list? ")" | "!" NAME "::" NAME | "!" NAME "(" arg_list? ")" | "!" NAME
         mark = self._mark()
         tok = self._tokenizer.peek()
         start_lineno, start_col_offset = tok.start
+        if (
+            (self.expect("!"))
+            and
+            (mod := self.name())
+            and
+            (self.expect("::"))
+            and
+            (n := self.name())
+            and
+            (self.expect("("))
+            and
+            (args := self.arg_list(),)
+            and
+            (self.expect(")"))
+        ):
+            tok = self._tokenizer.get_last_non_whitespace_token()
+            end_lineno, end_col_offset = tok.end
+            return ( lambda node , module = mod . string , name = n . string , a = ( args or [] ) , np = tok_pos ( n ) : Message ( node , name , a , module = module , name_pos = np , pos=(start_lineno, start_col_offset, end_lineno, end_col_offset) ) );
+        self._reset(mark)
+        if (
+            (self.expect("!"))
+            and
+            (mod := self.name())
+            and
+            (self.expect("::"))
+            and
+            (n := self.name())
+        ):
+            tok = self._tokenizer.get_last_non_whitespace_token()
+            end_lineno, end_col_offset = tok.end
+            return ( lambda node , module = mod . string , name = n . string , np = tok_pos ( n ) : Message ( node , name , None , module = module , name_pos = np , pos=(start_lineno, start_col_offset, end_lineno, end_col_offset) ) );
+        self._reset(mark)
         if (
             (self.expect("!"))
             and

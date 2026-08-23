@@ -747,6 +747,12 @@ class Message(Node):
     obj: "Expr"
     name: str
     args: Optional[list]
+    # `recv ! mod::name(...)` - resolves `name` directly against `mod`'s own
+    # canonical message, bypassing whatever (if anything) `name` resolves to
+    # unqualified in the current scope. None for the ordinary `recv !
+    # name(...)` form. See doc/addendum.md's "Message identity across
+    # modules".
+    module: Optional[str] = None
     name_pos: Span = None
     pos: Span = None
 
