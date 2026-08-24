@@ -410,19 +410,18 @@ def _encode_str(tree: ast.Str):
 
 
 def _encode_type(tree):
-    """A concrete type: a bare-name node (`$['int]`) for one unqualified
-    name, or `$['qualified_name, seg, ...]` for a `::`-qualified one - the
-    same two shapes the reference implementation's own `qualified_name`
-    parser action produces (a single segment collapses to just that
-    segment, see wy/wyrm/parser/parser.wy's `_mk_qualified_name`). The
-    `$['type, 'auto]` sentinel for "no annotation" is a different position
-    (see `_encode_var_type`) - this function only ever sees an actual
-    type."""
+    """A concrete type: always `$['type, X]`, the same wrapper the `$['type,
+    'auto]` no-annotation sentinel uses (see `_encode_var_type`) - `X` is a
+    bare name symbol (`$['type, 'int]`, `$['type, 'nil]`) for one
+    unqualified name, or a nested `$['qualified_name, seg, ...]` for a
+    `::`-qualified one (a single segment collapses to just that segment,
+    matching the reference implementation's own `qualified_name` parser
+    action, wy/wyrm/parser/parser.wy's `_mk_qualified_name`)."""
     if not isinstance(tree, ast.TypeExpr) or not tree.parts:
         raise SexprError("a type must be a name, optionally qualified")
     if len(tree.parts) == 1:
-        return node(tree.parts[0])
-    return node("qualified_name", *[Symbol(part) for part in tree.parts])
+        return node("type", Symbol(tree.parts[0]))
+    return node("type", node("qualified_name", *[Symbol(part) for part in tree.parts]))
 
 
 def _encode_var_type(type_expr):
@@ -493,9 +492,10 @@ def _encode_var_decl(tree: ast.VarDecl):
     if len(tree.targets) == 1:
         target = tree.targets[0]
         value = tree.values[0] if tree.values else None
-        return node("define", target.name, _encode_var_type(target.type),
+        return node("define", Symbol(target.name), _encode_var_type(target.type),
                     encode(value))
-    pairs = [[target.name, _encode_var_type(target.type)] for target in tree.targets]
+    pairs = [[Symbol(target.name), _encode_var_type(target.type)]
+             for target in tree.targets]
     values = tree.values
     if not values:
         value_node = NIL
@@ -682,34 +682,42 @@ def _decode_dispatch_name(sexpr) -> str:
 
 
 def decode_type(sexpr) -> ast.TypeExpr:
-    """A bare-name node (`$['int]`) or a `'qualified_name` back into this
-    AST's `TypeExpr` - the counterpart of `_encode_type`. Never sees the
-    `$['type, 'auto]` sentinel: that's decoded by `_decode_var_type`, the
-    one position ("no annotation was written") this function doesn't
-    handle."""
+    """`$['type, X]` back into this AST's `TypeExpr` - the counterpart of
+    `_encode_type`. `X` is a bare name symbol for one unqualified name, or a
+    nested `'qualified_name` for a `::`-qualified one. Never sees `X ==
+    'auto`: that sentinel ("no annotation was written") is only valid in a
+    `var`/`define` target's type position, decoded by `_decode_var_type`
+    instead."""
     kind, fields = _fields_of(sexpr)
-    if kind == "qualified_name":
-        segments = []
-        for segment in fields:
-            if not isinstance(segment, Symbol):
-                raise SexprError("a 'qualified_name's segments must be symbols")
-            segments.append(segment.name)
-        if not segments:
-            raise SexprError("a 'qualified_name needs at least one segment")
-        return ast.TypeExpr(segments)
-    if fields:
+    if kind != "type":
         raise SexprError(f"'{kind} is not a type")
-    return ast.TypeExpr([kind])
+    if len(fields) != 1:
+        raise SexprError(f"'type takes 1 field(s), not {len(fields)}")
+    value = fields[0]
+    if isinstance(value, Symbol):
+        if value.name == "auto":
+            raise SexprError("'type, 'auto is only valid for an unannotated var/define target")
+        return ast.TypeExpr([value.name])
+    q_kind, q_fields = _fields_of(value)
+    if q_kind != "qualified_name":
+        raise SexprError("'type's field must be a symbol or a 'qualified_name")
+    segments = []
+    for segment in q_fields:
+        if not isinstance(segment, Symbol):
+            raise SexprError("a 'qualified_name's segments must be symbols")
+        segments.append(segment.name)
+    if not segments:
+        raise SexprError("a 'qualified_name needs at least one segment")
+    return ast.TypeExpr(segments)
 
 
 def _decode_var_type(sexpr):
     """A `var`/`define` target's type position: `None` for the `$['type,
     'auto]` sentinel (no annotation was written), `decode_type` otherwise."""
     kind, fields = _fields_of(sexpr)
-    if kind == "type":
-        if len(fields) == 1 and isinstance(fields[0], Symbol) and fields[0].name == "auto":
-            return None
-        raise SexprError("'type's only field must be 'auto")
+    if kind == "type" and len(fields) == 1 and isinstance(fields[0], Symbol) \
+            and fields[0].name == "auto":
+        return None
     return decode_type(sexpr)
 
 
@@ -782,9 +790,9 @@ def _decode_for(kind: str, fields: list):
 
 
 def _decode_target_name(value, kind: str) -> str:
-    if not isinstance(value, str) or isinstance(value, Symbol):
-        raise SexprError(f"'{kind}'s name must be a str, not a {_type_name(value)}")
-    return value
+    if not isinstance(value, Symbol):
+        raise SexprError(f"'{kind}'s name must be a symbol, not a {_type_name(value)}")
+    return value.name
 
 
 def _decode_define(kind: str, fields: list):

@@ -54,14 +54,14 @@ fn [TreeBase] arity():
     n := len(nth(s, 5))
     return rebuild_fn(s, [$['return, $['int, n]]])
 
-# A type is a bare-name node ($['int]) or, qualified, $['qualified_name,
-# seg, ..., name] - the name is the head symbol, except for the qualified
-# shape where it's the last segment.
+# A type is always $['type, x]: x is a bare name symbol ($['type, 'int]) or,
+# qualified, a nested $['qualified_name, seg, ..., name] - the name is x
+# itself in the first case, its last segment in the second.
 fn type_name(ty) -> TreeBase:
-    head := car(ty)
-    if head != 'qualified_name:
-        return head
-    segs := cdr(ty)
+    x := nth(ty, 1)
+    if x is sym:
+        return x
+    segs := cdr(x)
     while cdr(segs) != nil:
         segs = cdr(segs)
     return car(segs)
