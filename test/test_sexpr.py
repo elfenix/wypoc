@@ -26,7 +26,7 @@ def encoded(src: str) -> str:
 SHAPES = [
     ("x := 41", "$['define, 'x, $['type, 'auto], $['int, 41]]"),
     ("x := 2.5", "$['define, 'x, $['type, 'auto], $['float, 2.5]]"),
-    ('x := "hi"', "$['define, 'x, $['type, 'auto], $['str, 'hi']]"),
+    ('x := "hi"', '$[\'define, \'x, $[\'type, \'auto], $[\'str, "hi"]]'),
     ("x := true", "$['define, 'x, $['type, 'auto], $['true]]"),
     ("x := false", "$['define, 'x, $['type, 'auto], $['false]]"),
     ("x := nil", "$['define, 'x, $['type, 'auto], $['nil]]"),
@@ -37,7 +37,7 @@ SHAPES = [
     ("x := [1, 2]", "$['define, 'x, $['type, 'auto], $['list, [$['int, 1], $['int, 2]]]]"),
     ("x := (1, 2)", "$['define, 'x, $['type, 'auto], $['tuple, [$['int, 1], $['int, 2]]]]"),
     ("x := $[1, 2]", "$['define, 'x, $['type, 'auto], $['pairlist, [$['int, 1], $['int, 2]]]]"),
-    ('x := {"a": 1}', "$['define, 'x, $['type, 'auto], $['dict, [$['pair, $['str, 'a'], $['int, 1]]]]]"),
+    ('x := {"a": 1}', '$[\'define, \'x, $[\'type, \'auto], $[\'dict, [$[\'pair, $[\'str, "a"], $[\'int, 1]]]]]'),
     ("x := a + b", "$['define, 'x, $['type, 'auto], $['binop, '+, $['name, 'a], $['name, 'b]]]"),
     ("x := a <=> b", "$['define, 'x, $['type, 'auto], $['binop, '<=>, $['name, 'a], $['name, 'b]]]"),
     ("x := a << b", "$['define, 'x, $['type, 'auto], $['binop, '<<, $['name, 'a], $['name, 'b]]]"),

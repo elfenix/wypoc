@@ -54,7 +54,7 @@ consequences worth knowing:
   (see ast_nodes' module docstring).
 """
 from wypoc import ast_nodes as ast
-from wypoc.wyrm_builtins import NIL, Pair, Symbol
+from wypoc.wyrm_builtins import NIL, Pair, Symbol, quote_string
 
 # The operators a `'binop`/`'unop` may name. The one place a wyrm operator is
 # spelled as a symbol; `UnaryOp` names its operators (`neg`, `pos`, `inv`)
@@ -278,17 +278,6 @@ def _fields_of(sexpr) -> list:
 # interprets them. Crossing therefore means interpreting on the way out and
 # re-spelling on the way back in.
 # ---------------------------------------------------------------------
-
-_ESCAPES = {"\\": "\\\\", '"': '\\"', "\n": "\\n", "\t": "\\t",
-            "\r": "\\r", "\0": "\\0"}
-
-
-def quote_string(text: str) -> str:
-    """`text` as the source spelling of a string literal - the inverse of
-    wyrm_eval_parse_tree.eval_string_literal, so a `'str` node decoded and
-    then evaluated yields the characters it came in with."""
-    return '"' + "".join(_ESCAPES.get(c, c) for c in text) + '"'
-
 
 def spell_number(value) -> str:
     """`value` as the source spelling of a number literal, such that

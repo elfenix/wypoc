@@ -91,9 +91,9 @@ def test_assigning_through_an_attribute_or_index_stays_quiet():
 
 
 def test_strings_echo_in_repr_form():
-    # `'hi'` (a str), told apart from `hi` (str's characters) and `'hi` (a
+    # `"hi"` (a str), told apart from `hi` (str's characters) and `'hi` (a
     # symbol) - see wyrm_builtins.display.
-    assert Session().evaluate('"hi"').display == "'hi'"
+    assert Session().evaluate('"hi"').display == '"hi"'
     assert Session().evaluate("'hi").display == "'hi"
 
 
@@ -226,9 +226,9 @@ def test_result_reports_failure():
 
 def test_preamble_runs_before_any_entry_and_is_not_counted():
     session = Session(preamble="var greeting = \"hi\"")
-    assert session.preamble_result.display == "'hi'"
+    assert session.preamble_result.display == '"hi"'
     assert session.entries == 0
-    assert session.evaluate("greeting").display == "'hi'"
+    assert session.evaluate("greeting").display == '"hi"'
 
 
 def test_no_preamble_means_no_preamble_result():

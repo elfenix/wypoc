@@ -65,9 +65,9 @@ def _write(value) -> str:
     Pair chains/lists of the same - what `sexpr.encode` produces) as the
     wyrm source text that reads back to it: `$[...]` for a pair chain,
     `'name` for a symbol, a proper `"..."` string literal (via
-    sexpr.quote_string) rather than the REPL's single-quoted display form,
-    and so on. Unlike `wyrm_builtins.display`, every rule here has to hold
-    for the text to be valid wyrm source, not merely readable."""
+    sexpr.quote_string) and so on. Unlike `wyrm_builtins.display`, every
+    rule here has to hold for the text to be valid wyrm source, not merely
+    readable - though the two now agree on string quoting either way."""
     if value is None or value is NIL:
         return "nil"
     if isinstance(value, bool):

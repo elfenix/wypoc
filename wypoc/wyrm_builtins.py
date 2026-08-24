@@ -81,11 +81,25 @@ class PrimitiveType:
         return f"PrimitiveType({self.name!r})"
 
 
+_STRING_ESCAPES = {"\\": "\\\\", '"': '\\"', "\n": "\\n", "\t": "\\t",
+                   "\r": "\\r", "\0": "\\0"}
+
+
+def quote_string(text: str) -> str:
+    """`text` spelled as a wyrm string literal (`"like this"`) - real wyrm
+    source syntax, not the `'text'` a symbol uses. The inverse of
+    wyrm_eval_parse_tree.eval_string_literal, so a decoded `'str` node
+    re-spelled this way and evaluated again yields the characters it came in
+    with. Shared by `_format`'s repr-mode rendering (a string nested inside
+    a container, or echoed at the REPL) and sexpr.py's wire format."""
+    return '"' + "".join(_STRING_ESCAPES.get(c, c) for c in text) + '"'
+
+
 def _to_str(value, ctx: dict | None = None) -> str:
     """`str(value)` - the "bare" rendering, where a str/symbol contributes
     its own characters and nothing else. Containers render their elements
     in *repr* mode instead (see _repr_str), so `str("hi")` is `hi` while
-    `str(["hi"])` is `['hi']`, matching the reference implementation's
+    `str(["hi"])` is `["hi"]`, matching the reference implementation's
     single `append_value(sb, v, repr)` with its one repr flag.
 
     `ctx` is the calling scope's message table, threaded down so a class
@@ -97,14 +111,16 @@ def _to_str(value, ctx: dict | None = None) -> str:
 
 def _repr_str(value, ctx: dict | None = None) -> str:
     """The rendering a value gets when it appears *inside* a container:
-    strings quoted, symbols quote-prefixed, everything else as in _to_str."""
+    strings double-quoted (real wyrm string-literal syntax, so the output is
+    itself valid wyrm source), symbols quote-prefixed, everything else as in
+    _to_str."""
     return _format(value, repr_mode=True, ctx=ctx)
 
 
 def display(value, ctx: dict | None = None) -> str:
     """How a value is echoed back when it's the value of something the user
     asked for directly - the REPL's answer line (see wypoc/repl.py). Same
-    rendering a value gets inside a container, so `"hi"` echoes as `'hi'`
+    rendering a value gets inside a container, so `"hi"` echoes as `"hi"`
     and is told apart from the symbol `'hi` and the bare characters `hi`."""
     return _repr_str(value, ctx=ctx)
 
@@ -121,7 +137,7 @@ def _format(value, repr_mode: bool, ctx: dict | None = None) -> str:
     if isinstance(value, Symbol):
         return f"'{value.name}" if repr_mode else value.name
     if isinstance(value, str):
-        return f"'{value}'" if repr_mode else value
+        return quote_string(value) if repr_mode else value
     if value is ELLIPSIS:
         return "..."
     if isinstance(value, Pair):

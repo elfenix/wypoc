@@ -89,7 +89,7 @@ ROUND_TRIPPED = {
     "tuple": "(1, 2)",
     "grouped": "7",
     "pairlist": "$[1, 2]",
-    "dict": "{'a': 1}",
+    "dict": '{"a": 1}',
     "is": "true",
     "do": "42",
     "call": "8",
@@ -138,7 +138,7 @@ def test_a_static_local_survives_the_round_trip(printed, output):
 
 def test_dump_prints_the_s_expression_it_would_receive(output):
     assert output[0] == "$['int, 41]"
-    assert output[1] == "$['str, 'text']"
+    assert output[1] == "$['str, \"text\"]"
     assert output[2] == "dumped: 41 text", "and compiles the original tree"
 
 
@@ -169,7 +169,7 @@ WYRM_DECORATORS = {
     "traced result": "42",              # a println prepended to the body
     "constant": "99",                   # the body replaced outright
     "arity": "3",                       # the signature read, not rewritten
-    "param types": "['int', '?', 'Circle']",   # declared types read
+    "param types": '["int", "?", "Circle"]',   # declared types read
     "scaled": "15",                     # an expression rewritten
     "layered": "7",                     # composed with another decorator
     "framed result": "42",              # a template spliced around the body

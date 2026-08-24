@@ -42,12 +42,12 @@ def test_a_long_pair_list_breaks_aligned_under_its_first_element(value):
 
 
 def test_a_dict_that_fits_stays_on_one_line(value):
-    assert pretty(value('{"a": 1, "b": 2}')) == "{'a': 1, 'b': 2}"
+    assert pretty(value('{"a": 1, "b": 2}')) == '{"a": 1, "b": 2}'
 
 
 def test_a_long_dict_breaks_json_style(value):
     rendered = pretty(value('{"a": 1, "b": 2}'), width=10)
-    assert rendered == "{\n    'a': 1,\n    'b': 2\n}"
+    assert rendered == "{\n    \"a\": 1,\n    \"b\": 2\n}"
 
 
 def test_a_long_array_breaks_json_style(value):
@@ -58,9 +58,9 @@ def test_nesting_indents_from_the_line_the_value_starts_on(value):
     rendered = pretty(value('{"outer": {"a": 1, "b": 2}}'), width=24)
     assert rendered == (
         "{\n"
-        "    'outer': {\n"
-        "        'a': 1,\n"
-        "        'b': 2\n"
+        "    \"outer\": {\n"
+        "        \"a\": 1,\n"
+        "        \"b\": 2\n"
         "    }\n"
         "}"
     )
@@ -96,6 +96,6 @@ def test_a_container_holding_an_instance_has_to_break(value):
 
 def test_everything_else_falls_back_to_the_one_line_spelling(value):
     assert pretty(value("42")) == "42"
-    assert pretty(value('"hi"')) == "'hi'"
+    assert pretty(value('"hi"')) == '"hi"'
     assert pretty(value("'sym")) == "'sym"
     assert pretty(value("true")) == "true"
