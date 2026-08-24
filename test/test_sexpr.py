@@ -21,45 +21,45 @@ def encoded(src: str) -> str:
 
 # One row per kind in the format, so the table below is also the reference
 # for what a decorator sees. Statement kinds are given as whole statements;
-# expression kinds ride in on a `:=` whose `'decl` wrapper is part of the
+# expression kinds ride in on a `:=` whose `'define` wrapper is part of the
 # expected text.
 SHAPES = [
-    ("x := 41", "$['decl, 'x, $['int, 41]]"),
-    ("x := 2.5", "$['decl, 'x, $['float, 2.5]]"),
-    ('x := "hi"', "$['decl, 'x, $['str, 'hi']]"),
-    ("x := true", "$['decl, 'x, $['true]]"),
-    ("x := false", "$['decl, 'x, $['false]]"),
-    ("x := nil", "$['decl, 'x, $['nil]]"),
-    ("x := ...", "$['decl, 'x, $['ellipsis]]"),
-    ("x := 'name", "$['decl, 'x, $['sym, 'name]]"),
-    ("x := y", "$['decl, 'x, $['name, 'y]]"),
-    ("x := this", "$['decl, 'x, $['name, 'this]]"),
-    ("x := [1, 2]", "$['decl, 'x, $['list, [$['int, 1], $['int, 2]]]]"),
-    ("x := (1, 2)", "$['decl, 'x, $['tuple, [$['int, 1], $['int, 2]]]]"),
-    ("x := $[1, 2]", "$['decl, 'x, $['pairlist, [$['int, 1], $['int, 2]]]]"),
-    ('x := {"a": 1}', "$['decl, 'x, $['dict, [$['pair, $['str, 'a'], $['int, 1]]]]]"),
-    ("x := a + b", "$['decl, 'x, $['binop, '+, $['name, 'a], $['name, 'b]]]"),
-    ("x := a <=> b", "$['decl, 'x, $['binop, '<=>, $['name, 'a], $['name, 'b]]]"),
-    ("x := a << b", "$['decl, 'x, $['binop, '<<, $['name, 'a], $['name, 'b]]]"),
-    ("x := a >> b", "$['decl, 'x, $['binop, '>>, $['name, 'a], $['name, 'b]]]"),
-    ("x := -a", "$['decl, 'x, $['unop, '-, $['name, 'a]]]"),
-    ("x := +a", "$['decl, 'x, $['unop, '+, $['name, 'a]]]"),
-    ("x := ~a", "$['decl, 'x, $['unop, '~, $['name, 'a]]]"),
-    ("x := a and b", "$['decl, 'x, $['and, $['name, 'a], $['name, 'b]]]"),
-    ("x := a or b", "$['decl, 'x, $['or, $['name, 'a], $['name, 'b]]]"),
-    ("x := not a", "$['decl, 'x, $['not, $['name, 'a]]]"),
-    ("x := f(1)", "$['decl, 'x, $['call, $['name, 'f], [$['int, 1]]]]"),
-    ("x := a.b", "$['decl, 'x, $['attr, $['name, 'a], 'b]]"),
-    ("x := a[0]", "$['decl, 'x, $['index, $['name, 'a], $['int, 0]]]"),
-    ("x := o ! m(1)", "$['decl, 'x, $['msg, $['name, 'o], 'm, [$['int, 1]]]]"),
-    ("x := m::C", "$['decl, 'x, $['mod_get, $['name, 'm], 'C]]"),
-    ("x := v is int", "$['decl, 'x, $['is, $['name, 'v], [$['type, 'int, [], []]]]]"),
+    ("x := 41", "$['define, 'x', $['type, 'auto], $['int, 41]]"),
+    ("x := 2.5", "$['define, 'x', $['type, 'auto], $['float, 2.5]]"),
+    ('x := "hi"', "$['define, 'x', $['type, 'auto], $['str, 'hi']]"),
+    ("x := true", "$['define, 'x', $['type, 'auto], $['true]]"),
+    ("x := false", "$['define, 'x', $['type, 'auto], $['false]]"),
+    ("x := nil", "$['define, 'x', $['type, 'auto], $['nil]]"),
+    ("x := ...", "$['define, 'x', $['type, 'auto], $['ellipsis]]"),
+    ("x := 'name", "$['define, 'x', $['type, 'auto], $['sym, 'name]]"),
+    ("x := y", "$['define, 'x', $['type, 'auto], $['name, 'y]]"),
+    ("x := this", "$['define, 'x', $['type, 'auto], $['name, 'this]]"),
+    ("x := [1, 2]", "$['define, 'x', $['type, 'auto], $['list, [$['int, 1], $['int, 2]]]]"),
+    ("x := (1, 2)", "$['define, 'x', $['type, 'auto], $['tuple, [$['int, 1], $['int, 2]]]]"),
+    ("x := $[1, 2]", "$['define, 'x', $['type, 'auto], $['pairlist, [$['int, 1], $['int, 2]]]]"),
+    ('x := {"a": 1}', "$['define, 'x', $['type, 'auto], $['dict, [$['pair, $['str, 'a'], $['int, 1]]]]]"),
+    ("x := a + b", "$['define, 'x', $['type, 'auto], $['binop, '+, $['name, 'a], $['name, 'b]]]"),
+    ("x := a <=> b", "$['define, 'x', $['type, 'auto], $['binop, '<=>, $['name, 'a], $['name, 'b]]]"),
+    ("x := a << b", "$['define, 'x', $['type, 'auto], $['binop, '<<, $['name, 'a], $['name, 'b]]]"),
+    ("x := a >> b", "$['define, 'x', $['type, 'auto], $['binop, '>>, $['name, 'a], $['name, 'b]]]"),
+    ("x := -a", "$['define, 'x', $['type, 'auto], $['unop, '-, $['name, 'a]]]"),
+    ("x := +a", "$['define, 'x', $['type, 'auto], $['unop, '+, $['name, 'a]]]"),
+    ("x := ~a", "$['define, 'x', $['type, 'auto], $['unop, '~, $['name, 'a]]]"),
+    ("x := a and b", "$['define, 'x', $['type, 'auto], $['and, $['name, 'a], $['name, 'b]]]"),
+    ("x := a or b", "$['define, 'x', $['type, 'auto], $['or, $['name, 'a], $['name, 'b]]]"),
+    ("x := not a", "$['define, 'x', $['type, 'auto], $['not, $['name, 'a]]]"),
+    ("x := f(1)", "$['define, 'x', $['type, 'auto], $['call, $['name, 'f], [$['int, 1]]]]"),
+    ("x := a.b", "$['define, 'x', $['type, 'auto], $['attr, $['name, 'a], 'b]]"),
+    ("x := a[0]", "$['define, 'x', $['type, 'auto], $['index, $['name, 'a], $['int, 0]]]"),
+    ("x := o ! m(1)", "$['define, 'x', $['type, 'auto], $['msg, $['name, 'o], 'm, [$['int, 1]]]]"),
+    ("x := m::C", "$['define, 'x', $['type, 'auto], $['mod_get, $['name, 'm], 'C]]"),
+    ("x := v is int", "$['define, 'x', $['type, 'auto], $['is, $['name, 'v], [$['int]]]]"),
     ("x := v is not int",
-     "$['decl, 'x, $['not, $['is, $['name, 'v], [$['type, 'int, [], []]]]]]"),
-    ("x := try v", "$['decl, 'x, $['try, $['name, 'v]]]"),
-    ("x := v catch 0", "$['decl, 'x, $['catch, $['name, 'v], $['int, 0]]]"),
+     "$['define, 'x', $['type, 'auto], $['not, $['is, $['name, 'v], [$['int]]]]]"),
+    ("x := try v", "$['define, 'x', $['type, 'auto], $['try, $['name, 'v]]]"),
+    ("x := v catch 0", "$['define, 'x', $['type, 'auto], $['catch, $['name, 'v], $['int, 0]]]"),
     ("x := v catch return 0",
-     "$['decl, 'x, $['catch_return, $['name, 'v], $['int, 0]]]"),
+     "$['define, 'x', $['type, 'auto], $['catch_return, $['name, 'v], $['int, 0]]]"),
     ("f(x)", "$['expr_stmt, $['call, $['name, 'f], [$['name, 'x]]]]"),
     ("x = 1", "$['assign, $['name, 'x], $['int, 1]]"),
     ("x ?= 1", "$['qassign, $['name, 'x], $['int, 1]]"),
@@ -98,7 +98,7 @@ def test_every_kind_round_trips(src):
 
 
 MULTILINE = [
-    ("do", "x := do:\n    1\n", "$['decl, 'x, $['do, [$['expr_stmt, $['int, 1]]]]]"),
+    ("do", "x := do:\n    1\n", "$['define, 'x', $['type, 'auto], $['do, [$['expr_stmt, $['int, 1]]]]]"),
     ("static", "static s = 0\n", "$['static, 's, $['int, 0]]"),
     ("while", "while c:\n    pass\n", "$['while, $['name, 'c], [$['pass]]]"),
     ("for", "for i in xs:\n    pass\n",
@@ -106,7 +106,7 @@ MULTILINE = [
     ("if", "if c:\n    pass\n", "$['if, $['name, 'c], [$['pass]], []]"),
     ("defer", "defer:\n    pass\n", "$['defer, [$['pass]]]"),
     ("defer_on", "defer on error:\n    pass\n",
-     "$['defer_on, [$['pass]], [$['type, 'error, [], []]]]"),
+     "$['defer_on, [$['pass]], [$['error]]]"),
     ("with block", "with:\n    x = 1\n", "$['with, [$['decl, 'x, $['int, 1]]]]"),
 ]
 
@@ -131,9 +131,9 @@ def test_elif_is_a_nested_if_in_the_else_position():
 def test_fn_signature_shape():
     src = "fn add(a: int, b: str) -> int:\n    return a + b\n"
     assert encoded(src) == (
-        "$['fn, 'add, [$['type, 'int, [], []]], nil, nil, "
-        "[$['param, 'a, $['type, 'int, [], []]], "
-        "$['param, 'b, $['type, 'str, [], []]]], [], "
+        "$['fn, 'add, [$['int]], nil, nil, "
+        "[$['param, 'a, $['int]], "
+        "$['param, 'b, $['str]]], [], "
         "[$['return, $['binop, '+, $['name, 'a], $['name, 'b]]]]]"
     )
 
@@ -157,20 +157,58 @@ def test_dispatch_types_are_name_nodes():
     assert sexpr.decode(encode_first(src)).class_target == ["Box"]
 
 
-def test_qualified_type_splits_into_name_and_qualifier():
+def test_qualified_type_splits_into_a_qualified_name():
     tree = ast.TypeExpr(["std", "io", "File"])
-    assert _to_str(sexpr.encode(tree)) == "$['type, 'File, ['std, 'io], []]"
-    assert sexpr.decode(sexpr.encode(tree)).parts == ["std", "io", "File"]
+    assert _to_str(sexpr.encode(tree)) == "$['qualified_name, 'std, 'io, 'File]"
+    assert sexpr.decode_type(sexpr.encode(tree)).parts == ["std", "io", "File"]
 
 
-def test_type_union_collapses_to_its_first_alternative():
-    """The same thing `ann_type` (wyrm.gram) does, so this is the
-    interpreter's own behaviour rather than a loss the bridge introduces."""
-    union = sexpr.node(
-        "type_union",
-        [sexpr.encode(ast.TypeExpr(["str"])), sexpr.encode(ast.TypeExpr(["nil"]))],
+def test_unannotated_var_target_is_type_auto():
+    """`x := 1` (no annotation) encodes its target's type as `$['type,
+    'auto]`, matching the reference parser's `_mk_type_expression` default -
+    see `sexpr._encode_var_type`."""
+    assert encoded("x := 1") == "$['define, 'x', $['type, 'auto], $['int, 1]]"
+    assert sexpr.decode(encode_first("x := 1")).targets[0].type is None
+
+
+def test_var_with_explicit_type():
+    assert encoded("var count: int = 0") == (
+        "$['define, 'count', $['int], $['int, 0]]"
     )
-    assert sexpr.decode_type(union).parts == ["str"]
+
+
+def test_multi_target_var_is_define_values():
+    """`var a: int, b: float = 4, 4.2` - one `'define_values` carrying a
+    `[name, type]` pair per target and the whole init tuple, matching the
+    reference parser's `_build_define` (wy/wyrm/parser/parser.wy)."""
+    src = "var a: int, b: float = 4, 4.2"
+    assert encoded(src) == (
+        "$['define_values, [['a', $['int]], ['b', $['float]]], "
+        "$['tuple, [$['int, 4], $['float, 4.2]]]]"
+    )
+    back = sexpr.decode(encode_first(src))
+    assert [(t.name, t.type.parts) for t in back.targets] == [
+        ("a", ["int"]), ("b", ["float"]),
+    ]
+    assert [v.value for v in back.values] == ["4", "4.2"]
+
+
+def test_every_kind_round_trips_multi_target_var():
+    once = encode_first("var a: int, b: float = 4, 4.2")
+    twice = sexpr.encode(sexpr.decode(once))
+    assert _to_str(once) == _to_str(twice)
+
+
+def test_module_wraps_a_programs_statements_directly():
+    """`'module` splices its statements as direct siblings rather than a
+    single list-valued field - see `sexpr._encode_program`."""
+    tree = parse("x := 1\ny := 2\n")
+    assert _to_str(sexpr.encode(tree)) == (
+        "$['module, $['define, 'x', $['type, 'auto], $['int, 1]], "
+        "$['define, 'y', $['type, 'auto], $['int, 2]]]"
+    )
+    back = sexpr.decode(sexpr.encode(tree))
+    assert [type(s).__name__ for s in back.body] == ["VarDecl", "VarDecl"]
 
 
 def test_a_child_list_may_come_back_as_a_pair_list():
@@ -187,7 +225,6 @@ CANNOT_CROSS = [
     ("class Foo:\n    slot a: int\n", "class"),
     ("from a::b import x\n", "from-import"),
     ("x := a in b", "'in' operator"),
-    ("var a, b = 1, 2", "multiple declaration"),
     ("for i in xs:\n    pass\nelse:\n    pass\n", "for/else"),
     ("fn f(**kw):\n    pass\n", "kwargs"),
 ]

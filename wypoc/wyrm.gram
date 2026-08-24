@@ -310,9 +310,9 @@ type_expr[object]:
 # ("Type constraints may represent summation types as well", used
 # throughout the spec's prose as e.g. `-> int | error`). This POC doesn't
 # model types at runtime beyond a couple of decorative checks (see
-# wyrm_eval_parse_tree.py's _zero_value/_matches_type and
-# compiler_c/wtypes.ctype), so a union annotation parses fully but keeps
-# only its first arm - good enough to accept the spec's own examples
+# wyrm_eval_parse_tree.py's _zero_value/_matches_type), so a union
+# annotation parses fully but keeps only its first arm - good enough to
+# accept the spec's own examples
 # without needing every annotation field to become a list.
 ann_type[object]:
     | first=type_expr ("|" type_expr)* { first }

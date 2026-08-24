@@ -54,6 +54,18 @@ fn [TreeBase] arity():
     n := len(nth(s, 5))
     return rebuild_fn(s, [$['return, $['int, n]]])
 
+# A type is a bare-name node ($['int]) or, qualified, $['qualified_name,
+# seg, ..., name] - the name is the head symbol, except for the qualified
+# shape where it's the last segment.
+fn type_name(ty) -> TreeBase:
+    head := car(ty)
+    if head != 'qualified_name:
+        return head
+    segs := cdr(ty)
+    while cdr(segs) != nil:
+        segs = cdr(segs)
+    return car(segs)
+
 # Reads the *types* in a signature. Types are carried by the format and
 # enforced by nothing, which is exactly what makes them a decorator's to
 # read: this one answers the declared parameter type names as a list.
@@ -65,7 +77,7 @@ fn [TreeBase] param_types():
         if ty == nil:
             out ! append($['str, "?"])
         else:
-            out ! append($['str, str(nth(ty, 1))])
+            out ! append($['str, str(type_name(ty))])
     return rebuild_fn(s, [$['return, $['list, out]]])
 
 # --- templates ------------------------------------------------------------

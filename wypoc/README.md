@@ -31,7 +31,6 @@ tools/generate_parser.py  regenerates parser.py from wyrm.gram
   wyrm_eval_parse_tree.py the tree-walking evaluator (the interpreter proper)
   sexpr.py                the s-expression wire format a tree crosses in/out of
                            wyrm code (what a decorator sees) - see below
-  compiler_c/             wyrm --compile: translates a module to C (see below)
   wyrm_modules.py         WYRM_PATH search-path resolution (no eval/parse dependency)
   wyrm_io.py              POSIX-ish low-level I/O primitives (__open/__read/...)
   symbols.py              static symbol table for one parsed module
@@ -67,10 +66,6 @@ ast_nodes.Program (a tree of dataclasses)
    |      v
    |   side effects on ctx (a dict[str, Variable]) + real I/O via wyrm_io
    |
-   +-- compiler_c.compile_module(tree, module_name)          [--compile: translate it]
-   |      v
-   |   C source text targeting the real wyrm VM calling convention
-   |
    +-- symbols.build(tree)                                   [wyrm-lsp: analyze it]
           v
        a SymbolTable of declarations/references, which symbol_index.py
@@ -89,9 +84,6 @@ PYTHONPATH=. .venv/bin/python wypoc/parse.py wypoc/samples/basics.wy
 
 # parse + run a script (after `pip install -e .`, see below)
 .venv/bin/wyrm wypoc/samples/eval_functions.wy
-
-# parse + compile a module to C instead of running it
-.venv/bin/wyrm --compile wypoc/samples/compile_tail_call.wy
 ```
 
 ### Why a custom tokenizer
@@ -314,95 +306,6 @@ round trip) are native, and need no `import static`.
 through the wyrm-written decorators in `samples/decolib.wy`;
 `test/test_sexpr.py` covers the bridge on its own, including each kind's
 documented shape and each failure mode.
-
-### The compiler (`wyrm --compile`)
-
-`compiler_c/` is a second, alternative backend over the same `ast_nodes.py`
-tree the evaluator walks: instead of running a module, it translates it to C -
-a real step toward wyrm's stated goal of self-hosting with C as its "assembly
-language" (see `doc/language-spec.md`'s "Native Code" section).
-
-It targets the **native calling convention of the wyrm-language interpreter**,
-which is the same shape that interpreter's own builtins have:
-
-```c
-bool w_{module}_{fn}(wyrm_lang_vm* vm, wyrm_value* args,
-                     wyrm_uword argc, wyrm_value* out);
-```
-
-`false` out means it failed, with the error already recorded; otherwise the
-result goes through `*out`. Inside the body a wyrm local is an **ordinary C
-variable** of its declared type, so arithmetic compiles to arithmetic and
-boxing happens only at the boundaries - parameters in, call arguments out, the
-result. Each module ends with a `{MODULE}_BUILTINS[]` table naming its
-functions, so a host installs the whole module by walking one array.
-
-This convention can hold a C stack frame across a call, and that one fact is
-what makes the generated code look like the wyrm it came from: `if` is `if`,
-`while` is `while`, `break` is `break`, and a call is a call - anywhere in an
-expression. An earlier version of this backend targeted the object-system VM's
-*resumable* convention instead, where a function could not, and paid for it
-with a graph of `static` chunks per function, locals living in fixed
-value-stack slots, branches as pending-function jumps, and a restriction that
-a call could only appear as a whole statement or a bare `return`. All of that
-is gone; `compiler_c/DESIGN.md` has the before/after table and the reasoning.
-
-Still a narrow slice, not a general compiler:
-
-- A module must `import native` to be compile-eligible at all (this is also
-  what the spec says marks a module as compile-only, not for runtime
-  interpretation) and must be single-file (no `import`/`from`).
-- Types are `int`/`uint`/`bool`/`float`. `str` and the collection types need a
-  story for GC-managed values in generated code first - a `wyrm_value` holding
-  a heap object has to be reachable by the collector, which the scalar types
-  sidestep entirely.
-- `fn` bodies get arithmetic/comparison/boolean expressions,
-  `if`/`elif`/`else`, `while`, `break`/`continue`, `return`, and calls to
-  other compiled functions in the same module. There is no type inference, so
-  a local needs a declared type: `var x: int = 1`, not `x := 1`.
-- A call may appear anywhere in an expression. It compiles to a statement
-  assigning a temporary, which two constructs care about: `and`/`or` rebuild
-  their short circuit around a `bool` temporary when the right operand hoists
-  anything (C's `&&` would have run it unconditionally), and a `while` whose
-  condition hoists becomes `for (;;) { <hoisted> if (!cond) break; ... }` so
-  the condition is still re-evaluated each iteration.
-- `class` defs compile to a builder function returning the interpreter's class
-  object: typed slots, each with a constant default (or its type's zero
-  value). Inheritance, slot options, and class-body methods are not supported.
-- `native::block('PORTION, $[inputs...], $[outputs...], R"tag(...)tag")` works
-  at module top level (spliced into the matching `HEADER`/`TYPES`/
-  `CONSTANTS`/`PROTOS`/`FUNCTIONS` output section) and as a function-body
-  statement. In a body it needs no marshalling at all - a wyrm local is
-  already a C local of the same name - so the declared input/output lists are
-  checked and then recorded as a comment.
-- `for`, messages (`fn [Cls] ...`), coroutines, `defer`, `try`/`catch`,
-  `static` locals, collections, lambdas, and multi-module compilation are
-  unimplemented - each raises `CompileError` with a specific message, the same
-  "fail loud, not silently wrong" convention as the interpreter's own known
-  gaps below.
-
-One thing the output needs that the target interpreter doesn't yet offer: a
-way to *append* to its builtin table. The generated registration table is that
-interpreter's own row type, so installing a compiled module is a small hook on
-its side - and the only part of the output that isn't already compilable
-against what it exposes.
-
-```bash
-.venv/bin/wyrm --compile module.wy              # C source to stdout
-.venv/bin/wyrm --compile -o module.c module.wy  # ...or to a file
-```
-
-`test/test_compiler_c.py` covers the supported fixtures
-(`wypoc/samples/compile_*.wy`) and one `CompileError` case per documented
-scope cut, and then hands every fixture to a real C compiler with
-`-Wall -Werror` against `test/native/lang_internal.h` - a stub of exactly the
-interpreter surface the output is allowed to depend on. That catches what
-string assertions miss (a mismatched brace, a value read through the wrong
-union field, a call with the wrong arity) and keeps the dependency explicit:
-widening what the compiler emits means widening that header first. It is
-deliberately a stub rather than the real header from a sibling checkout, so
-the check can't quietly stop running for whoever doesn't have one.
-
 ### `corelib/` and the `wyrm` command
 
 `wypoc/corelib/` is a small standard library written in wyrm, demonstrating
@@ -582,7 +485,6 @@ Or a single file:
 | `test_completion.py` | `completion.py`: reading the trigger/prefix out of raw text (including a decimal point that isn't an attribute access), what each trigger offers, the scope ordering, a loop variable's range, and that a document which doesn't parse - or never has - still answers. Plus the `lsp.py` adapter's replacement range and kind mapping. |
 | `test_sexpr.py` | `sexpr.py` on its own: each node kind's documented s-expression shape, that every kind round-trips, the irregular cases (`elif` as a nested `if`, the `*rest` position, qualified types, a union collapsing), and each failure mode - a construct the format lacks, and a malformed s-expression coming back. |
 | `test_eval_decorators.py` | `samples/decorators.wy` end to end: every kind through `@__identity`, definitions rebuilt and still binding, decorators written in wyrm (`samples/decolib.wy`) rewriting bodies and reading signatures, templates and `$ast`, the `__sexpr` hook - plus the failure modes a sample can't reach (an unreachable decorator, a non-tree answer, a qualified name, the once-per-node rewrite). |
-| `test_compiler_c.py` | `wyrm --compile` (`compiler_c/`): structural checks on the generated C - the calling convention, argument checking, control flow, nested calls, short-circuit lowering, floats, class builders, `native::block` splices, the registration table; one `CompileError` per documented scope cut; and every fixture run through a real C compiler with `-Wall -Werror` against `test/native/lang_internal.h`. |
 
 ## Known gaps
 
@@ -656,9 +558,3 @@ fully drivable (`next`/`send`/`yield from`), `init`-based construction
 with real constructor arguments works, and attribute assignment
 (`this.x = v` / `obj.x = v`) works - none of those are gaps, despite what
 older notes here may have implied.
-
-`wyrm --compile` (`compiler_c/`) has its own, much narrower, set of
-deliberate scope cuts (`str` and the collection types, `for`, messages,
-coroutines, `defer`/`try`, multi-module compilation) - see "The compiler"
-above rather than this list, since they're compile-time-only and don't affect
-the interpreter.

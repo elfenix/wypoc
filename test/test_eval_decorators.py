@@ -145,10 +145,10 @@ def test_dump_prints_the_s_expression_it_would_receive(output):
 def test_dump_shows_a_signature_with_its_types(output):
     dumped = [line for line in output if line.startswith("$['fn, 'typed")]
     assert dumped == [
-        "$['fn, 'typed, [$['type, 'int, [], []]], nil, nil, "
-        "[$['param, 'a, $['type, 'int, [], []]], "
-        "$['param, 'b, $['type, 'str, [], []]], "
-        "$['param, 'c, $['type, 'Circle, ['shapes], []]]], [], "
+        "$['fn, 'typed, [$['int]], nil, nil, "
+        "[$['param, 'a, $['int]], "
+        "$['param, 'b, $['str]], "
+        "$['param, 'c, $['qualified_name, 'shapes, 'Circle]]], [], "
         "[$['return, $['name, 'a]]]]"
     ]
 
@@ -156,8 +156,8 @@ def test_dump_shows_a_signature_with_its_types(output):
 def test_dump_shows_the_rest_parameter_in_its_own_position(output):
     dumped = [line for line in output if line.startswith("$['fn, 'spread")]
     assert dumped == [
-        "$['fn, 'spread, [$['type, 'int, [], []]], $['param, 'others, nil], nil, "
-        "[$['param, 'a, $['type, 'int, [], []]]], [], "
+        "$['fn, 'spread, [$['int]], $['param, 'others, nil], nil, "
+        "[$['param, 'a, $['int]]], [], "
         "[$['return, $['name, 'a]]]]"
     ]
 
@@ -242,7 +242,7 @@ def _sexpr_of(src: str) -> str:
 
 
 def test_parse_of_one_statement_unboxes_to_its_own_tree():
-    assert _sexpr_of("v := 5") == "$['decl, 'v, $['int, 5]]"
+    assert _sexpr_of("v := 5") == "$['define, 'v', $['type, 'auto], $['int, 5]]"
 
 
 def test_parse_of_one_expression_unboxes_to_its_own_tree():
@@ -253,8 +253,12 @@ def test_parse_of_several_statements_is_a_list_of_boxed_trees():
     ctx = run('xs := parse("a := 1\\nb := 2")\nx := sexpr(xs[0])\ny := sexpr(xs[1])\n')
     assert isinstance(ctx["xs"].value, list)
     assert len(ctx["xs"].value) == 2
-    assert wyrm_builtins.display(ctx["x"].value) == "$['decl, 'a, $['int, 1]]"
-    assert wyrm_builtins.display(ctx["y"].value) == "$['decl, 'b, $['int, 2]]"
+    assert wyrm_builtins.display(ctx["x"].value) == (
+        "$['define, 'a', $['type, 'auto], $['int, 1]]"
+    )
+    assert wyrm_builtins.display(ctx["y"].value) == (
+        "$['define, 'b', $['type, 'auto], $['int, 2]]"
+    )
 
 
 def test_parse_of_blank_source_is_nil():

@@ -80,7 +80,7 @@ def test_dumps_round_trips_through_loads():
 def test_dumps_output_starts_with_program_form():
     tree = parse(SRC)
     expand_decorators(tree, _ctx())
-    assert wys.dumps(tree).startswith("$['program, [")
+    assert wys.dumps(tree).startswith("$['module, ")
 
 
 def test_dumps_spells_strings_as_double_quoted_literals():

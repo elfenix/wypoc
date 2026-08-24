@@ -86,7 +86,7 @@ _FALSE = {"false", "no", "off", "0"}
 
 # `wyrm --no-config`: process-wide, set once at startup (cli.py) before
 # anything reads a config file. Every mode - REPL, `-c`, running a script,
-# --compile/--dump-wys/--compile-py, --check - funnels through `load`/
+# --dump-wys, --check - funnels through `load`/
 # `load_overrides` below, so flipping this one flag makes all of them run on
 # plain OPTIONS defaults with no file ever touched, no project root scanned,
 # and no preamble run (project.load_options short-circuits to `root=None`

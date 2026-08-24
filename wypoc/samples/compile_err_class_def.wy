@@ -1,7 +1,0 @@
-import native
-
-class Foo:
-    slot x: int
-
-    fn init(x: int):
-        this.x = x

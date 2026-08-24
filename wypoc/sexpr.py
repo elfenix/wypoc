@@ -42,10 +42,12 @@ consequences worth knowing:
   is a builtin binding) and spells `this` as its own `ThisRef` node. Both
   cross as the kinds the format defines (`'nil`, and `'name` with the name
   `this`), so a decorator sees the format's shape either way.
-* **Types are carried, and lossily.** This interpreter's annotation grammar
-  keeps only the first arm of a union (see wyrm.gram's `ann_type`), so a
-  `'type_union` coming back in collapses to its first alternative. Nothing
-  downstream enforces types, here or there.
+* **Types are carried, and lossily.** A type crosses as a bare-name node
+  (`$['int]`) or, qualified, `$['qualified_name, seg, ..., name]` - the same
+  shapes the reference parser's `qualified_name` action produces (see
+  `_encode_type`/`decode_type`). This grammar's `ann_type` (wyrm.gram) keeps
+  only the first arm of a `->` return-type union, so a multi-type result
+  cannot cross. Nothing downstream enforces types, here or there.
 * **No source positions.** A node carries no line or token range, so a tree
   rebuilt from an s-expression reports at the decorator that produced it. The
   AST's `pos` fields come back `None`, which every consumer already tolerates
@@ -109,7 +111,8 @@ TEXT = "text"          # a str attribute      -> str
 NODE = "node"          # a child node         -> node, or nil when absent
 NODES = "nodes"        # a list of children   -> list of nodes
 NAMES = "names"        # a list of str        -> list of 'name nodes
-TYPES = "types"        # a list of TypeExpr   -> list of 'type nodes
+TYPES = "types"        # a list of TypeExpr   -> list of type nodes
+TYPE = "type"          # an optional TypeExpr -> type node, or nil when absent
 RESERVED = "reserved"  # always nil, and only nil is accepted back
 
 
@@ -141,13 +144,6 @@ class Row:
 
 
 ROWS = (
-    # --- whole compilation units --------------------------------------------
-    # Not something a decorator ever receives (a decorator is handed one
-    # statement or expression, never a whole file) - this row exists for
-    # wys.py, which serializes an entire `ast.Program` the same way sexpr.py
-    # already serializes one node, by reading the same table.
-    Row(ast.Program, "program", F("body", NODES)),
-
     # --- literals and names ------------------------------------------------
     # `'int`/`'float`/`'str` are irregular: those nodes hold raw token text
     # (see "Strings and numbers" below), so they live in _ENCODERS/_DECODERS.
@@ -192,7 +188,7 @@ ROWS = (
     Row(ast.WithBlock, "with", F("bindings", NODES)),
 
     # --- definitions -------------------------------------------------------
-    Row(ast.Param, "param", F("name", SYM), F("type", NODE),
+    Row(ast.Param, "param", F("name", SYM), F("type", TYPE),
         defaults={"default": None}),
 
     # --- decorators ----------------------------------------------------
@@ -395,6 +391,8 @@ def _encode_field(field: F, tree):
         return [node("name", Symbol(name)) for name in (value or ())]
     if field.kind is TYPES:
         return [_encode_type(t) for t in (value or ())]
+    if field.kind is TYPE:
+        return NIL if value is None else _encode_type(value)
     raise AssertionError(f"unknown field kind {field.kind!r}")
 
 
@@ -412,14 +410,28 @@ def _encode_str(tree: ast.Str):
 
 
 def _encode_type(tree):
-    """A `'type`: the name, the `::` segments before it, and its type
-    parameters. This grammar doesn't parse type parameters, so that list is
-    always empty going out - the position is still there for a decorator to
-    read, and is accepted (and dropped) coming back."""
+    """A concrete type: a bare-name node (`$['int]`) for one unqualified
+    name, or `$['qualified_name, seg, ...]` for a `::`-qualified one - the
+    same two shapes the reference implementation's own `qualified_name`
+    parser action produces (a single segment collapses to just that
+    segment, see wy/wyrm/parser/parser.wy's `_mk_qualified_name`). The
+    `$['type, 'auto]` sentinel for "no annotation" is a different position
+    (see `_encode_var_type`) - this function only ever sees an actual
+    type."""
     if not isinstance(tree, ast.TypeExpr) or not tree.parts:
         raise SexprError("a type must be a name, optionally qualified")
-    qualifier = [Symbol(part) for part in tree.parts[:-1]]
-    return node("type", Symbol(tree.parts[-1]), qualifier, [])
+    if len(tree.parts) == 1:
+        return node(tree.parts[0])
+    return node("qualified_name", *[Symbol(part) for part in tree.parts])
+
+
+def _encode_var_type(type_expr):
+    """A `var`/`define` target's type position: `$['type, 'auto]` when no
+    annotation was written, the ordinary type shape otherwise - matching
+    `_mk_type_expression`'s default in the reference parser."""
+    if type_expr is None:
+        return node("type", Symbol("auto"))
+    return _encode_type(type_expr)
 
 
 def _encode_binop(tree: ast.BinOp):
@@ -472,15 +484,26 @@ def _encode_for(tree: ast.For):
 
 
 def _encode_var_decl(tree: ast.VarDecl):
-    """`'decl` is one name and one value. A `var a, b = 1, 2` declares
-    several at once, which the format has no position for."""
-    if len(tree.targets) != 1:
-        raise SexprError("a multiple declaration cannot cross into a decorator yet")
+    """`'define, name, type, value` for one target - the reference
+    implementation's `_build_define` (wy/wyrm/parser/parser.wy). Several
+    targets at once (`var a, b = 1, 2`) becomes `'define_values`: a list of
+    `[name, type]` pairs plus the single init expression, wrapped in a
+    `'tuple` node when there's more than one value - `_build_define` always
+    hands `'define_values` one init expression, never one per target."""
+    if len(tree.targets) == 1:
+        target = tree.targets[0]
+        value = tree.values[0] if tree.values else None
+        return node("define", target.name, _encode_var_type(target.type),
+                    encode(value))
+    pairs = [[target.name, _encode_var_type(target.type)] for target in tree.targets]
     values = tree.values
-    if values is not None and len(values) != 1:
-        raise SexprError("a multiple declaration cannot cross into a decorator yet")
-    value = values[0] if values else None
-    return node("decl", Symbol(tree.targets[0].name), encode(value))
+    if not values:
+        value_node = NIL
+    elif len(values) == 1:
+        value_node = encode(values[0])
+    else:
+        value_node = encode(ast.Tuple(values))
+    return node("define_values", pairs, value_node)
 
 
 def _encode_assign(tree: ast.Assign):
@@ -554,6 +577,14 @@ def _encode_import(tree: ast.Import):
                 except_names)
 
 
+def _encode_program(tree: ast.Program):
+    """`'module` splices its statements directly as siblings of the head
+    symbol (`$['module, stmt, stmt, ...]`) rather than carrying them in a
+    single list-valued field, matching the reference parser's `_mk_module`
+    (`cons('module, expr)` over the already-flat statement list)."""
+    return _pairs([Symbol("module")] + [encode(s) for s in tree.body])
+
+
 _ENCODERS = {
     ast.Num: _encode_num,
     ast.Str: _encode_str,
@@ -570,6 +601,7 @@ _ENCODERS = {
     ast.FnDef: _encode_fn,
     ast.Import: _encode_import,
     ast.TypeExpr: _encode_type,
+    ast.Program: _encode_program,
     ast.ThisRef: lambda tree: node("name", Symbol("this")),
     ast.Name: lambda tree: (node("nil") if tree.id == "nil"
                             else node("name", Symbol(tree.id))),
@@ -635,6 +667,8 @@ def _decode_field(field: F, value, kind: str):
     if field.kind is TYPES:
         return [decode_type(child)
                 for child in _as_list(value, f"'{kind}'s {field.attr}")]
+    if field.kind is TYPE:
+        return None if value is NIL or value is None else decode_type(value)
     raise AssertionError(f"unknown field kind {field.kind!r}")
 
 
@@ -648,31 +682,35 @@ def _decode_dispatch_name(sexpr) -> str:
 
 
 def decode_type(sexpr) -> ast.TypeExpr:
-    """A `'type` or `'type_union` back into this AST's `TypeExpr`.
-
-    A union collapses to its first alternative: `ann_type` (wyrm.gram) keeps
-    only the first arm too, so this is the interpreter's own behaviour rather
-    than a loss the bridge introduces. Type parameters are accepted and
-    dropped for the same reason - this grammar has no field to put them in."""
+    """A bare-name node (`$['int]`) or a `'qualified_name` back into this
+    AST's `TypeExpr` - the counterpart of `_encode_type`. Never sees the
+    `$['type, 'auto]` sentinel: that's decoded by `_decode_var_type`, the
+    one position ("no annotation was written") this function doesn't
+    handle."""
     kind, fields = _fields_of(sexpr)
-    if kind == "type_union":
-        alternatives = _as_list(fields[0] if fields else NIL, "'type_union's alternatives")
-        if not alternatives:
-            raise SexprError("a 'type_union needs at least one alternative")
-        return decode_type(alternatives[0])
-    if kind != "type":
+    if kind == "qualified_name":
+        segments = []
+        for segment in fields:
+            if not isinstance(segment, Symbol):
+                raise SexprError("a 'qualified_name's segments must be symbols")
+            segments.append(segment.name)
+        if not segments:
+            raise SexprError("a 'qualified_name needs at least one segment")
+        return ast.TypeExpr(segments)
+    if fields:
         raise SexprError(f"'{kind} is not a type")
-    if len(fields) != 3:
-        raise SexprError(f"'type takes 3 field(s), not {len(fields)}")
-    name, qualifier, _params = fields
-    if not isinstance(name, Symbol):
-        raise SexprError(f"'type's name must be a symbol, not a {_type_name(name)}")
-    segments = []
-    for segment in _as_list(qualifier, "'type's qualifier"):
-        if not isinstance(segment, Symbol):
-            raise SexprError("a 'type's qualifier is a list of symbols")
-        segments.append(segment.name)
-    return ast.TypeExpr(segments + [name.name])
+    return ast.TypeExpr([kind])
+
+
+def _decode_var_type(sexpr):
+    """A `var`/`define` target's type position: `None` for the `$['type,
+    'auto]` sentinel (no annotation was written), `decode_type` otherwise."""
+    kind, fields = _fields_of(sexpr)
+    if kind == "type":
+        if len(fields) == 1 and isinstance(fields[0], Symbol) and fields[0].name == "auto":
+            return None
+        raise SexprError("'type's only field must be 'auto")
+    return decode_type(sexpr)
 
 
 def _expect(fields: list, count: int, kind: str) -> list:
@@ -743,13 +781,42 @@ def _decode_for(kind: str, fields: list):
                    [decode(s) for s in _as_list(body, "'for's body")], None)
 
 
-def _decode_decl(kind: str, fields: list):
-    name, value = _expect(fields, 2, kind)
-    if not isinstance(name, Symbol):
-        raise SexprError("'decl's name must be a symbol")
-    decoded = _decode_child(value, "'decl's value")
-    return ast.VarDecl([ast.VarTarget(name.name, None)],
-                       None if decoded is None else [decoded])
+def _decode_target_name(value, kind: str) -> str:
+    if not isinstance(value, str) or isinstance(value, Symbol):
+        raise SexprError(f"'{kind}'s name must be a str, not a {_type_name(value)}")
+    return value
+
+
+def _decode_define(kind: str, fields: list):
+    name, type_sexpr, value = _expect(fields, 3, kind)
+    target = ast.VarTarget(_decode_target_name(name, kind), _decode_var_type(type_sexpr))
+    decoded = _decode_child(value, "'define's value")
+    return ast.VarDecl([target], None if decoded is None else [decoded])
+
+
+def _decode_define_values(kind: str, fields: list):
+    pairs, value = _expect(fields, 2, kind)
+    targets = []
+    for entry in _as_list(pairs, "'define_values's targets"):
+        entry_fields = _as_list(entry, "'define_values's target")
+        if len(entry_fields) != 2:
+            raise SexprError("a 'define_values target must be $[name, type]")
+        name, type_sexpr = entry_fields
+        targets.append(
+            ast.VarTarget(_decode_target_name(name, kind), _decode_var_type(type_sexpr))
+        )
+    if not targets:
+        raise SexprError("'define_values needs at least one target")
+    decoded = _decode_child(value, "'define_values's value")
+    if decoded is None:
+        values = None
+    elif isinstance(decoded, ast.Tuple):
+        if len(decoded.items) != len(targets):
+            raise SexprError("'define_values's value tuple must match its targets")
+        values = decoded.items
+    else:
+        raise SexprError("'define_values's value must be a 'tuple")
+    return ast.VarDecl(targets, values)
 
 
 def _decode_assign(kind: str, fields: list):
@@ -859,6 +926,13 @@ def _decode_import(kind: str, fields: list):
                       _decode_flag(static, kind, "static"), except_v)
 
 
+def _decode_module(kind: str, fields: list):
+    """`'module`'s statements are spliced in directly (see `_encode_program`
+    for why), so `fields` - already just "everything after the head symbol"
+    per `_fields_of` - is the statement list as-is."""
+    return ast.Program([decode(s) for s in fields])
+
+
 _DECODERS = {
     "int": _decode_num,
     "float": _decode_num,
@@ -871,13 +945,15 @@ _DECODERS = {
     "catch_return": _decode_catch,
     "if": _decode_if,
     "for": _decode_for,
-    "decl": _decode_decl,
+    "define": _decode_define,
+    "define_values": _decode_define_values,
     "assign": _decode_assign,
     "qassign": _decode_assign,
     "with": _decode_with,
     "defer": _decode_defer,
     "defer_on": _decode_defer,
     "fn": _decode_fn,
+    "module": _decode_module,
     # `this` is its own node here and a plain name there, so the general
     # `'name` row can't serve both - this one splits them by name.
     "name": lambda kind, fields: (
@@ -886,16 +962,3 @@ _DECODERS = {
         else _decode_row(_ROWS_BY_KIND["name"], kind, fields)
     ),
 }
-
-
-def _wrap_type_decoder(fn):
-    """`decode_type` takes the s-expression, while a `_DECODERS` entry takes
-    the already-split kind and fields. One adapter rather than a second
-    parser for the same two kinds."""
-    def decoder(kind: str, fields: list):
-        return fn(_pairs([Symbol(kind)] + list(fields)))
-    return decoder
-
-
-_DECODERS["type"] = _wrap_type_decoder(decode_type)
-_DECODERS["type_union"] = _wrap_type_decoder(decode_type)

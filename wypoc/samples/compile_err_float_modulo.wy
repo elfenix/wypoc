@@ -1,4 +1,0 @@
-import native
-
-fn f(a: float, b: float) -> float:
-    return a % b

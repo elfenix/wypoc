@@ -1,6 +1,0 @@
-import native
-
-fn f() -> int:
-    var x: int = 1
-    x ?= 2
-    return x

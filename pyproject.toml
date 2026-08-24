@@ -28,9 +28,7 @@ wyrm-lsp = "wypoc.lsp:main"
 wyrm-dap = "wypoc.dap.server:main"
 
 [tool.setuptools]
-# `wypoc.compiler_c` is a package of its own, so it needs listing here too -
-# an editable install papers over its absence, a real one does not.
-packages = ["wypoc", "wypoc.compiler_c", "wypoc.dap"]
+packages = ["wypoc", "wypoc.dap"]
 
 [tool.setuptools.package-data]
 wypoc = ["*.gram", "corelib/**/*.wy"]

@@ -1,6 +1,0 @@
-import static shapes
-import compile_py_lib::(double)
-
-c := shapes::Circle()
-area := c!area()
-doubled := double(21)

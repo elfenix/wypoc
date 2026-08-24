@@ -200,14 +200,14 @@ def test_dump_wys_writes_a_compiled_unit(tmp_path):
     r = run("--dump-wys", "-o", str(out), str(src))
     assert r.returncode == 0, f"stderr={r.stderr!r}"
     text = out.read_text()
-    assert text.startswith("$['program, [")
+    assert text.startswith("$['module, ")
     assert '"hi "' in text  # a real string literal, not the REPL's 'hi ' form
 
 
 def test_dump_wys_to_stdout_without_o():
     r = run("--dump-wys", SAMPLE)
     assert r.returncode == 0, f"stderr={r.stderr!r}"
-    assert r.stdout.startswith("$['program, [")
+    assert r.stdout.startswith("$['module, ")
 
 
 def test_running_a_wys_file_matches_running_its_source(tmp_path):
