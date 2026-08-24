@@ -495,12 +495,35 @@ def _encode_var_decl(tree: ast.VarDecl):
     return node("define_values", pairs, value_node)
 
 
+def _encode_assign_target(target):
+    """An assignment target: a bare symbol for a plain name, or the
+    expression it means (`$['attr, ...]`/`$['index, ...]`) otherwise -
+    `sym | pair` per the reference implementation's `n_set`/`n_set_values`
+    (wy/wyrm/ast.wy)."""
+    if isinstance(target, ast.NameTarget):
+        return Symbol(target.name)
+    return encode(target_to_expr(target))
+
+
 def _encode_assign(tree: ast.Assign):
-    if len(tree.targets) != 1 or len(tree.values) != 1:
+    """`=` -> `'set` (one target) or `'set_values` (more than one, the
+    value wrapped in a synthesized `'tuple` node), `?=` -> `'if_set` (one
+    target only) - matching the reference parser's `$_mk_assign` and
+    `n_set`/`n_set_values`/`n_if_set` (wy/wyrm/ast.wy)."""
+    if len(tree.targets) != len(tree.values):
         raise SexprError("a multiple assignment cannot cross into a decorator yet")
-    kind = "qassign" if tree.op == "?=" else "assign"
-    return node(kind, encode(target_to_expr(tree.targets[0])),
-                encode(tree.values[0]))
+    if tree.op == "?=":
+        if len(tree.targets) != 1:
+            raise SexprError("'?=' only supports a single assignment target")
+        return node("if_set", _encode_assign_target(tree.targets[0]),
+                    encode(tree.values[0]))
+    if len(tree.targets) == 1:
+        return node("set", _encode_assign_target(tree.targets[0]),
+                    encode(tree.values[0]))
+    targets = [_encode_assign_target(t) for t in tree.targets]
+    value_node = (encode(tree.values[0]) if len(tree.values) == 1
+                  else encode(ast.Tuple(tree.values)))
+    return node("set_values", targets, value_node)
 
 
 def _encode_with_simple(tree: ast.WithSimple):
@@ -816,10 +839,32 @@ def _decode_define_values(kind: str, fields: list):
     return ast.VarDecl(targets, values)
 
 
+def _decode_assign_target(value):
+    if isinstance(value, Symbol):
+        return ast.NameTarget(value.name)
+    return expr_to_target(decode(value))
+
+
 def _decode_assign(kind: str, fields: list):
     target, value = _expect(fields, 2, kind)
-    op = "?=" if kind == "qassign" else "="
-    return ast.Assign([expr_to_target(decode(target))], op, [decode(value)])
+    op = "?=" if kind == "if_set" else "="
+    return ast.Assign([_decode_assign_target(target)], op, [decode(value)])
+
+
+def _decode_set_values(kind: str, fields: list):
+    targets, value = _expect(fields, 2, kind)
+    decoded_targets = [_decode_assign_target(t)
+                       for t in _as_list(targets, "'set_values's targets")]
+    if not decoded_targets:
+        raise SexprError("'set_values needs at least one target")
+    decoded_value = decode(value)
+    if isinstance(decoded_value, ast.Tuple):
+        if len(decoded_value.items) != len(decoded_targets):
+            raise SexprError("'set_values's value tuple must match its targets")
+        values = decoded_value.items
+    else:
+        raise SexprError("'set_values's value must be a 'tuple")
+    return ast.Assign(decoded_targets, "=", values)
 
 
 def _decode_with(kind: str, fields: list):
@@ -944,8 +989,9 @@ _DECODERS = {
     "for": _decode_for,
     "define": _decode_define,
     "define_values": _decode_define_values,
-    "assign": _decode_assign,
-    "qassign": _decode_assign,
+    "set": _decode_assign,
+    "if_set": _decode_assign,
+    "set_values": _decode_set_values,
     "with": _decode_with,
     "defer": _decode_defer,
     "defer_on": _decode_defer,

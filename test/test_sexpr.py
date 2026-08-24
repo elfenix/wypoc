@@ -61,10 +61,10 @@ SHAPES = [
     ("x := v catch return 0",
      "$['define, 'x, $['type, 'auto], $['catch_return, $['name, 'v], $['int, 0]]]"),
     ("f(x)", "$['expr_stmt, $['call, $['name, 'f], [$['name, 'x]]]]"),
-    ("x = 1", "$['assign, $['name, 'x], $['int, 1]]"),
-    ("x ?= 1", "$['qassign, $['name, 'x], $['int, 1]]"),
-    ("a.b = 1", "$['assign, $['attr, $['name, 'a], 'b], $['int, 1]]"),
-    ("a[0] = 1", "$['assign, $['index, $['name, 'a], $['int, 0]], $['int, 1]]"),
+    ("x = 1", "$['set, 'x, $['int, 1]]"),
+    ("x ?= 1", "$['if_set, 'x, $['int, 1]]"),
+    ("a.b = 1", "$['set, $['attr, $['name, 'a], 'b], $['int, 1]]"),
+    ("a[0] = 1", "$['set, $['index, $['name, 'a], $['int, 0]], $['int, 1]]"),
     ("break", "$['break, nil]"),
     ("continue", "$['continue]"),
     ("pass", "$['pass]"),
@@ -197,6 +197,37 @@ def test_every_kind_round_trips_multi_target_var():
     once = encode_first("var a: int, b: float = 4, 4.2")
     twice = sexpr.encode(sexpr.decode(once))
     assert _to_str(once) == _to_str(twice)
+
+
+def test_multi_target_assign_is_set_values():
+    """`a, b = b, a` - one `'set_values` carrying a bare-symbol target list
+    and the whole value tuple, matching the reference parser's `$_mk_assign`
+    and `n_set_values` (wy/wyrm/ast.wy)."""
+    src = "a, b = b, a"
+    assert encoded(src) == (
+        "$['set_values, ['a, 'b], $['tuple, [$['name, 'b], $['name, 'a]]]]"
+    )
+    back = sexpr.decode(encode_first(src))
+    assert [t.name for t in back.targets] == ["a", "b"]
+    assert [v.id for v in back.values] == ["b", "a"]
+
+
+def test_every_kind_round_trips_multi_target_assign():
+    once = encode_first("a, b = b, a")
+    twice = sexpr.encode(sexpr.decode(once))
+    assert _to_str(once) == _to_str(twice)
+
+
+def test_qeq_rejects_more_than_one_target():
+    """`?=` only ever binds a single target - the reference parser's
+    `$_mk_assign` errors on this rather than producing an `'if_set` with
+    several, and this grammar doesn't even parse `a, b ?= ...` (`?=` isn't
+    one of `assign_op`'s multi-target forms), so this is asserted directly
+    against a hand-built tree rather than a `?=` source fixture."""
+    tree = ast.Assign([ast.NameTarget("a"), ast.NameTarget("b")], "?=",
+                      [ast.Num("1"), ast.Num("2")])
+    with pytest.raises(sexpr.SexprError, match="single assignment target"):
+        sexpr.encode(tree)
 
 
 def test_module_wraps_a_programs_statements_directly():
