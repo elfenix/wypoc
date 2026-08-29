@@ -1,0 +1,24 @@
+# Stage-1a data: the four literal forms, reading and writing through
+# attributes and indices, and the two shapes of multi-target assignment.
+fn build():
+    var numbers = [1, 2, 3]
+    var point = (4, 5)
+    var lookup = {"one": 1, "two": 2}
+    var pairs = $[6, 7]
+    return numbers, point, lookup, pairs
+
+fn read(items, table, key):
+    return items[0], table[key]
+
+fn write(items, index):
+    items[index] = 99
+    return items
+
+fn swap(a, b):
+    a, b = b, a
+    return a, b
+
+println(build())
+println(read([10, 20], {"k": 30}, "k"))
+println(write([1, 2, 3], 1))
+println(swap(1, 2))

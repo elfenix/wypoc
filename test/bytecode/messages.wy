@@ -1,0 +1,22 @@
+# Stage-1b messages: dispatch on a class defined outside its body, a message
+# bound without being sent, and dispatch on a tuple of receivers.
+class Meters:
+    slot value: int = 0
+
+    fn init(v):
+        this.value = v
+
+fn [Meters] doubled():
+    # `fn [T] name` registers a method for dispatch from outside any class
+    # body - the module registers it at load, against the message identity.
+    return this.value * 2
+
+fn [Meters] scaled(factor):
+    return this.value * factor
+
+one := Meters(21)
+println(one ! doubled())
+println(one ! scaled(3))
+
+bound := one ! doubled
+println(bound())

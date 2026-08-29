@@ -298,7 +298,7 @@ def test_running_a_script_creates_wycache_automatically(tmp_path):
 
     r = run(str(script))
     assert r.returncode == 0 and r.stdout == "hi"
-    cache_file = tmp_path / cache_mod.CACHE_DIR_NAME / "hello.wyc"
+    cache_file = tmp_path / cache_mod.CACHE_DIR_NAME / "hello.wy_ast"
     assert cache_file.is_file()
 
     # The cache is now a hit; the script still runs the same either way.
@@ -325,11 +325,97 @@ def test_a_corrupt_cache_file_does_not_stop_the_script_from_running(tmp_path):
     script.write_text('print("hi")\n')
     cache_dir = tmp_path / cache_mod.CACHE_DIR_NAME
     cache_dir.mkdir()
-    (cache_dir / "hello.wyc").write_bytes(b"not a pickle")
+    (cache_dir / "hello.wy_ast").write_bytes(b"not a pickle")
 
     r = run(str(script))
     assert r.returncode == 0, f"stderr={r.stderr!r}"
     assert r.stdout == "hi"
+
+
+# --- --vm (compile + bytecode VM, cached image) ---------------------------
+
+VM_SCRIPT = 'fn greet(name):\n    return "Hello " + name\n\nprintln(greet(__ARGS[0]))\n'
+
+
+def test_vm_mode_compiles_caches_the_image_and_runs_it(tmp_path):
+    script = tmp_path / "hello.wy"
+    script.write_text(VM_SCRIPT)
+
+    r = run("--vm", str(script), "World")
+    assert r.returncode == 0, f"stderr={r.stderr!r}"
+    assert r.stdout == "Hello World\n"
+
+    image = tmp_path / cache_mod.CACHE_DIR_NAME / "hello.wyc"
+    assert image.is_file(), "the compiled image went into __wycache__/"
+
+    # Second run: the image is fresh, so it is what runs - same output.
+    r = run("--vm", str(script), "again")
+    assert r.returncode == 0 and r.stdout == "Hello again\n"
+
+
+def test_a_fresh_cached_image_skips_parsing_the_source(tmp_path):
+    """The point of caching the image: a run that finds one newer than the
+    source never parses (or compiles) the source at all - so even source
+    that no longer parses still runs, until it is touched."""
+    script = tmp_path / "hello.wy"
+    script.write_text(VM_SCRIPT)
+    assert run("--vm", str(script), "World").returncode == 0
+
+    script.write_text("this is ( not wyrm\n")
+    image = tmp_path / cache_mod.CACHE_DIR_NAME / "hello.wyc"
+    os.utime(image, (os.path.getmtime(script) + 10,) * 2)
+
+    r = run("--vm", str(script), "World")
+    assert r.returncode == 0, f"stderr={r.stderr!r}"
+    assert r.stdout == "Hello World\n"
+
+
+def test_a_stale_cached_image_is_recompiled_from_the_edited_source(tmp_path):
+    script = tmp_path / "hello.wy"
+    script.write_text(VM_SCRIPT)
+    assert run("--vm", str(script), "World").returncode == 0
+
+    script.write_text('println("edited")\n')
+    image = tmp_path / cache_mod.CACHE_DIR_NAME / "hello.wyc"
+    os.utime(image, (0, 0))
+
+    r = run("--vm", str(script))
+    assert r.returncode == 0, f"stderr={r.stderr!r}"
+    assert r.stdout == "edited\n"
+
+
+def test_vm_mode_matches_the_tree_walker_on_the_same_script(tmp_path):
+    script = tmp_path / "hello.wy"
+    script.write_text(VM_SCRIPT)
+    walked = run(str(script), "World")
+    compiled = run("--vm", str(script), "World")
+    assert walked.stdout == compiled.stdout == "Hello World\n"
+    assert walked.returncode == compiled.returncode == 0
+
+
+def test_vm_mode_propagates_the_scripts_exit_code(tmp_path):
+    script = tmp_path / "bye.wy"
+    script.write_text("exit(3)\n")
+    assert run("--vm", str(script)).returncode == 3
+
+
+def test_vm_mode_reports_a_compile_error_rather_than_running(tmp_path):
+    script = tmp_path / "broken.wy"
+    script.write_text("x = 1\n")  # never declared: the compiler refuses it
+    r = run("--vm", str(script))
+    assert r.returncode == 1
+    assert "cannot assign to 'x'" in r.stderr
+    assert not (tmp_path / cache_mod.CACHE_DIR_NAME / "broken.wyc").exists(), \
+        "nothing that failed to compile gets cached"
+
+
+def test_vm_mode_rejects_the_modes_it_cannot_combine_with():
+    for args in (("--vm", "-c", "println(1)"),
+                 ("--vm", "--check", str(SAMPLE)),
+                 ("--vm", "--build-bc", str(SAMPLE))):
+        r = run(*args)
+        assert r.returncode == 2, f"{args} -> {r.returncode}"
+        assert "--vm cannot be used with" in r.stderr
 
 
 def test_no_tui_overrides_the_configured_default():
@@ -347,3 +433,182 @@ def test_configured_compact_reaches_the_repl():
     # the brackets themselves are wrapped in colour escapes, so the string
     # isn't there contiguously to look for.
     assert "1, 2, 3" in r.stdout, "the config file's compact took effect"
+
+
+def test_running_a_compiled_image(tmp_path):
+    """`wyrm module.wyc` runs a compiled module image through the bytecode VM
+    (wypoc/vm/), the way `wyrm script.wys` runs the other kind of compiled
+    unit - no parsing, no interpreter."""
+    source = tmp_path / "hello.wy"
+    source.write_text('fn greet(name):\n    return "Hello " + name\n\nprintln(greet("World"))\n')
+    built = run("--build-bc", str(source))
+    assert built.returncode == 0, f"stderr={built.stderr!r}"
+
+    r = run(str(tmp_path / "hello.wyc"))
+    assert r.returncode == 0, f"stderr={r.stderr!r}"
+    assert r.stdout == "Hello World\n"
+
+
+def test_a_broken_image_is_reported_rather_than_traced(tmp_path):
+    bad = tmp_path / "broken.wyc"
+    bad.write_bytes(b"not an image at all")
+    r = run(str(bad))
+    assert r.returncode == 1
+    assert r.stdout == ""
+    assert "wyrm: " in r.stderr and "Traceback" not in r.stderr
+
+
+# --------------------------------------------------------------------------
+# import cycles (doc/addendum.md, "Import cycles are illegal")
+
+
+def _write_modules(tmp_path, **sources):
+    for name, text in sources.items():
+        (tmp_path / f"{name}.wy").write_text(text)
+    return tmp_path
+
+
+def test_check_reports_a_two_module_import_cycle(tmp_path):
+    """Go's shape: the cycle spelled out as the chain of edges that closes
+    it, not just the name of the module the walk tripped over."""
+    _write_modules(tmp_path, paint="import palette\n", palette="import paint\n")
+    r = run("--check", str(tmp_path / "paint.wy"))
+    assert r.returncode == 1
+    assert "import cycle not allowed:" in r.stderr
+    assert "paint imports palette" in r.stderr
+    assert "palette imports paint" in r.stderr
+
+
+def test_check_reports_a_self_import_as_a_cycle(tmp_path):
+    _write_modules(tmp_path, selfref="import selfref\n")
+    r = run("--check", str(tmp_path / "selfref.wy"))
+    assert r.returncode == 1
+    assert "selfref imports selfref" in r.stderr
+
+
+def test_check_reports_every_edge_of_a_longer_cycle(tmp_path):
+    _write_modules(tmp_path, a="import b\n", b="import c\n", c="import a\n")
+    r = run("--check", str(tmp_path / "a.wy"))
+    assert r.returncode == 1
+    for edge in ("a imports b", "b imports c", "c imports a"):
+        assert edge in r.stderr, f"missing edge {edge!r} in {r.stderr!r}"
+
+
+def test_check_accepts_a_diamond_which_is_not_a_cycle(tmp_path):
+    """Two modules importing the same third is a repeat visit, not a cycle -
+    the distinction the visiting stack draws that a flat visited set can't."""
+    _write_modules(
+        tmp_path,
+        base="var x = 1\n",
+        left="import base\n",
+        right="import base\n",
+        top="import left\nimport right\n",
+    )
+    r = run("--check", str(tmp_path / "top.wy"))
+    assert r.returncode == 0, f"stderr={r.stderr!r}"
+
+
+def test_running_a_cyclic_import_raises_rather_than_half_initialising(tmp_path):
+    """The early publish used to make this case *work*, handing back a
+    part-built module. It now detects it instead."""
+    _write_modules(
+        tmp_path,
+        paint="import palette\nprintln(\"paint\")\n",
+        palette="import paint\nprintln(\"palette\")\n",
+    )
+    r = run(str(tmp_path / "paint.wy"))
+    assert r.returncode == 1
+    assert "import cycle not allowed:" in r.stderr
+    assert "paint" not in r.stdout, "neither module's body should have run"
+
+
+# --------------------------------------------------------------------------
+# wildcard ambiguity (doc/addendum.md, "Wildcard ambiguity is an error at the
+# point of use"). Each case runs under both engines: the disagreement between
+# them - the walker's copy-as-you-go picked the last import, the VM's search
+# list picked the first - is the bug being fixed, so agreement is the
+# assertion.
+
+_VA = 'SHARED := "from-a"\nONLY_A := 1\n'
+_VB = 'SHARED := "from-b"\nONLY_B := 2\n'
+
+
+def _wildcard_pair(tmp_path, body):
+    (tmp_path / "va.wy").write_text(_VA)
+    (tmp_path / "vb.wy").write_text(_VB)
+    (tmp_path / "main.wy").write_text(body)
+    return str(tmp_path / "main.wy")
+
+
+@pytest.mark.parametrize("engine", [(), ("--vm",)], ids=["walker", "vm"])
+def test_two_wildcards_supplying_different_names_both_arrive(tmp_path, engine):
+    script = _wildcard_pair(tmp_path, "import va::*\nimport vb::*\n"
+                                      "println(ONLY_A)\nprintln(ONLY_B)\n")
+    r = run(*engine, script)
+    assert r.returncode == 0, f"stderr={r.stderr!r}"
+    assert r.stdout.split() == ["1", "2"]
+
+
+@pytest.mark.parametrize("engine", [(), ("--vm",)], ids=["walker", "vm"])
+def test_an_unused_collision_is_not_an_error(tmp_path, engine):
+    """Error at *use*, not at import - otherwise two wildcard imports that
+    overlap on a single name neither module mentions would be unusable."""
+    script = _wildcard_pair(tmp_path, "import va::*\nimport vb::*\n"
+                                      "println(ONLY_A)\n")
+    r = run(*engine, script)
+    assert r.returncode == 0, f"stderr={r.stderr!r}"
+    assert r.stdout.strip() == "1"
+
+
+@pytest.mark.parametrize("engine", [(), ("--vm",)], ids=["walker", "vm"])
+def test_using_a_name_two_wildcards_supply_names_both_sources(tmp_path, engine):
+    script = _wildcard_pair(tmp_path, "import va::*\nimport vb::*\n"
+                                      "println(SHARED)\n")
+    r = run(*engine, script)
+    combined = r.stdout + r.stderr
+    assert "ambiguous name 'SHARED'" in combined, combined
+    assert "va::*" in combined and "vb::*" in combined, combined
+    assert "from-a" not in combined and "from-b" not in combined, \
+        "neither import may silently win"
+
+
+@pytest.mark.parametrize("engine", [(), ("--vm",)], ids=["walker", "vm"])
+def test_an_explicit_import_outranks_both_wildcards(tmp_path, engine):
+    """Layer 1 beats layer 2, which is the escape hatch the diagnostic names."""
+    script = _wildcard_pair(tmp_path, "import va::*\nimport vb::*\n"
+                                      "import vb::SHARED\nprintln(SHARED)\n")
+    r = run(*engine, script)
+    assert r.returncode == 0, f"stderr={r.stderr!r}"
+    assert r.stdout.strip() == "from-b"
+
+
+@pytest.mark.parametrize("engine", [(), ("--vm",)], ids=["walker", "vm"])
+def test_a_wildcard_carries_a_module_s_own_shadowing_definition(tmp_path, engine):
+    """`std::io` declares its own `println`, and `println` is also a builtin.
+    Filtering the baseline out of a wildcard must not take the declaration
+    with it - the distinction `_declared_names` draws by value identity
+    rather than by name."""
+    (tmp_path / "main.wy").write_text('import std::io::*\nprintln("through io")\n')
+    r = run(*engine, str(tmp_path / "main.wy"))
+    assert r.returncode == 0, f"stderr={r.stderr!r}"
+    assert r.stdout.strip() == "through io"
+
+
+@pytest.mark.parametrize("engine", [(), ("--vm",)], ids=["walker", "vm"])
+def test_an_except_list_removes_a_name_from_the_collision(tmp_path, engine):
+    """`except` is what makes two overlapping wildcards usable, so it has to
+    be honoured before ambiguity is decided - excluding `SHARED` from one of
+    them leaves exactly one supplier, not a collision.
+
+    The bytecode VM reads the except-list as a window of interned symbols
+    (`import_star static#N except L0, count`), and an interned symbol prints
+    with a leading quote - so the names have to be unwrapped before they are
+    compared against plain ones. They were not, which made `except` silently
+    do nothing under the VM while working under the walker.
+    """
+    script = _wildcard_pair(
+        tmp_path, "import va::* except (SHARED)\nimport vb::*\nprintln(SHARED)\n"
+    )
+    r = run(*engine, script)
+    assert r.returncode == 0, f"stderr={r.stderr!r}"
+    assert r.stdout.strip() == "from-b"

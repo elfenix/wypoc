@@ -117,9 +117,10 @@ def make_string_literal(text, pos=None):
 
 
 def make_static_import(node):
-    """Marks an `import` node as `import static ...` - the module must be
-    run before the importing code that uses it, and its messages join the
-    importing module's message namespace (see ast_nodes.Import)."""
+    """Marks an `import` node as `import static ...` - the dependency is
+    wanted at compile time only (a module supplying decorators, static
+    functions or AST models) and is not meant to become a runtime
+    dependency of the importer (see ast_nodes.Import)."""
     node.static = True
     return node
 

@@ -1,0 +1,3 @@
+# hello_2.wy - hello_1.wy plus one local variable.
+msg := "Hello World\n"
+print(msg)

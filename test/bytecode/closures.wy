@@ -1,0 +1,29 @@
+# Stage-1a closures: a plain capture, a shared mutable capture (which the
+# compiler hoists into a cell), a lambda, and an inlined `do:` block.
+fn adder(amount):
+    # `amount` is read but never assigned, so it is captured by value.
+    return fn(value): value + amount
+
+fn counter(start):
+    # `total` is captured *and* assigned, so it lives in a cell that both
+    # frames share.
+    var total = start
+    fn bump(step):
+        total = total + step
+        return total
+    return bump
+
+fn doubled(value):
+    var twice = do:
+        var half = value
+        half + half
+    return twice
+
+add_five := adder(5)
+println(add_five(2))
+
+tick := counter(10)
+println(tick(1))
+println(tick(1))
+
+println(doubled(21))

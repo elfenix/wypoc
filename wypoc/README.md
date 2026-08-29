@@ -284,13 +284,18 @@ Three pieces make it work.
   nested in a function is rewritten on the first call and reused thereafter,
   so what the decorator answered is fixed for the life of the parsed tree.
 
-Reaching a decorator written in wyrm needs `import static m`, which is an
-ordinary import plus adopting `m`'s messages — a decorator name is a
-*selector*, never a path (`@traced`, not `@m::traced`), so a plain import
-leaves it unreachable no matter that the module is loaded. The `static`
-constraint itself (no closures over a live environment, no coroutines) is
-recorded, not enforced: this interpreter runs a module's top level on import
-either way.
+A decorator name is a *selector*, never a path (`@traced`, not
+`@m::traced`), so one written in wyrm is reachable exactly when `m`'s
+messages are in the importing module's message table — the condition any
+bare send has here. `import m::*` puts them there; so, today, does
+`import static m`, which is an artifact of this interpreter's per-module
+message tables rather than anything `import static` is for. `static` marks a
+dependency wanted at compile time only — a module supplying decorators,
+static functions or AST models — so it does not become a runtime dependency
+of the importer. Its usage restrictions (no closures, no class construction,
+no runtime message invocation) are recorded, not enforced: this interpreter
+runs a module's top level on import either way, so nothing here actually
+spares the importer the runtime dependency.
 
 `foo::$ast` is a definition's own tree, boxed the same way, which is what
 lets a template be written as ordinary wyrm rather than assembled node by
@@ -300,7 +305,7 @@ after decoration.
 
 `@__dump X` (prints the s-expression, compiles `X` unchanged) and
 `@__identity X` (rebuilds `X` from its s-expression, so every use is a full
-round trip) are native, and need no `import static`.
+round trip) are native, and need no import at all.
 
 `samples/decorators.wy` runs every node kind through `@__identity` and then
 through the wyrm-written decorators in `samples/decolib.wy`;
@@ -522,9 +527,10 @@ with a clear message at the point it'd be needed, or is called out below):
   rather than at the parse. Coroutines are the same - `'co` is unbuilt, so a
   `co` does not cross in either direction.
 - **The `static` in `import static` is recorded, not enforced** - nothing
-  checks that a statically imported module could not create a dynamic frame.
-  See "Decorators" above for why that constraint buys less here than in a
-  compiled implementation.
+  checks the spec's usage restrictions (no closures, no class construction,
+  no runtime message invocation), and the module is run on import either
+  way, so the runtime dependency `static` exists to avoid is incurred
+  regardless. `__dynamic__` is the by-hand stopgap - see "Decorators" above.
 - **Properties and messages don't yet occupy separate namespaces** - the
   spec says `.` should error on a name that's only a message, but
   `wyrm_eval_parse_tree.py`'s attribute lookup doesn't distinguish the two.

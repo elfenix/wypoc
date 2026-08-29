@@ -1,0 +1,16 @@
+# The decorated half. Nothing here reaches the bytecode compiler as written:
+# every `@` is expanded first, and the tree that gets lowered is whatever the
+# decorator answered - so the `println` `@traced` injects is compiled exactly
+# as a handwritten one would be (doc/llm-bytecode.md 6.3).
+import static declib
+
+@unchanged()
+fn plain(value):
+    return value * 2
+
+@traced("calling loud")
+fn loud(value):
+    return value + 1
+
+println(plain(21))
+println(loud(1))

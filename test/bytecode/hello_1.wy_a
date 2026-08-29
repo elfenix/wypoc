@@ -1,0 +1,26 @@
+WYA 1 hello_1
+
+SECTION header
+0000: 29 00 00 00 02 6E 00 08 00 00 00 68 65 6C 6C 6F ; n: "hello_1"
+0010: 5F 31 00 10 76 00 01 00 00 00 10 67 00 01 00 00 ; v: 1; g: 1
+0020: 00 10 6C 00 02 00 00 00 00                      ; l: 2
+
+SECTION statics
+0000: 19 00 00 00 02 30 00 0D 00 00 00 48 65 6C 6C 6F ; [0] str "Hello World\n"
+0010: 20 57 6F 72 6C 64 0A 00 00
+
+SECTION code
+; module init
+;   hello_1.wy:2
+0000: 42 00 00 00                                     ; gget L0 <- g0   (print)
+0004: 46 01 00 00                                     ; lconst L1 <- static#0   ("Hello World\n")
+0008: A0 01 00 00 00 00 01 00                         ; call base=L0 argc=1 nres=1
+0010: 02 00 00 00                                     ; return count=0
+
+SECTION debug
+0000: 27 00 00 00 02 66 00 0B 00 00 00 68 65 6C 6C 6F ; f: "hello_1.wy"
+0010: 5F 31 2E 77 79 00 03 6C 6E 00 0C 00 00 00 10 30 ; ln: {'0': 2}
+0020: 00 02 00 00 00 00 00
+
+SECTION free
+0000: 10 00 00 00 10 70 72 69 6E 74 00 00 00 00 00 00 ; print: 0

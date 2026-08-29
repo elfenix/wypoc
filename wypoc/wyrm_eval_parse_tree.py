@@ -659,6 +659,26 @@ class NativeBody:
         return f"NativeBody({self.fn!r})"
 
 
+class ReadyValue:
+    """Sits where an expression node would, holding a value that is already
+    computed - the declarative twin of NativeBody.
+
+    A class realised from a compiled image (wypoc/vm/) has no syntax tree: a
+    slot's default arrives as a constant out of the image's static pool, not
+    as an expression to evaluate. Wrapping it lets such a class use the same
+    `Class`/`SlotDef` shapes an interpreted one does, so instantiation,
+    inheritance and dispatch stay one implementation.
+    """
+
+    __slots__ = ("value",)
+
+    def __init__(self, value):
+        self.value = value
+
+    def __repr__(self):
+        return f"ReadyValue({self.value!r})"
+
+
 class MethodOverload:
     """One arm of a Method: a receiver-class signature (one entry per
     dispatch position; None means "empty type" / wildcard, matching any
@@ -716,6 +736,36 @@ class _AmbiguousMessage:
         return f"_AmbiguousMessage({self.first!r}, {self.second!r})"
 
 
+class AmbiguousName:
+    """Placeholder binding for a plain name that two different wildcard
+    imports both supplied - the variable-namespace twin of
+    `_AmbiguousMessage`, and the same rule from doc/addendum.md's "Wildcard
+    ambiguity is an error at the point of use".
+
+    Binding it rather than picking a winner is the whole point: the two
+    engines used to disagree about which import won (the walker's copy-as-you-
+    go made it the last, the VM's search list made it the first), and neither
+    was a decision. Reading the name is now an error naming both sources, and
+    it stays an error until something in layer 1 - a local definition, or an
+    explicit `import palette::mix` - shadows it.
+    """
+
+    __slots__ = ("name", "first", "second")
+
+    def __init__(self, name: str, first: str, second: str):
+        self.name = name
+        self.first = first
+        self.second = second
+
+    def message(self) -> str:
+        return (f"ambiguous name {self.name!r}: supplied by both "
+                f"'{self.first}::*' and '{self.second}::*'; disambiguate with "
+                f"an explicit import, or qualify at the use site")
+
+    def __repr__(self):
+        return f"AmbiguousName({self.name!r}, {self.first!r}, {self.second!r})"
+
+
 class BoundMessage:
     """The result of `recv ! name` with no call parens: a receiver-bound,
     already-dispatch-resolved callable (per doc/language-spec.md: "The `!`
@@ -760,9 +810,50 @@ class Module:
 _module_cache: dict = {}
 
 
+def module_cache() -> dict:
+    """Every module loaded so far, by `::`-joined name.
+
+    One process, one instance of a module, whichever kind it is: the bytecode
+    VM publishes an image-backed module here too (doc/wyc-format.md 7.1 step
+    6), so an interpreted `import` of a name a compiled module already brought
+    in gets that same module rather than loading a second copy from source.
+    """
+    return _module_cache
+
+
 def clear_module_cache() -> None:
     """Forget every module loaded so far - mainly for test isolation."""
     _module_cache.clear()
+    _import_stack.clear()
+
+
+# The chain of modules whose top level is currently running, innermost last.
+# An import that lands on a name already in here has closed a cycle, which
+# doc/addendum.md makes illegal - see check_import_cycle.
+_import_stack: list = []
+
+
+def import_stack() -> list:
+    return _import_stack
+
+
+def check_import_cycle(key: str) -> None:
+    """Raise if importing `key` would close a cycle.
+
+    Both engines consult the module cache to answer "already loaded?", and a
+    module part-way through its own top level is in that cache (published
+    early, so `::` navigation works while a package initialises). Before the
+    addendum's rule that was the point: a cycle handed back a half-built
+    module rather than recursing forever. Now it is the detector - the cache
+    entry exists, so the walk terminates, and being *on the stack* rather
+    than merely in the cache is exactly the condition that proves a cycle.
+    """
+    if key not in _import_stack:
+        return
+    names = _import_stack[_import_stack.index(key):] + [key]
+    lines = ["import cycle not allowed:"]
+    lines += [f"\t{a} imports {b}" for a, b in zip(names, names[1:])]
+    raise ImportError("\n".join(lines))
 
 
 _PRELUDE_TREE: "ast.Program | None" = None
@@ -818,6 +909,57 @@ def populate_globals(ctx: dict, name: str = "__main__") -> None:
     expose(ctx, "__name__", name)
 
 
+def _baseline_snapshot(ctx: dict) -> dict:
+    """What a module's scope holds before a line of its own code has run.
+
+    Taken between `populate_globals` and the module body, and kept by value
+    identity rather than by name, because a name alone cannot answer the
+    question this exists to answer. `std::io` declares its own `println`, and
+    `println` is *also* a builtin every scope already has - so "is this name
+    in the baseline?" would hide exactly the declaration `import std::io::*`
+    is for. "Is this still the same object the baseline installed?" does not.
+    """
+    return {
+        name: unwrap(cell)
+        for name, cell in dict.items(ctx)
+        if isinstance(name, str)
+    }
+
+
+def _declared_names(ctx: dict, baseline: dict) -> frozenset:
+    """The names a module's own top level introduced or replaced.
+
+    This is what `import mod::*` offers. The baseline is layer 3 - the
+    builtins and the prelude, which every scope has of its own - and a module
+    passing those through as if it supplied them is what made every wildcard
+    import appear to export every builtin, and two of them appear to collide
+    over each one.
+    """
+    declared = set()
+    for name, cell in dict.items(ctx):
+        if not isinstance(name, str):
+            continue
+        if name not in baseline or unwrap(cell) is not baseline[name]:
+            declared.add(name)
+    return frozenset(declared)
+
+
+def wildcard_exports(mod) -> "frozenset | None":
+    """The names `import mod::*` may take from `mod`, or None when that isn't
+    known and the caller should fall back to offering everything.
+
+    A compiled module answers from its exports table, which is already exactly
+    this: the globals its own code defines, with block-local shadow slots left
+    out (doc/wyc-format.md 8.10)."""
+    declared = getattr(mod, "declared_names", None)
+    if declared is not None:
+        return declared
+    exports = getattr(mod, "export_names", None)
+    if callable(exports):
+        return frozenset(exports())
+    return None
+
+
 def import_module(path_segments, roots=None, dynamic: bool = True) -> Module:
     """Loads (or returns the already-cached) module for a `mod::sub::leaf`
     path. Parent packages are loaded first (so `import std::io` runs
@@ -847,6 +989,7 @@ def import_module(path_segments, roots=None, dynamic: bool = True) -> Module:
     path_segments = tuple(path_segments)
     key = "::".join(path_segments)
     if key in _module_cache:
+        check_import_cycle(key)
         mod = _module_cache[key]
         bind("__dynamic__", dynamic, mod.ctx)
         return mod
@@ -857,6 +1000,15 @@ def import_module(path_segments, roots=None, dynamic: bool = True) -> Module:
 
     resolved = wyrm_modules.resolve_module_file(path_segments, roots)
     if resolved is None:
+        # No source anywhere - but a compiled image is a module too, and this
+        # is the one place the interpreter reaches for one. Source keeps
+        # winning where both exist: this evaluator is what a `.wy` file is
+        # validated against, so an image beside it must not quietly stand in.
+        image = wyrm_modules.resolve_image_file(path_segments, roots)
+        if image is not None:
+            from wypoc.vm import imports as vm_imports
+
+            return vm_imports.load_image(image[0], key)
         searched = roots if roots is not None else wyrm_modules.search_paths()
         raise ImportError(f"no module named {key!r} (searched: {', '.join(searched)})")
     file_path, is_package = resolved
@@ -881,9 +1033,22 @@ def import_module(path_segments, roots=None, dynamic: bool = True) -> Module:
     module_ctx = Scope()
     populate_globals(module_ctx, name=key)
     bind("__dynamic__", dynamic, module_ctx)
+    # Taken before the body runs: everything the scope holds now came from
+    # populate_globals, so whatever differs afterwards is this module's own.
+    baseline = _baseline_snapshot(module_ctx)
     mod = Module(key, file_path, module_ctx, is_package, tree=tree)
-    _module_cache[key] = mod  # cache before eval so circular imports don't infinite-loop
-    eval_program(tree, module_ctx)
+    # Published before its body runs, so `::` navigation into a package works
+    # while that package initialises. The stack entry alongside it is what
+    # makes a re-entry during that window a cycle (check_import_cycle) rather
+    # than a half-built module handed back.
+    _module_cache[key] = mod
+    _import_stack.append(key)
+    try:
+        eval_program(tree, module_ctx)
+    finally:
+        _import_stack.pop()
+    # What `import key::*` may offer - see _declared_names and wildcard_exports.
+    mod.declared_names = _declared_names(module_ctx, baseline)
 
     if parent is not None:
         parent.submodules[path_segments[-1]] = mod
@@ -930,6 +1095,11 @@ def eval_import(stmt: ast.Import, ctx: dict) -> None:
         mod = import_module(real_path, dynamic=dynamic)
         if stmt.wildcard:
             excluded = set(stmt.except_names or ())
+            # What this module actually declared, so a wildcard offers its own
+            # names rather than the builtins and prelude every scope holds -
+            # see _declared_names. None means "not known", and everything is
+            # offered, which is what the pre-existing behaviour was.
+            offered = wildcard_exports(mod)
             for name, var in mod.ctx.items():
                 # str: skips mod.ctx's message_table sentinel entry. The
                 # `__`-prefixed names (__name__, __dynamic__, __ARGS, the
@@ -942,8 +1112,9 @@ def eval_import(stmt: ast.Import, ctx: dict) -> None:
                 # b::* importing c::*, say) used to produce: the deepest
                 # module's __name__ would win everywhere up the chain.
                 if (isinstance(name, str) and not name.startswith("__")
-                        and name not in excluded):
-                    bind_new(name, unwrap(var), ctx)
+                        and name not in excluded
+                        and (offered is None or name in offered)):
+                    _merge_wildcard_name(name, unwrap(var), mod.name, ctx)
             dest_messages = message_table(ctx)
             local_owner = None
             try:
@@ -972,6 +1143,42 @@ def eval_import(stmt: ast.Import, ctx: dict) -> None:
 
     if bind_root and len(stmt.path) > 1:
         bind_new(stmt.path[0], _module_cache[stmt.path[0]], ctx)
+
+
+def _merge_wildcard_name(name: str, value, source: str, ctx: dict) -> None:
+    """Bring one name from `import source::*` into `ctx`, per the layered
+    precedence in doc/addendum.md.
+
+    `dict.get` rather than `ctx.get`, deliberately: a Scope's `get` walks out
+    to its parent, where the builtins live, and builtins are *layer 3* - a
+    wildcard-supplied name is supposed to beat them. Only this level holds
+    layer 1 and layer 2, which are the two the decision is actually between.
+
+    - Nothing here yet: bind it, tagged with where it came from.
+    - Here without a tag: layer 1 got there first (a local definition, or an
+      explicit/aliased import). It wins, silently; that is the escape hatch
+      the ambiguity error points at.
+    - Here with a tag, same value: two wildcards that reached the same
+      canonical object, or the same import twice. A no-op, not a collision.
+    - Here with a tag, different value: a real collision between two layer-2
+      imports. Neither wins - reading the name is an error until something in
+      layer 1 shadows it.
+    """
+    existing = dict.get(ctx, name)
+    if existing is None:
+        var = Variable(value)
+        var.wildcard_source = source
+        ctx[name] = var
+        return
+    origin = getattr(existing, "wildcard_source", None)
+    if origin is None:
+        return
+    current = unwrap(existing)
+    if current is value or isinstance(current, AmbiguousName):
+        return
+    ambiguous = Variable(AmbiguousName(name, origin, source))
+    ambiguous.wildcard_source = source
+    ctx[name] = ambiguous
 
 
 def _merge_message(destination: dict, name: str, method, dest_name: "str | None" = None,
@@ -1017,27 +1224,36 @@ def _merge_message(destination: dict, name: str, method, dest_name: "str | None"
 
 
 def _adopt_messages(mod: "Module", ctx: dict) -> None:
-    """Pulls `mod`'s messages into `ctx`'s message namespace - what
-    `import static a::b` adds over a plain `import a::b`.
+    """Pulls `mod`'s messages into `ctx`'s message namespace - the same
+    thing `import a::b::*` does for the wildcard case.
 
-    A decorator is reached as a *selector* rather than through the module
-    binding (`@traced`, never `@decolib::traced`: a selector is never a
-    path), so a plain import leaves it unreachable no matter that the module
-    is loaded. Adopting the table is what closes that, and it is the same
-    thing `import a::b::*` already does for the wildcard case.
+    Messages live in a per-module table (see message_table), not on the
+    values they dispatch on, so a send written bare - a selector, never a
+    path - only resolves against names this module's own table holds. This
+    is what puts an imported module's there.
 
-    A name this module already defines wins: a static import brings in
-    behaviour, and quietly replacing a local definition with an imported one
-    would be the wrong way round.
+    That `import static a::b` also calls this is an artifact of that design,
+    not something the static import is *for*: `static` says the dependency
+    is wanted at compile time only - for decorators, static functions or AST
+    models - and should not become a runtime dependency of this module. It
+    says nothing about message namespaces, and the language spec goes the
+    other way, listing runtime message invocation among the things a static
+    import disallows. Treat this call as a wypoc convenience that predates
+    a proper answer to "what makes an imported module's messages
+    dispatchable"; a compiled implementation does not copy it (see
+    compiler_bc/module.py).
 
-    Note what this does *not* do: the `static` constraint itself - no
-    closures over a live environment, no coroutines, no reaching into the
-    importing module's state - is recorded, not enforced. This interpreter
-    runs a module's top level when it is imported either way, so the
-    constraint buys nothing here that it buys in a compiled implementation.
-    `import_module`'s `__dynamic__` is the stopgap for that: a module can
-    check it and skip a side effect itself, by hand, since the interpreter
-    won't skip it for them."""
+    A name this module already defines wins: an import brings in behaviour,
+    and quietly replacing a local definition with an imported one would be
+    the wrong way round.
+
+    Note what this does *not* do: the static-import constraints themselves -
+    no closures, no class construction, no runtime message invocation - are
+    recorded, not enforced. This interpreter runs a module's top level when
+    it is imported either way, so nothing here actually spares the importer
+    the runtime dependency that `static` exists to avoid. `import_module`'s
+    `__dynamic__` is the stopgap: a module can check it and skip a side
+    effect itself, by hand, since the interpreter won't skip it for them."""
     destination = message_table(ctx)
     local_owner = None
     try:
@@ -1373,6 +1589,8 @@ def lookup(name: str, ctx: dict):
     value = unwrap(cell)
     if value is UNSET:
         raise NameError(f"variable {name!r} is declared but has no value yet")
+    if isinstance(value, AmbiguousName):
+        raise NameError(value.message())
     return value
 
 
@@ -1742,16 +1960,32 @@ def _expr_do(node, ctx):
 
 def _expr_attr(node, ctx):
     obj = yield from _eval_expr_gen(node.obj, ctx)
-    if isinstance(obj, CoroutineInstance) and node.name == "value":
+    return attr_value(obj, node.name)
+
+
+def attr_value(obj, name: str):
+    """`obj.name` - the property namespace, given a value rather than a node.
+
+    Value-level so the bytecode VM's `getattr` reaches the same rules this
+    evaluator's `.` does (one implementation, no drift).
+    """
+    if isinstance(obj, CoroutineInstance) and name == "value":
         if not obj._finished:
             return wyrm_builtins.error(f"coroutine {obj.node.name!r} has not finished")
         return obj._result
     if isinstance(obj, ClassInstance):
-        return lookup(node.name, obj.attrs)
+        return lookup(name, obj.attrs)
     from wypoc.wyrm_remote import RemoteModule
     if isinstance(obj, RemoteModule):
-        return obj.signal(node.name)
+        return obj.signal(name)
     raise NotImplementedError(f"'.' is only supported on class instances right now (got {type(obj).__name__})")
+
+
+def set_attr(obj, name: str, value) -> None:
+    """`obj.name = value`, given values - the write half of `attr_value`."""
+    if not isinstance(obj, ClassInstance):
+        raise TypeError(f"'.' assignment is only supported on class instances right now (got {type(obj).__name__})")
+    bind(name, value, obj.attrs)
 
 
 def _expr_call(node, ctx):
@@ -1794,6 +2028,17 @@ def _expr_typecheck(node, ctx):
 def _expr_index(node, ctx):
     obj = yield from _eval_expr_gen(node.obj, ctx)
     idx = yield from _eval_expr_gen(node.index, ctx)
+    return index_value(obj, idx)
+
+
+def index_value(obj, idx):
+    """`obj[idx]`, given values - a failed lookup is an error *value*, not an
+    exception, so `try`/`catch` and the VM's `jerr` can see it.
+
+    Value-level so the bytecode VM's `getidx` reaches these exact rules,
+    including a string indexing to a codepoint and a missing dict key
+    answering Unset.
+    """
     if isinstance(obj, str):
         try:
             return ord(obj[idx])
@@ -1805,6 +2050,16 @@ def _expr_index(node, ctx):
         return obj[idx]
     except (IndexError, TypeError, KeyError) as exc:
         return wyrm_builtins.error(str(exc))
+
+
+def set_index(obj, idx, value) -> None:
+    """`obj[idx] = value`, given values - the write half of `index_value`."""
+    if isinstance(obj, (str, tuple)):
+        raise TypeError(f"'{type(obj).__name__}' object does not support item assignment (immutable)")
+    try:
+        obj[idx] = value
+    except TypeError:
+        raise TypeError(f"'{type(obj).__name__}' object does not support item assignment") from None
 
 
 def _expr_decorated(node, ctx):
@@ -2377,6 +2632,34 @@ def _instantiate_gen(cls: "Class", positional, kwargs):
             raise TypeError("error(...) takes exactly one positional argument (the message)")
         return wyrm_builtins.error(positional[0])
 
+    inst = new_instance(cls)
+
+    method = _lookup_dunder(cls, "init")
+    overload = _try_resolve_overload(method, [inst]) if method is not None else None
+    if overload is not None:
+        if isinstance(overload.node, (NativeBody, ast.CoDef)):
+            # No wyrm body to trampoline: a native init (which is what a
+            # compiled class's init is - see wypoc/vm/) runs as itself.
+            result = call_overload(overload, [inst], positional, kwargs)
+        else:
+            result = yield _TailCall(lambda: _make_overload_activation(overload, [inst], positional, kwargs))
+        if wyrm_builtins.is_error(result):
+            return result
+        return inst
+    if positional or kwargs:
+        raise TypeError(f"{cls.name}(...) takes no arguments (no applicable 'init')")
+    return inst
+
+
+def new_instance(cls: "Class") -> "ClassInstance":
+    """A fresh instance with every slot at its declared default (or its
+    type's zero value) and every signal at a fresh subscriber list - built,
+    but not yet `init`ed.
+
+    The construction half of `instantiate`, on its own because the bytecode
+    VM's `new_instance` instruction is exactly this and nothing else (see
+    doc/wyc-format.md 6.3).
+    """
     all_slots = cls.all_slots()
     all_signals = cls.all_signals()
     clash = all_slots.keys() & all_signals.keys()
@@ -2394,7 +2677,9 @@ def _instantiate_gen(cls: "Class", positional, kwargs):
 
     inst = ClassInstance(cls)
     for slot_name, (slot_def, owner) in all_slots.items():
-        if slot_def.default is not None:
+        if isinstance(slot_def.default, ReadyValue):
+            value = slot_def.default.value  # a compiled class: see ReadyValue
+        elif slot_def.default is not None:
             value = eval_expr(slot_def.default, owner.closure)
         else:
             value = _zero_value(slot_def.type)
@@ -2404,16 +2689,6 @@ def _instantiate_gen(cls: "Class", positional, kwargs):
         # shared class-wide state any more than a slot's value is (see
         # SignalValue).
         inst.attrs[signal_name] = Variable(SignalValue(signal_name))
-
-    method = _lookup_dunder(cls, "init")
-    overload = _try_resolve_overload(method, [inst]) if method is not None else None
-    if overload is not None:
-        result = yield _TailCall(lambda: _make_overload_activation(overload, [inst], positional, kwargs))
-        if wyrm_builtins.is_error(result):
-            return result
-        return inst
-    if positional or kwargs:
-        raise TypeError(f"{cls.name}(...) takes no arguments (no applicable 'init')")
     return inst
 
 
@@ -3060,9 +3335,10 @@ def expand_decorated(node: ast.Decorated, ctx: dict, as_statement: bool):
 
     The decorator itself is an ordinary message send on the boxed tree, so
     dispatch, multiple dispatch and native messages all behave exactly as
-    they do at run time rather than being reimplemented here. Reaching one
-    written in wyrm needs `import static`, which is what runs its module
-    before this one gets here (see eval_import)."""
+    they do at run time rather than being reimplemented here - which means
+    one written in wyrm is reachable exactly when its module's messages are
+    in this module's message table, the same condition any other bare send
+    has (see message_table and _adopt_messages)."""
     cached = getattr(node, "_expanded", None)
     if cached is not None:
         return cached
@@ -3078,12 +3354,14 @@ def expand_decorated(node: ast.Decorated, ctx: dict, as_statement: bool):
     except sexpr.SexprError as exc:
         raise _decorator_error(decorator, str(exc)) from None
     except NameError as exc:
-        # The overwhelmingly common mistake: the decorator's module was
-        # imported without `static`, so it has not run and its messages are
-        # not in this module's namespace yet.
+        # The overwhelmingly common mistake: the decorator's module is
+        # imported in a form that binds the module but does not bring its
+        # messages into this one's table, so the bare selector resolves
+        # against nothing - see _adopt_messages.
         raise _decorator_error(
             decorator,
-            f"{exc} (a decorator must be reachable through `import static`)",
+            f"{exc} (the decorator's module must be imported in a form that "
+            f"brings its messages into scope, e.g. `import m::*`)",
         ) from None
 
     # A result that is itself an unexpanded `Decorated` (a decorator that
@@ -3114,8 +3392,8 @@ def _decorator_dump(this, *args, **kwargs):
     """`@__dump X` - prints the s-expression the decorator would receive and
     compiles X unchanged. Arguments are accepted and ignored. Native, so it
     exercises the wire format without needing a decorator written in wyrm
-    (and therefore without needing `import static`) - see doc/sexpr-spec.md's
-    "Trying it"."""
+    (and therefore without needing any import at all) - see
+    doc/sexpr-spec.md's "Trying it"."""
     from wypoc import wyrm_io
 
     wyrm_io.wyrm_write(wyrm_io.STDOUT, wyrm_builtins._to_str(
@@ -3254,9 +3532,7 @@ def assign_target(target, value, ctx: dict) -> None:
             if not isinstance(obj, ClassInstance):
                 raise TypeError(f"'.' assignment is only supported on class instances right now (got {type(obj).__name__})")
             obj = lookup(name, obj.attrs)
-        if not isinstance(obj, ClassInstance):
-            raise TypeError(f"'.' assignment is only supported on class instances right now (got {type(obj).__name__})")
-        bind(target.attrs[-1], value, obj.attrs)
+        set_attr(obj, target.attrs[-1], value)
         return
     if isinstance(target, ast.IndexTarget):
         # `base[index] = value` - base is itself a target (Name/Attr/
@@ -3266,12 +3542,7 @@ def assign_target(target, value, ctx: dict) -> None:
         # this evaluator, so this needs no new value representation).
         obj = _resolve_target_value(target.base, ctx)
         idx = eval_expr(target.index, ctx)
-        if isinstance(obj, (str, tuple)):
-            raise TypeError(f"'{type(obj).__name__}' object does not support item assignment (immutable)")
-        try:
-            obj[idx] = value
-        except TypeError:
-            raise TypeError(f"'{type(obj).__name__}' object does not support item assignment") from None
+        set_index(obj, idx, value)
         return
     raise NotImplementedError(f"unsupported assignment target: {target}")
 

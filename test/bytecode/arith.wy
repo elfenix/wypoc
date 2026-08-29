@@ -1,0 +1,45 @@
+# Stage-0 expressions: every operator the bytecode compiler lowers to a
+# three-address instruction, plus the literal forms and the short-circuits.
+fn arithmetic(a, b):
+    var sum = a + b
+    var difference = a - b
+    var product = a * b
+    var quotient = a / b
+    var remainder = a % b
+    var power = a ** b
+    return sum, difference, product, quotient, remainder, power
+
+fn bitwise(a, b):
+    return a & b, a | b, a ^ b, a << b, a >> b
+
+fn comparisons(a, b):
+    return a == b, a != b, a < b, a <= b, a > b, a >= b, a <=> b
+
+fn unaries(a):
+    return -a, ~a, not a
+
+fn short_circuits(a, b):
+    return a and b, a or b
+
+fn literals():
+    var count = 7
+    var big = 100000
+    var ratio = 1.5
+    var flag = true
+    var nothing = nil
+    var letter = \A
+    var tag = 'ready
+    return count, big, ratio, flag, nothing, letter, tag
+
+fn membership(item, container):
+    return item in container
+
+fn typed(value):
+    return value is int
+
+println(arithmetic(7, 2))
+println(comparisons(1, 2))
+println(unaries(3))
+println(short_circuits(true, false))
+println(literals())
+println(typed(1))

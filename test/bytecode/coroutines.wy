@@ -1,0 +1,30 @@
+# Stage-2 coroutines: a `co` is an ordinary function carrying the coroutine
+# flag, and calling one constructs the coroutine. `yield` suspends with a
+# window of values and evaluates to whatever the resumer sent back.
+co counting(limit):
+    var i = 0
+    while i < limit:
+        yield i
+        i = i + 1
+    return "done"
+
+co echo():
+    var heard = yield "ready"
+    yield heard
+    return "over"
+
+co both():
+    # `yield from` delegates: every yield of the sub-coroutine flows out of
+    # this one, and its return value is what the expression evaluates to.
+    var tail = yield from counting(2)
+    return tail
+
+numbers := counting(3)
+println(next(numbers), next(numbers), next(numbers))
+
+conversation := echo()
+println(next(conversation))
+println(send(conversation, "heard you"))
+
+delegated := both()
+println(next(delegated), next(delegated))

@@ -25,7 +25,7 @@ def test_local_wycache_dir_is_created_automatically(tmp_path):
     script = write_script(tmp_path / "a.wy")
     cache_dir = tmp_path / cache.CACHE_DIR_NAME
     assert not cache_dir.exists()
-    assert cache.cache_file_for(script) == str(cache_dir / "a.wyc")
+    assert cache.cache_file_for(script) == str(cache_dir / "a.wy_ast")
 
     tree = make_tree(1)
     cache.save(script, tree)
@@ -37,7 +37,7 @@ def test_save_then_load_round_trips_the_tree(tmp_path):
     script = write_script(tmp_path / "a.wy")
     tree = make_tree(42)
     cache.save(script, tree)
-    assert os.path.isfile(tmp_path / cache.CACHE_DIR_NAME / "a.wyc")
+    assert os.path.isfile(tmp_path / cache.CACHE_DIR_NAME / "a.wy_ast")
     assert cache.load(script) == tree
 
 
@@ -57,7 +57,7 @@ def test_a_corrupt_cache_file_is_a_miss_not_a_crash(tmp_path):
     script = write_script(tmp_path / "a.wy")
     cache_dir = tmp_path / cache.CACHE_DIR_NAME
     cache_dir.mkdir()
-    with open(cache_dir / "a.wyc", "wb") as f:
+    with open(cache_dir / "a.wy_ast", "wb") as f:
         f.write(b"not a pickle")
     assert cache.load(script) is None
 
@@ -70,7 +70,7 @@ def test_a_stale_header_from_a_moved_script_is_a_miss(tmp_path):
     # Hand b.wy a.wy's own cache file directly, to simulate a copied/renamed
     # source landing on a stale header still claiming the old path.
     import shutil
-    shutil.move(str(tmp_path / cache.CACHE_DIR_NAME / "a.wyc"),
+    shutil.move(str(tmp_path / cache.CACHE_DIR_NAME / "a.wy_ast"),
                 str(tmp_path / cache.CACHE_DIR_NAME / "b.wyc"))
     assert cache.load(other) is None
 
@@ -94,10 +94,63 @@ def test_global_cache_is_opt_in_and_overrides_the_local_default(tmp_path, monkey
     script = write_script(scripts_dir / "a.wy")
 
     digest = hashlib.sha256(os.path.abspath(script).encode("utf-8")).hexdigest()
-    assert cache.cache_file_for(script) == str(global_dir / f"{digest}.wyc")
+    assert cache.cache_file_for(script) == str(global_dir / f"{digest}.wy_ast")
 
     tree = make_tree(7)
     cache.save(script, tree)
     assert cache.load(script) == tree
     assert not (scripts_dir / cache.CACHE_DIR_NAME).exists(), \
         "global_cache set means no local __wycache__/ is touched"
+
+
+# --- compiled module images (`wyrm --vm`) ---------------------------------
+
+def test_an_image_lands_next_to_the_ast_cache(tmp_path):
+    script = write_script(tmp_path / "a.wy")
+    cache_dir = tmp_path / cache.CACHE_DIR_NAME
+    assert cache.image_file_for(script) == str(cache_dir / "a.wyc")
+
+    assert cache.save_image(script, b"image bytes") == str(cache_dir / "a.wyc")
+    assert (cache_dir / "a.wyc").read_bytes() == b"image bytes"
+
+    # The two kinds of entry share a directory without knowing about each
+    # other: saving an image doesn't make an AST entry appear, or vice versa.
+    assert not (cache_dir / "a.wy_ast").exists()
+
+
+def test_an_image_older_than_its_source_is_not_fresh(tmp_path):
+    script = write_script(tmp_path / "a.wy")
+    assert cache.fresh_image_for(script) is None, "nothing compiled yet"
+
+    image_path = cache.save_image(script, b"image bytes")
+    assert cache.fresh_image_for(script) == image_path
+
+    os.utime(script, None)  # the source is edited: the image is now stale
+    os.utime(image_path, (0, 0))
+    assert cache.fresh_image_for(script) is None
+
+
+def test_saving_an_image_into_an_unwritable_place_is_not_fatal(tmp_path):
+    script = write_script(tmp_path / "a.wy")
+    blocker = tmp_path / cache.CACHE_DIR_NAME
+    blocker.write_text("not a directory")  # __wycache__/ can't be created here
+
+    assert cache.save_image(script, b"image bytes") is None
+    assert cache.fresh_image_for(script) is None
+
+
+def test_global_cache_holds_images_too(tmp_path, monkeypatch):
+    global_dir = tmp_path / "shared-cache"
+    monkeypatch.setenv(config.CONFIG_ENV_VAR, str(tmp_path / "wyrm-config"))
+    config.set_option("global_cache", str(global_dir))
+
+    scripts_dir = tmp_path / "scripts"
+    scripts_dir.mkdir()
+    script = write_script(scripts_dir / "a.wy")
+
+    digest = hashlib.sha256(os.path.abspath(script).encode("utf-8")).hexdigest()
+    assert cache.image_file_for(script) == str(global_dir / f"{digest}.wyc")
+
+    cache.save_image(script, b"image bytes")
+    assert cache.fresh_image_for(script) == str(global_dir / f"{digest}.wyc")
+    assert not (scripts_dir / cache.CACHE_DIR_NAME).exists()

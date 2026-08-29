@@ -1,0 +1,32 @@
+# Stage-1b classes: slots with constant defaults, an `init`, an in-class
+# message map, inheritance, and a class the module realizes at load.
+class Shape:
+    slot name: str = "shape"
+    slot sides: int = 0
+
+    fn init(label, count):
+        this.name = label
+        this.sides = count
+
+    fn describe():
+        return this.name
+
+    fn corners():
+        return this.sides
+
+class Square(Shape):
+    slot size: int = 1
+
+    fn init(edge):
+        this.name = "square"
+        this.sides = 4
+        this.size = edge
+
+    fn area():
+        return this.size * this.size
+
+square := Square(3)
+println(square ! describe(), square ! corners(), square ! area())
+
+plain := Shape("blob", 7)
+println(plain ! describe(), plain ! corners())

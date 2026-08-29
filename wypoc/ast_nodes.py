@@ -370,10 +370,13 @@ class Import(Node):
     `alias`, `items`, and `wildcard` are mutually exclusive; `static`
     combines with any of them.
 
-    `static` marks a module that must be *run* before the importing module
-    reaches the code that uses it, and whose messages join the importing
-    module's message namespace - which is what makes a decorator defined
-    there callable (see doc/language-spec.md's Decorators section).
+    `static` marks a dependency wanted at compile time only - a module
+    supplying decorators, static functions or AST models - so that it does
+    not become a runtime dependency of the importing module. The language
+    spec pairs that with usage restrictions on what a static import may be
+    used for: no closures, no class construction, no runtime message
+    invocation. Neither wypoc engine enforces those yet (see
+    wyrm_eval_parse_tree._adopt_messages and compiler_bc/module.py).
 
     `path_pos` has one span per `path` segment, so a jump from `io` in
     `import std::io` can target that segment alone rather than the whole

@@ -1,0 +1,9 @@
+# The imported half of the two-module fixture: nothing here knows it is being
+# imported, which is the point - the importer names it, and binds at load.
+UNITS := "cm"
+
+fn area(width, height):
+    return width * height
+
+fn label(value):
+    return str(value) + UNITS

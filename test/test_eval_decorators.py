@@ -3,7 +3,7 @@ what it printed.
 
 The sample is the interesting part: it drives every node kind through
 `@__identity` (a full encode/decode round trip), then uses decorators written
-in wyrm (samples/decolib.wy, reached through `import static`) to rewrite
+in wyrm (samples/decolib.wy, whose messages the sample imports) to rewrite
 bodies, read signatures, splice templates, and answer objects with a
 `__sexpr` hook. This file is the assertion side of that; the tests below it
 cover the failure modes the sample can't, since a sample that raised wouldn't
@@ -275,21 +275,24 @@ def test_parse_of_bad_syntax_raises_syntax_error():
 
 def run(src: str) -> dict:
     """Evaluate `src` as a top-level script, with samples/ as the script
-    root so `import static decolib` resolves."""
+    root so an `import` of `decolib` resolves."""
     ctx = Scope()
     populate_globals(ctx)
     eval_program(parse(src), ctx)
     return ctx
 
 
-def test_an_unknown_decorator_points_at_import_static():
+def test_an_unknown_decorator_points_at_the_missing_import():
+    """A decorator is a bare selector, so the common cause is a module whose
+    messages never reached this one's table - the error says that, and does
+    not misattribute it to `import static`, which is about not carrying a
+    compile-time dependency into the runtime."""
     with pytest.raises(DecoratorError) as excinfo:
         run("@nosuchthing fn f():\n    pass\n")
     message = str(excinfo.value)
     assert "@nosuchthing" in message
-    assert "import static" in message, (
-        "the common cause is a module imported without `static`, so say so"
-    )
+    assert "brings its messages into scope" in message
+    assert "import static" not in message
 
 
 def test_the_error_names_the_decorator_and_the_use_site_line():

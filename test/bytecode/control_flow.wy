@@ -1,0 +1,44 @@
+# Stage-0 control flow: the branch chain, both loops, break/continue, the
+# else clause of a for loop, and the statement-value rules that make a
+# function's last statement its result.
+fn classify(n):
+    if n < 0:
+        "negative"
+    elif n == 0:
+        "zero"
+    else:
+        "positive"
+
+fn maybe(n):
+    if n > 0:
+        "yes"
+
+fn count_up(limit):
+    var total = 0
+    var i = 0
+    while i < limit:
+        i = i + 1
+        total = total + i
+    return total
+
+fn first_big(items, floor):
+    var found = nil
+    for item in items:
+        if item < floor:
+            continue
+        found = item
+        break
+    else:
+        found = "none"
+    return found
+
+fn defaulted(value):
+    # A forward declaration starts Unset, which is an error, so `?=` fires.
+    var chosen: str
+    chosen ?= value
+    return chosen
+
+println(classify(-1), classify(0), classify(1))
+println(maybe(-1))
+println(count_up(4))
+println(defaulted("given"))

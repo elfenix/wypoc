@@ -139,11 +139,11 @@ def test_expand_decorators_reaches_nested_decorators():
     assert "decorat" not in text
 
 
-def test_expand_decorators_runs_imports_for_static_decorators():
-    """A decorator reachable only through `import static` needs that import
-    to actually run before it expands - expand_decorators executes a
-    top-level import for real rather than just walking over it, exactly
-    like ordinary execution would by the time it reaches the decorator.
+def test_expand_decorators_runs_imports_before_expanding():
+    """A decorator's module has to have run before the decorator expands, so
+    expand_decorators executes a top-level import for real rather than just
+    walking over it, exactly like ordinary execution would by the time it
+    reaches the decorator.
     `decolib`'s `unchanged` decorator (samples/decolib.wy) answers `this`
     untouched, so this only has to prove the module loaded far enough for
     the decorator to be reachable at all, not what it did."""

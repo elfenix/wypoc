@@ -1,0 +1,52 @@
+WYA 1 paint
+
+SECTION header
+0000: 27 00 00 00 02 6E 00 06 00 00 00 70 61 69 6E 74 ; n: "paint"
+0010: 00 10 76 00 01 00 00 00 10 67 00 06 00 00 00 10 ; v: 1; g: 6; l: 2
+0020: 6C 00 02 00 00 00 00
+
+SECTION statics
+0000: 14 00 00 00 02 30 00 08 00 00 00 70 61 6C 65 74 ; [0] str "palette"
+0010: 74 65 00 00
+
+SECTION functions
+0000: 3A 00 00 00 03 30 00 32 00 00 00 02 6E 00 09 00 ; [0] describe  p:[]  l:3  c:14  f:0
+0010: 00 00 64 65 73 63 72 69 62 65 00 04 70 00 05 00
+0020: 00 00 00 10 6C 00 03 00 00 00 10 63 00 0E 00 00
+0030: 00 10 66 00 00 00 00 00 00 00
+
+SECTION code
+; module init
+0000: 47 00 00 00                                     ; import L0 <- static#0   ("palette")
+0004: 43 00 00 00                                     ; gset g0 <- L0   (palette)
+0008: B5 00 00 00 00 00 00 00                         ; import_star static#0 except 0, 0 names   ("palette")
+0010: A8 00 00 00 00 00 00 00                         ; closure L0 <- fn#0, 0 caps
+0018: 43 00 01 00                                     ; gset g1 <- L0   (describe)
+;   paint.wy:10
+001C: 42 00 05 00                                     ; gget L0 <- g5   (println)
+0020: 42 01 01 00                                     ; gget L1 <- g1   (describe)
+0024: A0 00 01 00 00 00 01 00                         ; call base=L1 argc=0 nres=1
+002C: A0 01 00 00 00 00 01 00                         ; call base=L0 argc=1 nres=1
+0034: 02 00 00 00                                     ; return count=0
+; fn describe (word offset 14)
+;   paint.wy:8
+0038: 42 00 02 00                                     ; gget L0 <- g2   (mix)
+003C: 42 01 03 00                                     ; gget L1 <- g3   (PRIMARY)
+0040: 42 02 04 00                                     ; gget L2 <- g4   (SECONDARY)
+0044: A0 02 00 00 00 00 01 00                         ; call base=L0 argc=2 nres=1
+004C: 02 01 00 00                                     ; return L0 count=1
+
+SECTION debug
+0000: 2D 00 00 00 02 66 00 09 00 00 00 70 61 69 6E 74 ; f: "paint.wy"
+0010: 2E 77 79 00 03 6C 6E 00 14 00 00 00 10 37 00 0A ; ln: {'7': 10, '14': 8}
+0020: 00 00 00 10 31 34 00 08 00 00 00 00 00
+
+SECTION exports
+0000: 20 00 00 00 10 70 61 6C 65 74 74 65 00 00 00 00 ; palette: 0
+0010: 00 10 64 65 73 63 72 69 62 65 00 01 00 00 00 00 ; describe: 1
+
+SECTION free
+0000: 37 00 00 00 10 6D 69 78 00 02 00 00 00 10 50 52 ; mix: 2; PRIMARY: 3
+0010: 49 4D 41 52 59 00 03 00 00 00 10 53 45 43 4F 4E ; SECONDARY: 4
+0020: 44 41 52 59 00 04 00 00 00 10 70 72 69 6E 74 6C ; println: 5
+0030: 6E 00 05 00 00 00 00

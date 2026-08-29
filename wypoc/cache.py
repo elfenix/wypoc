@@ -9,11 +9,11 @@ Where the cache lives, per script:
        (config.py), when set - opt-in, and takes priority over the local
        directory below when it's set. Cache file named by the sha256 of
        the script's absolute path, so scripts from many directories can
-       share one cache directory without colliding: `<hexdigest>.wyc`.
+       share one cache directory without colliding: `<hexdigest>.wy_ast`.
     2. otherwise, `<script_dir>/__wycache__/` - automatic, the same way
        Python creates `__pycache__/` next to a module it imports, no
        opt-in needed. Cache file named after the script itself: `foo.wy`
-       -> `__wycache__/foo.wyc`.
+       -> `__wycache__/foo.wy_ast`.
 
 Either directory is created on demand if it doesn't exist yet. If that
 creation (or any other part of writing/reading the cache) fails - a
@@ -27,6 +27,12 @@ exactly; anything else - missing file, corrupt pickle, a dataclass shape
 that's drifted since a wypoc upgrade, a header that doesn't match - is
 just a miss, and `save` overwrites the stale entry, same as a first run.
 
+A cache directory holds two kinds of entry, side by side and
+independent of each other: the pickled trees above (`foo.wy_ast`, the
+tree walker's), and - for `wyrm --vm` - the compiled bytecode image the
+VM runs (`foo.wyc`, see the second half of this module). Neither one
+being present says anything about the other.
+
 Proof-of-concept only: pickle, no format versioning, no security
 hardening, no cross-interpreter guarantees.
 """
@@ -37,7 +43,7 @@ import pickle
 from wypoc import config as config_mod
 
 CACHE_DIR_NAME = "__wycache__"
-CACHE_EXT = ".wyc"
+CACHE_EXT = ".wy_ast"
 
 
 def _local_cache_dir(abs_script_path: str) -> str:
@@ -104,3 +110,65 @@ def save(script_path: str, tree) -> None:
         os.replace(tmp_path, cache_path)
     except OSError:
         pass
+
+
+# --------------------------------------------------------------------------
+# Compiled module images (`--vm`)
+#
+# The same two directories, the same best-effort rules, but holding the
+# bytecode image the VM runs (doc/wyc-format.md) rather than a pickled
+# tree: `foo.wy` -> `__wycache__/foo.wyc`. A hit here skips both parsing
+# and compiling, the way a `__pycache__/foo.pyc` skips both for Python.
+#
+# Freshness is the image file's own mtime against the source's, rather
+# than a header inside the image: the `.wyc` container has no field to
+# hang that on, and a proof-of-concept cache next to the source doesn't
+# need one.
+
+IMAGE_EXT = ".wyc"
+
+
+def image_file_for(script_path: str) -> str:
+    """Where `script_path`'s compiled image lives - `cache_file_for`'s
+    directory rules exactly, with the image extension."""
+    abs_path = os.path.abspath(script_path)
+    global_dir = config_mod.load().get("global_cache")
+    if global_dir:
+        global_dir = os.path.abspath(os.path.expanduser(global_dir))
+        digest = hashlib.sha256(abs_path.encode("utf-8")).hexdigest()
+        return os.path.join(global_dir, digest + IMAGE_EXT)
+
+    local_dir = _local_cache_dir(abs_path)
+    name = os.path.splitext(os.path.basename(abs_path))[0] + IMAGE_EXT
+    return os.path.join(local_dir, name)
+
+
+def fresh_image_for(script_path: str) -> "str | None":
+    """The path of an up-to-date compiled image for `script_path`, or None
+    if there isn't one yet or the source has been touched since it was
+    written - in which case the caller compiles again and `save_image`
+    overwrites it."""
+    image_path = image_file_for(script_path)
+    try:
+        if os.path.getmtime(image_path) >= os.path.getmtime(script_path):
+            return image_path
+    except OSError:
+        pass
+    return None
+
+
+def save_image(script_path: str, blob: bytes) -> "str | None":
+    """Writes `blob` as `script_path`'s compiled image, creating the
+    directory on demand; answers where it went, or None if it couldn't be
+    written. Best-effort like `save`: an unwritable cache directory costs
+    the caller the cache, not the run - it still has the image in hand."""
+    image_path = image_file_for(script_path)
+    try:
+        os.makedirs(os.path.dirname(image_path), exist_ok=True)
+        tmp_path = f"{image_path}.tmp.{os.getpid()}"
+        with open(tmp_path, "wb") as f:
+            f.write(blob)
+        os.replace(tmp_path, image_path)
+        return image_path
+    except OSError:
+        return None

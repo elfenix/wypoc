@@ -1,0 +1,26 @@
+# Stage-1a error flow: `try` hands an error straight back, `catch` supplies a
+# value instead, `catch return` leaves the function, and `defer` blocks run on
+# the way out.
+fn checked(table, key):
+    # `try` returns the error to our own caller if the lookup failed.
+    var found = try table[key]
+    return found
+
+fn defaulted(table, key):
+    return table[key] catch "missing"
+
+fn early(table, key):
+    value := table[key] catch return "gave up"
+    return value
+
+fn traced(table, key):
+    var log = "started"
+    defer:
+        log = "finished"
+    return defaulted(table, key)
+
+table := {"k": "value"}
+println(checked(table, "k"))
+println(defaulted(table, "absent"))
+println(early(table, "absent"))
+println(traced(table, "k"))

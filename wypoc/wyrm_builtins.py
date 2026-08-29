@@ -301,6 +301,19 @@ class Pair:
         # turns it into a catchable WyrmError, same as an out-of-range list
         # index, so an improper-list walk-off or a non-int index lands there
         # rather than crashing.
+        return self._node_at(index).car
+
+    def __setitem__(self, index, value):
+        # The write half of `__getitem__`: `pair_list[i] = v` replaces that
+        # cell's car in place, the same mutation `$set_car` performs one cell
+        # at a time. Without it a pair list would be the one indexable value
+        # that can be read but not written - and the bytecode compiler builds
+        # a mutated closure variable's capture cell out of exactly this
+        # (a one-element `$[...]` plus getidx/setidx, see
+        # doc/llm-bytecode.md's capture cells), so both halves have to exist.
+        self._node_at(index).car = value
+
+    def _node_at(self, index) -> "Pair":
         if not isinstance(index, int) or isinstance(index, bool):
             raise TypeError(f"pair index must be an int (got {type(index).__name__})")
         if index < 0:
@@ -312,7 +325,7 @@ class Pair:
             node = node.cdr
         if not isinstance(node, Pair):
             raise IndexError("pair index out of range")
-        return node.car
+        return node
 
 
 class _Nil:

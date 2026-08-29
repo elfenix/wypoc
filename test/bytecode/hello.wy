@@ -1,0 +1,5 @@
+# hello.wy - Appendix A of doc/llm-bytecode.md, byte for byte.
+fn greet(name):
+    return "Hello " + name
+
+println(greet("World"))

@@ -1,0 +1,28 @@
+# The decorator half of the decorator fixture, written in wyrm.
+#
+# A decorator is a message on TreeBase: it receives the tree of whatever it
+# decorates and answers the tree to compile instead. Decorators run at compile
+# time (doc/llm-bytecode.md 7.2), so by the time the bytecode compiler lowers
+# the importing module, no `Decorated` node is left in it.
+fn nth(node, n) -> TreeBase:
+    i := 0
+    while i < n:
+        node = cdr(node)
+        i = i + 1
+    return car(node)
+
+# A `fn` node is $['fn, name, results, rest, kwargs, params, dispatch, body].
+_FN_BODY := 7
+
+# Answers its subject unchanged - the identity decorator.
+fn [TreeBase] unchanged():
+    return this
+
+# Prepends a `println` to a definition's body.
+fn [TreeBase] traced(label):
+    s := sexpr(this)
+    announce := $['expr_stmt, $['call, $['name, 'println], [$['str, label]]]]
+    out := [announce]
+    for stmt in nth(s, _FN_BODY):
+        out ! append(stmt)
+    return $['fn, nth(s, 1), nth(s, 2), nth(s, 3), nth(s, 4), nth(s, 5), nth(s, 6), out]

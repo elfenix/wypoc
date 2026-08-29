@@ -1,0 +1,10 @@
+# A wildcard import registers a whole namespace for the resolution search
+# (doc/llm-bytecode.md 6.2), so `mix` and `PRIMARY` are reached by name with
+# no local binding - each becomes a single-component relocation resolved at
+# bind time rather than a compile-time refusal.
+import palette::*
+
+fn describe():
+    return mix(PRIMARY, SECONDARY)
+
+println(describe())

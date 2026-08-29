@@ -4,7 +4,7 @@ import pytest
 
 from wypoc import config, wyrm_modules
 from wypoc.parse import parse
-from wypoc.wyrm_eval_parse_tree import eval_program
+from wypoc.wyrm_eval_parse_tree import Scope, eval_program, populate_globals
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SAMPLES_DIR = os.path.join(REPO_ROOT, "wypoc", "samples")
@@ -65,8 +65,17 @@ def sample_source(name: str) -> str:
 
 
 def eval_sample(name: str, ctx: dict | None = None) -> dict:
+    """Run a sample the way cli.py runs a script: in a scope that already has
+    the builtins and the prelude.
+
+    The bare `{}` this used to default to made every sample depend on
+    `import std::io::*` dragging the whole baseline in behind it, which is not
+    something a wildcard import is supposed to do (doc/addendum.md's layer 3)
+    and not something any real entry point produces - cli.py, the REPL and
+    import_module all call populate_globals first."""
     if ctx is None:
-        ctx = {}
+        ctx = Scope()
+        populate_globals(ctx)
     eval_program(parse(sample_source(name)), ctx)
     return ctx
 
@@ -82,3 +91,46 @@ def eval_sample_with_builtins(name: str) -> dict:
     return eval_sample(name, ctx)
 
 
+
+
+# --------------------------------------------------------------------------
+# the bytecode fixtures (test/bytecode/), shared by the compiler and VM tests
+
+BYTECODE_DIR = os.path.join(REPO_ROOT, "test", "bytecode")
+
+
+def bytecode_fixture_names() -> list:
+    """Every `.wy` under test/bytecode/, as paths relative to it."""
+    found = []
+    for root, _dirs, files in os.walk(BYTECODE_DIR):
+        for name in files:
+            if name.endswith(".wy"):
+                found.append(os.path.relpath(os.path.join(root, name), BYTECODE_DIR))
+    return sorted(found)
+
+
+def compile_bytecode_fixture(name: str, **options):
+    """Compile one fixture to a `ModuleImage`, with the search root pointed at
+    its own directory so a fixture importing a neighbour resolves the way it
+    would from the command line."""
+    from wypoc.compiler_bc import compile_module
+
+    path = os.path.join(BYTECODE_DIR, name)
+    with open(path) as handle:
+        source = handle.read()
+    previous = wyrm_modules.set_script_root(os.path.dirname(path))
+    try:
+        return compile_module(
+            parse(source, filename=name),
+            os.path.splitext(os.path.basename(name))[0],
+            name,
+            **options,
+        )
+    finally:
+        wyrm_modules.set_script_root(previous)
+
+
+def compile_bytecode_source(source: str = "println(1)\n", name: str = "m", **options):
+    from wypoc.compiler_bc import compile_module
+
+    return compile_module(parse(source, filename=f"{name}.wy"), name, f"{name}.wy", **options)

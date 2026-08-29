@@ -1,0 +1,11 @@
+# The importing half. Every name reaching into `geometry` is a relocation
+# resolved at bind time - the compiler never looks inside the dependency
+# (doc/llm-bytecode.md 6.3).
+import geometry
+import geometry::(area, label as pretty)
+
+fn summary(width, height):
+    return pretty(area(width, height))
+
+println(summary(2, 3))
+println(geometry::UNITS)

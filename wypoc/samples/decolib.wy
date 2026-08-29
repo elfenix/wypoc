@@ -1,10 +1,10 @@
 # Decorators, written in wyrm, for samples/decorators.wy.
 #
 # A decorator is a message on TreeBase: it receives the tree of whatever it
-# decorates and answers the tree to compile instead. The module importing it
-# has to reach it through `import static` - a static import runs the module
-# and adopts its messages, and a decorator whose module has not run cannot be
-# called.
+# decorates and answers the tree to compile instead. A decorator name is a
+# bare selector, never a path, so the importing module can call one from here
+# once this module's messages are in its own message table - `import
+# decolib::*` puts them there.
 #
 # `sexpr(x)` is the canonical s-expression of a tree (see wypoc/sexpr.py's
 # module docstring for the format).

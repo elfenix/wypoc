@@ -219,8 +219,8 @@ def test_module_signal_emit_and_connect_work_unchanged(tmp_path, monkeypatch):
 
 def test_module_message_dispatch_does_not_need_import_static(tmp_path, monkeypatch):
     """`mod ! name(...)` resolves against the module's own message table
-    (message_table(mod.ctx)), not the sender's - unlike a decorator, it
-    doesn't need `import static`'s message-table adoption to be reachable."""
+    (message_table(mod.ctx)), not the sender's - unlike a bare selector, it
+    needs nothing adopted into the sender's table to be reachable."""
     (tmp_path / "svc.wy").write_text(
         "fn [] a_method():\n"
         "    return 42\n"

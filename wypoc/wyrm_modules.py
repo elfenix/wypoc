@@ -54,7 +54,7 @@ def set_include_paths(paths) -> list:
 
 def set_script_root(path: "str | None") -> "str | None":
     """Register the directory a script is being run from, so its own
-    neighbours are importable - `import static decolib` next to `main.wy`
+    neighbours are importable - `import decolib` next to `main.wy`
     resolves without WYRM_PATH being set at all, the same way Python puts a
     script's directory on sys.path. Set by cli.py (and by tests running a
     sample); returns the previous value so a caller can restore it."""
@@ -94,6 +94,30 @@ def prelude_path() -> str:
     independent of WYRM_PATH/search_paths since it isn't reached through an
     `import` statement."""
     return os.path.join(DEFAULT_COREPATH, "prelude.wy")
+
+
+def resolve_image_file(path_segments, roots=None):
+    """Find the compiled `.wyc` image for a `mod::sub::leaf` path, or None.
+
+    The same search `resolve_module_file` does, for the other kind of file a
+    module can arrive as (doc/wyc-format.md). Kept separate rather than folded
+    in because the two callers want opposite preferences: the bytecode VM
+    reaches for an image first - it is already running compiled code, and the
+    image is what its dependency was built alongside - while the interpreter
+    prefers source and only falls back to an image when there is no `.wy` at
+    all. Neither preference is hidden inside the search that way.
+    """
+    if roots is None:
+        roots = search_paths()
+    for root in roots:
+        candidate = os.path.join(root, *path_segments)
+        file_candidate = candidate + ".wyc"
+        if os.path.isfile(file_candidate):
+            return file_candidate, False
+        init_candidate = os.path.join(candidate, "__init__.wyc")
+        if os.path.isfile(init_candidate):
+            return init_candidate, True
+    return None
 
 
 def resolve_module_file(path_segments, roots=None):

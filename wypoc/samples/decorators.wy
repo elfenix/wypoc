@@ -209,9 +209,13 @@ println("nested scope: " + str(outer()))
 
 # --- decorators written in wyrm -------------------------------------------
 
-# `import static` runs the module and adopts its messages, which is what
-# makes its decorators callable from here. The values printed below are what
-# the rewritten code does.
+# A decorator is a bare selector, so it is callable here once decolib's
+# messages are in this module's message table. `import decolib::*` is the
+# idiom for that; the static import below also does it in wypoc, which is an
+# artifact of its per-module message tables, not what `import static` is for
+# (it marks a dependency wanted at compile time only, so that it does not
+# become a runtime dependency). The values printed below are what the
+# rewritten code does.
 import static decolib
 
 @unchanged fn kept(a, b):

@@ -301,9 +301,9 @@ class Session:
 
     def reset(self, script_root: "str | None" = None) -> None:
         # The working directory plays the role a script's own directory
-        # plays for `wyrm script.wy` (see cli.py), so `import static
-        # decolib` finds a module sitting next to where the REPL was
-        # started, with no WYRM_PATH set.
+        # plays for `wyrm script.wy` (see cli.py), so `import decolib`
+        # finds a module sitting next to where the REPL was started, with
+        # no WYRM_PATH set.
         wyrm_modules.set_script_root(script_root or os.getcwd())
         self.ctx = Scope()
         populate_globals(self.ctx)

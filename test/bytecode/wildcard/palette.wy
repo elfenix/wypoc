@@ -1,0 +1,7 @@
+# The wildcard-imported half: an ordinary module, unaware it is imported this
+# way. Only the importer's `import_star` decides that.
+PRIMARY := "red"
+SECONDARY := "green"
+
+fn mix(first, second):
+    return first + " and " + second

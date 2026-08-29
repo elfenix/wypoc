@@ -1,0 +1,20 @@
+# Multi-value returns and the call windows that read them back: a function
+# returns a window of values, and a caller declares how many it wants.
+fn divmod(a, b):
+    return a / b, a % b
+
+fn shift(a, b, c):
+    return b, c, a
+
+fn only_one(a, b):
+    # One target, two results: the extras are dropped at the call (spec 1).
+    var first = divmod(a, b)
+    return first
+
+fn passthrough(a, b, c):
+    var first = shift(a, b, c)
+    return first
+
+println(divmod(17, 5))
+println(only_one(17, 5))
+println(passthrough(1, 2, 3))

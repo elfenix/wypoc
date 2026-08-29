@@ -35,6 +35,10 @@ semantics validation, not memory layout or dispatch performance.
   exception below.
 - `doc/language-spec.md` — prose spec with worked examples (message dispatch, modules,
   classes, control flow, etc.).
+- `doc/wyc-format.md` — the binary module image: container, sections, instruction
+  encoding, opcode set and load/link semantics. Self-contained, and the document
+  to hand someone writing a VM. `doc/llm-bytecode.md` is its compiler-facing
+  counterpart (how each construct lowers, and where this PoC trails the spec).
 - `doc/design.md` — the wider Wyrm Object Extensions design (goals, inspirations, data
   model) — the "why", shared with `wyrm/doc/design.md`.
 - `wypoc/wyrm.gram` — the actual `pegen` grammar this interpreter runs on. Its header
@@ -49,6 +53,24 @@ doc/                 language spec / grammar / design docs (see above)
 editors/vscode/       syntax highlighting + LSP client extension
 tools/                dev scripts (generate_parser.py — regenerates parser.py)
 wypoc/
+  compiler_bc/         the bytecode compiler (doc/llm-bytecode.md) - `wyrm
+                        --build-bc file.wy` writes a module image as .wy_a
+                        (ASCII listing), .wyc (binary) and .c (C arrays).
+                        opcodes.py is the single source of truth for the
+                        instruction set and generates include/wyrm/opcode.h;
+                        verify.py structurally checks every image emitted.
+                        Section 9 of the spec lists where the PoC's grammar or
+                        interpreter trails the language spec, and what the
+                        compiler does about each
+  vm/                  the bytecode VM (doc/wyc-format.md, planned in
+                        gen/bytecode-vm-plan.md) - `wyrm module.wyc` loads a
+                        .wyc image and runs it, reusing wyrm_eval_parse_tree's
+                        runtime rather than reimplementing wyrm's semantics, so
+                        compiled and interpreted modules can call and import
+                        each other in both directions. Its conformance gate is
+                        output equivalence with the interpreter over the whole
+                        sample corpus (test/test_vm_samples.py); where the two
+                        cannot agree, each case is named with its reason
   corelib/             small wyrm-language standard library (shapes.wy, std/, wyrm/),
                         installed as package data
   wyrm_tokenizer.py    hand-rolled lexer -> tokenize.TokenInfo stream
@@ -89,9 +111,9 @@ parsed but unused, diamond inheritance uses a simplified linearization, LSP has 
 references/rename, name resolution is span containment rather than a real scope chain).
 
 **Decorators run.** `@dec(args) X` hands `X`'s tree to `dec` and evaluates the tree
-`dec` answers instead; a decorator is `fn [TreeBase] dec(...)`, reached through
-`import static`, and it reads and builds trees through the unqualified `sexpr(x)`
-builtin. `wypoc/samples/decorators.wy` (driven by `test/test_eval_decorators.py`) is the
+`dec` answers instead; a decorator is `fn [TreeBase] dec(...)`, reachable when its
+module's messages are in the importing module's message table (`import m::*`), and it
+reads and builds trees through the unqualified `sexpr(x)` builtin. `wypoc/samples/decorators.wy` (driven by `test/test_eval_decorators.py`) is the
 conformance script and `wypoc/samples/decolib.wy` is a decorator library written in
 wyrm. When changing the AST, keep `wypoc/sexpr.py`'s table in step - a node kind with no
 row there cannot cross into a decorator, and `test/test_sexpr.py` asserts each kind's
@@ -106,11 +128,19 @@ python -m venv .venv && .venv/bin/python -m pip install -e ".[lsp,repl,dev]"   #
 .venv/bin/pytest test/test_grammar.py                  # run one test file
 
 .venv/bin/wyrm path/to/script.wy                       # run a .wy script
+.venv/bin/wyrm path/to/module.wyc                      # run a compiled image (the VM)
+.venv/bin/wyrm --vm path/to/script.wy                  # compile to __wycache__/*.wyc, then
+                                                        # run it on the VM (cached like .pyc)
 .venv/bin/wyrm                                         # interactive REPL (readline)
 .venv/bin/wyrm --tui                                   # interactive REPL (full screen)
 .venv/bin/python tools/generate_parser.py              # regenerate parser.py
                                                         # after editing wyrm.gram
 ```
+
+`wypoc/compiler_bc/include/wyrm/opcode.h` is generated output too — edit the
+opcode table in `wypoc/compiler_bc/opcodes.py`, then run
+`.venv/bin/python tools/generate_opcode_header.py`. A test fails if the
+checked-in header has drifted from the table.
 
 `parser.py` is generated output — edit `wypoc/wyrm.gram`, then regenerate; never
 hand-edit `parser.py` directly. Use `tools/generate_parser.py`, **not** plain
